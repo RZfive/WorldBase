@@ -1022,6 +1022,7 @@ async fn tool_call(
         name,
         &args,
         ctx.effective_interactive(),
+        false,
         None,
     )
     .await;
@@ -1452,6 +1453,7 @@ fn schedule_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
                 schedule,
                 selected_skill_ids: selected_skill_ids.clone(),
                 selected_mcp_server_ids: selected_mcp_server_ids.clone(),
+                tool_policy: parse_tool_policy(&params)?,
                 retry_policy,
                 created_by: created_by.clone(),
             };
@@ -1481,6 +1483,7 @@ fn schedule_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
         entry.enabled = enabled;
         entry.selected_skill_ids = selected_skill_ids;
         entry.selected_mcp_server_ids = selected_mcp_server_ids;
+        entry.tool_policy = parse_tool_policy(&params)?;
         entry.retry_policy = retry_policy;
         entry.created_by = created_by;
         apply_schedule_migration_fields(&mut entry, &params);
@@ -1678,6 +1681,9 @@ fn schedule_update(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
     if params.get("retryPolicy").is_some() || params.get("retry_policy").is_some() {
         entry.retry_policy = parse_retry_policy(&params)?;
     }
+    if params.get("toolPolicy").is_some() || params.get("tool_policy").is_some() {
+        entry.tool_policy = parse_tool_policy(&params)?;
+    }
     if let Some(created_by) = optional_string_value(&params, &["createdBy", "created_by"])? {
         entry.created_by = created_by.trim().to_string();
     }
@@ -1695,11 +1701,24 @@ fn apply_schedule_migration_fields(entry: &mut worldbase_protocol::types::Schedu
     if let Some(hidden) = params.get("hidden").and_then(Value::as_bool) {
         entry.hidden = hidden;
     }
-    if let Ok(Some(provider_id)) = optional_string_value(params, &["providerId", "provider_id"]) {
-        entry.provider_id = Some(provider_id.to_string());
+    // 显式 null = 清除钉扎（回归跟随默认供应商/模型）；缺省 = 不修改。
+    match params.get("providerId").or_else(|| params.get("provider_id")) {
+        Some(Value::Null) => entry.provider_id = None,
+        _ => {
+            if let Ok(Some(provider_id)) =
+                optional_string_value(params, &["providerId", "provider_id"])
+            {
+                entry.provider_id = Some(provider_id.to_string());
+            }
+        }
     }
-    if let Ok(Some(model_id)) = optional_string_value(params, &["modelId", "model_id"]) {
-        entry.model_id = Some(model_id.to_string());
+    match params.get("modelId").or_else(|| params.get("model_id")) {
+        Some(Value::Null) => entry.model_id = None,
+        _ => {
+            if let Ok(Some(model_id)) = optional_string_value(params, &["modelId", "model_id"]) {
+                entry.model_id = Some(model_id.to_string());
+            }
+        }
     }
     if let Ok(Some(last_report_id)) = optional_string_value(params, &["lastReportId", "last_report_id"]) {
         entry.last_report_id = Some(last_report_id.to_string());
@@ -1715,6 +1734,27 @@ fn apply_schedule_migration_fields(entry: &mut worldbase_protocol::types::Schedu
             };
             break;
         }
+    }
+}
+
+/// 解析 Electron 面板/AI 请求里的工具权限模式；缺省或无法识别时保持标准。
+fn parse_tool_policy(params: &Value) -> Result<ScheduleToolPolicy, ErrorObject> {
+    let Some(value) = params
+        .get("toolPolicy")
+        .or_else(|| params.get("tool_policy"))
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(ScheduleToolPolicy::default());
+    };
+    let text = value
+        .as_str()
+        .ok_or_else(|| params_err("toolPolicy must be a string"))?;
+    match text.trim() {
+        "" | "standard" => Ok(ScheduleToolPolicy::Standard),
+        "autoApprove" | "auto_approve" => Ok(ScheduleToolPolicy::AutoApprove),
+        other => Err(params_err(format!(
+            "invalid toolPolicy: {other} (expected standard or autoApprove)"
+        ))),
     }
 }
 
@@ -1763,28 +1803,30 @@ async fn schedule_run(
     ctx: &ConnectionContext,
     params: Value,
 ) -> Result<Value, ErrorObject> {
-    let (task, schedule_id, name) = if let Some(task) = optional_string_value(&params, &["task"])? {
-        (task.to_string(), None, String::new())
-    } else {
-        let id = required_string_param(&params, &["id"], "task or id")?;
-        let entry = hub
-            .scheduler
-            .list()
-            .map_err(internal)?
-            .into_iter()
-            .find(|entry| entry.id == id)
-            .ok_or_else(|| ErrorObject::invalid_params(format!("schedule not found: {id}")))?;
-        let name = entry.name.clone();
-        (entry.task, Some(entry.id), name)
-    };
-    if let Some(schedule_id) = &schedule_id {
+    let (task, schedule_id, scheduled_entry) =
+        if let Some(task) = optional_string_value(&params, &["task"])? {
+            (task.to_string(), None, None)
+        } else {
+            let id = required_string_param(&params, &["id"], "task or id")?;
+            let entry = hub
+                .scheduler
+                .list()
+                .map_err(internal)?
+                .into_iter()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| ErrorObject::invalid_params(format!("schedule not found: {id}")))?;
+            let task = entry.task.clone();
+            (task, Some(entry.id.clone()), Some(entry))
+        };
+    if let Some(entry) = &scheduled_entry {
         // Running a stored schedule goes through the scheduled-task bridge so
-        // tool progress and the final report reach the desktop 执行日志.
-        let (stream_id, conversation_id) =
-            crate::agent::start_scheduled_task(hub.clone(), schedule_id, &name, &task)
-                .await
-                .map_err(internal)?;
-        return Ok(json!({ "streamId": stream_id, "conversationId": conversation_id, "scheduleId": schedule_id }));
+        // tool progress and the final report reach the desktop 执行日志. The
+        // stored entry supplies the run context (Skill/MCP selection and tool
+        // policy), matching a scheduler-triggered run.
+        let (stream_id, conversation_id) = crate::agent::start_scheduled_task(hub.clone(), entry)
+            .await
+            .map_err(internal)?;
+        return Ok(json!({ "streamId": stream_id, "conversationId": conversation_id, "scheduleId": entry.id }));
     }
     let conv = hub
         .store
@@ -5518,6 +5560,7 @@ async fn exec_run(
         "execute_command",
         &params,
         ctx.effective_interactive(),
+        false,
         None,
     )
     .await;
@@ -5542,6 +5585,67 @@ mod tests {
     use worldbase_protocol::types::{
         Capabilities, ChatContentPart, ChatMessage, ChatRunContext, Role,
     };
+
+    #[test]
+    fn tool_policy_parses_electron_values_and_rejects_unknowns() {
+        assert_eq!(
+            super::parse_tool_policy(&serde_json::json!({})).unwrap(),
+            worldbase_protocol::types::ScheduleToolPolicy::Standard
+        );
+        assert_eq!(
+            super::parse_tool_policy(&serde_json::json!({ "toolPolicy": "standard" })).unwrap(),
+            worldbase_protocol::types::ScheduleToolPolicy::Standard
+        );
+        assert_eq!(
+            super::parse_tool_policy(&serde_json::json!({ "toolPolicy": "autoApprove" })).unwrap(),
+            worldbase_protocol::types::ScheduleToolPolicy::AutoApprove
+        );
+        assert_eq!(
+            super::parse_tool_policy(&serde_json::json!({ "tool_policy": "auto_approve" })).unwrap(),
+            worldbase_protocol::types::ScheduleToolPolicy::AutoApprove
+        );
+        assert!(super::parse_tool_policy(&serde_json::json!({ "toolPolicy": "sudo" })).is_err());
+    }
+
+    #[test]
+    fn scheduled_task_context_carries_tool_policy_grant() {
+        let workspace = std::env::temp_dir().join(format!(
+            "worldbase-sched-ctx-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = Arc::new(
+            worldbase_memory::Store::open(&workspace.join("app.sqlite")).expect("open test store"),
+        );
+        let hub = Hub::new(workspace.clone(), store).expect("create test hub");
+        let mut entry = worldbase_protocol::types::ScheduleEntry {
+            id: "task_ctx".into(),
+            name: "巡检".into(),
+            cron: String::new(),
+            task: "跑测试".into(),
+            enabled: true,
+            last_run_at: None,
+            next_run_at: None,
+            schedule: None,
+            selected_skill_ids: Vec::new(),
+            selected_mcp_server_ids: Vec::new(),
+            tool_policy: worldbase_protocol::types::ScheduleToolPolicy::Standard,
+            retry_policy: Default::default(),
+            retry_scheduled_at: None,
+            retry_attempt: 0,
+            created_by: "manual".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_status: String::new(),
+            hidden: false,
+            provider_id: None,
+            model_id: None,
+            last_report_id: None,
+        };
+        assert!(!hub.scheduled_task_context(&entry).auto_approve_permissions);
+        entry.tool_policy = worldbase_protocol::types::ScheduleToolPolicy::AutoApprove;
+        assert!(hub.scheduled_task_context(&entry).auto_approve_permissions);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
 
     #[test]
     fn dropping_native_group_waiter_cancels_its_spawned_child_run() {

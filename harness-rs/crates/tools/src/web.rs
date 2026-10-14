@@ -1014,16 +1014,16 @@ impl Tool for WebSearchTool {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?;
             for result in results.iter().take(auto_fetch_top_n) {
-                fetched_results.push(
-                    fetch_public_webpage(
-                        &fetch_client,
-                        &result.url,
-                        Some(query),
-                        fetch_max_chars,
-                        fetch_timeout_ms,
-                    )
-                    .await,
-                );
+                let mut fetched = fetch_public_webpage(
+                    &fetch_client,
+                    &result.url,
+                    Some(query),
+                    fetch_max_chars,
+                    fetch_timeout_ms,
+                )
+                .await;
+                classify_fetch_access(&mut fetched);
+                fetched_results.push(fetched);
             }
         }
 
@@ -1059,7 +1059,9 @@ impl Tool for WebSearchTool {
             "fetched_at".into(),
             json!(worldbase_protocol::event::now_rfc3339()),
         );
-        Ok(Value::Object(output))
+        let mut output_value = Value::Object(output);
+        classify_search_access(&mut output_value, sources.len(), source_errors.len());
+        Ok(output_value)
     }
 }
 
@@ -1107,7 +1109,8 @@ impl Tool for WebFetchTool {
             .user_agent("WorldBase AI Agent/1.0")
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        let result = fetch_public_webpage(&client, &url, query, max_chars, timeout_ms).await;
+        let mut result = fetch_public_webpage(&client, &url, query, max_chars, timeout_ms).await;
+        classify_fetch_access(&mut result);
 
         // `web_fetch` predates the Electron-compatible `fetch_webpage` tool.
         // Keep its compact fields for persisted/mobile callers while exposing
@@ -1582,6 +1585,174 @@ async fn fetch_public_webpage(
     failure("Too many redirects".into())
 }
 
+/// Anti-bot / paywall challenge fingerprints scanned in the page title and the
+/// leading content. Kept conservative: markers only escalate a result to
+/// `blocked` when the fetch already looks unusable (non-2xx, or a thin
+/// HTML shell), so an article *mentioning* captchas is never misclassified.
+const CHALLENGE_MARKERS: &[&str] = &[
+    "captcha",
+    "challenge-platform",
+    "cf-challenge",
+    "cf_chl_opt",
+    "checking your browser",
+    "verify you are human",
+    "verify you are a human",
+    "just a moment",
+    "ddos protection",
+    "datadome",
+    "perimeterx",
+    "hcaptcha",
+    "recaptcha",
+    "access denied",
+    "unusual traffic",
+];
+
+/// Pages whose extracted text is shorter than this are treated as JS-only
+/// shells (the interesting content is rendered client-side).
+const THIN_CONTENT_CHARS: usize = 200;
+/// How many characters of content participate in challenge-marker scanning.
+const CHALLENGE_SCAN_CHARS: usize = 4_000;
+
+/// Error substrings produced by `validate_public_target` and URL parsing.
+/// Those targets are rejected on purpose; the workspace-browser fallback must
+/// never be suggested for them, or the app browser would become an SSRF proxy.
+const POLICY_ERROR_MARKERS: &[&str] = &[
+    "blocked target host",
+    "only http and https",
+    "url has no host",
+    "invalid url",
+];
+
+fn contains_marker(haystack: &str, markers: &[&str]) -> bool {
+    let lower = haystack.to_ascii_lowercase();
+    markers.iter().any(|marker| lower.contains(marker))
+}
+
+/// Annotate one `fetch_public_webpage` result with an access classification
+/// plus, when the static fetch cannot serve the model, a hint to retry through
+/// the built-in workspace browser. Fields are additive: `ok`/`content`
+/// semantics stay untouched, so existing callers keep working.
+///
+/// - `access: "ok"` — static fetch succeeded and produced usable text.
+/// - `access: "degraded"` — fetched, but the page is probably a JS shell;
+///   the browser may see much more content.
+/// - `access: "blocked"` — HTTP-level block, anti-bot challenge, timeout, or
+///   every search source failed; retrying the same static request is futile.
+fn classify_fetch_access(result: &mut Value) {
+    let Some(object) = result.as_object_mut() else {
+        return;
+    };
+    let ok = object.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let status = object.get("status").and_then(Value::as_u64).unwrap_or(0);
+    let error = object
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let content = object
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let title = object
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let content_type = object
+        .get("content_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let scan_end = content
+        .char_indices()
+        .nth(CHALLENGE_SCAN_CHARS)
+        .map(|(index, _)| index)
+        .unwrap_or(content.len());
+    let challenge_haystack = format!("{title}\n{}", &content[..scan_end]);
+    let has_challenge_marker = contains_marker(&challenge_haystack, CHALLENGE_MARKERS);
+    let blocked_status = matches!(status, 401 | 403 | 429 | 503);
+    let thin_html = char_count(content) < THIN_CONTENT_CHARS
+        && (content_type.is_empty() || content_type.contains("html"));
+
+    let (access, reason, signals) = if ok {
+        if thin_html && has_challenge_marker {
+            ("blocked", "challenge", vec!["challenge_marker"])
+        } else if thin_html {
+            ("degraded", "thin_content", vec!["thin_content"])
+        } else {
+            ("ok", "", Vec::new())
+        }
+    } else if blocked_status {
+        if has_challenge_marker {
+            (
+                "blocked",
+                "challenge",
+                vec!["http_status", "challenge_marker"],
+            )
+        } else {
+            ("blocked", "http_blocked", vec!["http_status"])
+        }
+    } else if has_challenge_marker {
+        ("blocked", "challenge", vec!["challenge_marker"])
+    } else if error.to_ascii_lowercase().contains("timed out") {
+        ("blocked", "timeout", vec!["timeout"])
+    } else if contains_marker(&error, POLICY_ERROR_MARKERS) {
+        ("blocked", "policy_blocked", Vec::new())
+    } else {
+        ("blocked", "network", vec!["network_error"])
+    };
+
+    object.insert("access".into(), json!(access));
+    if !access.is_empty() && access != "ok" {
+        let mut detail = serde_json::Map::new();
+        detail.insert("reason".into(), json!(reason));
+        if !signals.is_empty() {
+            detail.insert("signals".into(), json!(signals));
+        }
+        object.insert("access_detail".into(), Value::Object(detail));
+    }
+    // Policy-rejected targets (SSRF guard) stay out of reach: no fallback.
+    if reason != "policy_blocked" && access != "ok" {
+        object.insert(
+            "fallback".into(),
+            json!({
+                "suggested_tools": ["open_workspace_tab", "read_current_page"],
+                "hint": "Static fetch cannot serve this page. Open it in the built-in workspace browser instead: call open_workspace_tab with kind \"browser\" and this URL, then read_current_page with mode \"article\" to extract the readable content. The page opens visibly so the user can follow along; use interact_current_page only when the content requires an action (search box, pagination, cookie banner).",
+            }),
+        );
+    }
+}
+
+/// Annotate the aggregate `web_search` result when every configured source
+/// failed — a strong sign the static pipeline is blocked and the workspace
+/// browser should take over.
+fn classify_search_access(output: &mut Value, sources_count: usize, source_errors_count: usize) {
+    let Some(object) = output.as_object_mut() else {
+        return;
+    };
+    let results_empty = object
+        .get("results")
+        .and_then(Value::as_array)
+        .is_some_and(|results| results.is_empty());
+    if !results_empty || source_errors_count == 0 || sources_count == 0 {
+        return;
+    }
+    object.insert("access".into(), json!("blocked"));
+    object.insert(
+        "access_detail".into(),
+        json!({
+            "reason": "search_sources_failed",
+            "signals": ["all_sources_failed"],
+        }),
+    );
+    object.insert(
+        "fallback".into(),
+        json!({
+            "suggested_tools": ["open_workspace_tab", "read_current_page"],
+            "hint": "All static search sources failed. Retry the search in the built-in workspace browser: call open_workspace_tab with kind \"browser\" and a search-engine results URL for this query (for example https://html.duckduckgo.com/html/?q=<url-encoded query> or https://www.bing.com/search?q=<query>), then read_current_page with mode \"article\" to read the result titles and links.",
+        }),
+    );
+}
+
 #[async_trait]
 impl Tool for FetchWebpageTool {
     fn name(&self) -> &str {
@@ -1673,7 +1844,10 @@ impl Tool for FetchWebpageTool {
             .build()?;
         let mut results = Vec::with_capacity(urls.len());
         for url in urls {
-            results.push(fetch_public_webpage(&client, &url, query, max_chars, timeout_ms).await);
+            let mut result =
+                fetch_public_webpage(&client, &url, query, max_chars, timeout_ms).await;
+            classify_fetch_access(&mut result);
+            results.push(result);
         }
         let success_count = results
             .iter()
@@ -1739,6 +1913,159 @@ mod tests {
         assert!(properties.contains_key("query"));
         assert!(properties.contains_key("max_chars"));
         assert!(properties.contains_key("timeout_ms"));
+    }
+
+    fn fetch_failure(error: &str) -> Value {
+        json!({
+            "url": "https://example.com/page",
+            "ok": false,
+            "content": "",
+            "truncated": false,
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "error": error,
+        })
+    }
+
+    #[test]
+    fn classify_marks_http_blocks_with_browser_fallback() {
+        let mut result = json!({
+            "url": "https://example.com/page",
+            "ok": false,
+            "status": 403,
+            "status_text": "Forbidden",
+            "content_type": "text/html",
+            "content": "denied",
+            "truncated": false,
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "error": "HTTP 403 Forbidden",
+        });
+        classify_fetch_access(&mut result);
+        assert_eq!(result["access"], "blocked");
+        assert_eq!(result["access_detail"]["reason"], "http_blocked");
+        assert_eq!(
+            result["fallback"]["suggested_tools"][0],
+            "open_workspace_tab"
+        );
+        assert!(result["fallback"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("read_current_page"));
+    }
+
+    #[test]
+    fn classify_marks_challenge_shells_as_blocked_even_on_http_200() {
+        let mut result = json!({
+            "url": "https://example.com/page",
+            "ok": true,
+            "status": 200,
+            "status_text": "OK",
+            "content_type": "text/html; charset=utf-8",
+            "title": "Just a moment...",
+            "content": "cf-challenge please wait enable javascript and cookies",
+            "truncated": false,
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "error": Value::Null,
+        });
+        classify_fetch_access(&mut result);
+        assert_eq!(result["access"], "blocked");
+        assert_eq!(result["access_detail"]["reason"], "challenge");
+        assert!(result.get("fallback").is_some());
+    }
+
+    #[test]
+    fn classify_marks_thin_html_as_degraded() {
+        let mut result = json!({
+            "url": "https://example.com/spa",
+            "ok": true,
+            "status": 200,
+            "status_text": "OK",
+            "content_type": "text/html; charset=utf-8",
+            "title": "SPA",
+            "content": "<div id=app></div>",
+            "truncated": false,
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "error": Value::Null,
+        });
+        classify_fetch_access(&mut result);
+        assert_eq!(result["access"], "degraded");
+        assert_eq!(result["access_detail"]["reason"], "thin_content");
+        assert!(result.get("fallback").is_some());
+    }
+
+    #[test]
+    fn classify_keeps_rich_content_ok_without_extra_fields() {
+        let body = "real article body ".repeat(40);
+        let mut result = json!({
+            "url": "https://example.com/docs",
+            "ok": true,
+            "status": 200,
+            "status_text": "OK",
+            "content_type": "text/html; charset=utf-8",
+            "title": "Docs",
+            "content": body,
+            "truncated": false,
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "error": Value::Null,
+        });
+        classify_fetch_access(&mut result);
+        assert_eq!(result["access"], "ok");
+        assert!(result.get("access_detail").is_none());
+        assert!(result.get("fallback").is_none());
+    }
+
+    #[test]
+    fn classify_never_suggests_fallback_for_policy_blocked_targets() {
+        for error in [
+            "Blocked target host",
+            "Only http and https URLs are allowed",
+            "Invalid URL",
+        ] {
+            let mut result = fetch_failure(error);
+            classify_fetch_access(&mut result);
+            assert_eq!(result["access"], "blocked");
+            assert_eq!(result["access_detail"]["reason"], "policy_blocked");
+            assert!(result.get("fallback").is_none(), "error: {error}");
+        }
+    }
+
+    #[test]
+    fn classify_flags_timeouts_as_blocked() {
+        let mut result = fetch_failure("request timed out after 10000ms");
+        classify_fetch_access(&mut result);
+        assert_eq!(result["access"], "blocked");
+        assert_eq!(result["access_detail"]["reason"], "timeout");
+        assert!(result.get("fallback").is_some());
+    }
+
+    #[test]
+    fn classify_search_requires_all_sources_failed_and_empty_results() {
+        let mut all_failed = json!({
+            "query": "q",
+            "engine": "bing + duckduckgo",
+            "results": [],
+            "source_errors": [
+                { "source": "bing", "error": "HTTP 403" },
+                { "source": "duckduckgo", "error": "HTTP 429" }
+            ],
+            "fetched_at": "2026-01-01T00:00:00Z",
+        });
+        classify_search_access(&mut all_failed, 2, 2);
+        assert_eq!(all_failed["access"], "blocked");
+        assert_eq!(
+            all_failed["access_detail"]["reason"],
+            "search_sources_failed"
+        );
+        assert!(all_failed.get("fallback").is_some());
+
+        // Results exist: nothing to flag even with partial source errors.
+        let mut partial = json!({ "query": "q", "results": [{ "rank": 1 }], "source_errors": [{ "source": "bing", "error": "x" }] });
+        classify_search_access(&mut partial, 2, 1);
+        assert!(partial.get("access").is_none());
+
+        // Empty results without source errors is a legit no-hit query.
+        let mut no_hits = json!({ "query": "q", "results": [] });
+        classify_search_access(&mut no_hits, 2, 0);
+        assert!(no_hits.get("access").is_none());
     }
 
     #[tokio::test]

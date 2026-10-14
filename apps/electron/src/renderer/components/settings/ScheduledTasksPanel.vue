@@ -2,9 +2,11 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ScheduledTaskReportDialog from './ScheduledTaskReportDialog.vue'
+import ProviderModelDropdown from '../chat/layout/ProviderModelDropdown.vue'
 import { renderMarkdown } from '../chat/markdown'
 
 type ScheduleKind = 'once' | 'interval' | 'daily' | 'weekly' | 'dates'
+type ToolPolicy = 'standard' | 'autoApprove'
 
 interface ScheduledTaskDraft {
   id: string
@@ -23,6 +25,11 @@ interface ScheduledTaskDraft {
   nextDateInput: string
   selectedSkillIds: string[]
   selectedMcpServerIds: string[]
+  toolPolicy: ToolPolicy
+  /** '' = 跟随执行模型 / 默认；否则为任务级钉扎。 */
+  providerId: string
+  /** '' = 跟随供应商默认；否则为任务级钉扎。 */
+  modelId: string
   maxRetries: number
   retryDelayMinutes: number
 }
@@ -31,6 +38,12 @@ const tasks = ref<ScheduledTaskDefinition[]>([])
 const reports = ref<ScheduledTaskRunReport[]>([])
 const skills = ref<SkillInfo[]>([])
 const mcpServers = ref<MCPServerConfig[]>([])
+const providers = ref<AIProviderConfig[]>([])
+const activeProviderId = ref('')
+const globalModel = ref<{ providerId: string | null; modelId: string | null }>({
+  providerId: null,
+  modelId: null
+})
 const selectedTaskId = ref('')
 const editing = ref(false)
 const draft = ref<ScheduledTaskDraft | null>(null)
@@ -71,6 +84,11 @@ const weekdayOptions = [
   { value: 7, labelKey: 'settings.scheduledTasks.weekdaySun' }
 ]
 
+const toolPolicyOptions: Array<{ value: ToolPolicy; labelKey: string; detailKey: string }> = [
+  { value: 'standard', labelKey: 'settings.scheduledTasks.toolPolicyStandard', detailKey: 'settings.scheduledTasks.toolPolicyStandardDetail' },
+  { value: 'autoApprove', labelKey: 'settings.scheduledTasks.toolPolicyAutoApprove', detailKey: 'settings.scheduledTasks.toolPolicyAutoApproveDetail' }
+]
+
 let cleanupTasksChanged: (() => void) | null = null
 let cleanupReportsChanged: (() => void) | null = null
 
@@ -95,6 +113,57 @@ const skillNameMap = computed(() => {
 const mcpNameMap = computed(() => {
   return new Map(mcpServers.value.map(server => [server.id, server.name]))
 })
+
+const providerNameMap = computed(() => {
+  return new Map(providers.value.map(provider => [provider.id, provider.name]))
+})
+
+function providerDisplayName (id?: string | null): string {
+  if (!id) return ''
+  return providerNameMap.value.get(id) || id
+}
+
+const draftModelOptions = computed(() => {
+  const providerId = draft.value?.providerId
+  if (!providerId) return []
+  return providers.value.find(provider => provider.id === providerId)?.models || []
+})
+
+/** 聊天页同款多层选择：首位伪供应商 = 「跟随默认」（无模型，点击即清除钉扎）。 */
+const schedulerProviderOptions = computed(() => [
+  { id: '__follow__', name: t('settings.scheduledTasks.followDefault'), models: [] as string[] },
+  ...providers.value
+])
+
+function onExecutionModelSelect (selection: { providerId: string; model: string }) {
+  if (selection.providerId === '__follow__') {
+    globalModel.value = { providerId: null, modelId: null }
+  } else {
+    globalModel.value = {
+      providerId: selection.providerId,
+      modelId: selection.model || null
+    }
+  }
+  void saveModelSettings()
+}
+
+async function saveModelSettings () {
+  if (!window.electronAPI?.setScheduledTaskModelSettings) return
+  try {
+    await window.electronAPI.setScheduledTaskModelSettings({
+      providerId: globalModel.value.providerId,
+      modelId: globalModel.value.modelId
+    })
+  } catch (error) {
+    setStatus(t('settings.scheduledTasks.modelSettingsFailed', { message: (error as Error).message }))
+  }
+}
+
+function taskModelLabel (task: ScheduledTaskDefinition): string {
+  const provider = providerDisplayName(task.providerId)
+    || t('settings.scheduledTasks.followDefault')
+  return task.modelId ? `${provider} / ${task.modelId}` : provider
+}
 
 function setStatus (message: string) {
   statusMessage.value = message
@@ -226,6 +295,9 @@ function buildEmptyDraft (): ScheduledTaskDraft {
     nextDateInput: '',
     selectedSkillIds: [],
     selectedMcpServerIds: [],
+    toolPolicy: 'standard',
+    providerId: '',
+    modelId: '',
     maxRetries: 0,
     retryDelayMinutes: 5
   }
@@ -249,6 +321,9 @@ function buildDraftFromTask (task: ScheduledTaskDefinition): ScheduledTaskDraft 
     nextDateInput: '',
     selectedSkillIds: [...task.selectedSkillIds],
     selectedMcpServerIds: [...task.selectedMcpServerIds],
+    toolPolicy: task.toolPolicy === 'autoApprove' ? 'autoApprove' : 'standard',
+    providerId: task.providerId || '',
+    modelId: task.modelId || '',
     maxRetries: task.retryPolicy.maxRetries,
     retryDelayMinutes: task.retryPolicy.retryDelayMinutes
   }
@@ -330,6 +405,9 @@ function materializeDraft (value: ScheduledTaskDraft): ScheduledTaskDefinition |
     schedule,
     selectedSkillIds: normalizeSelection(value.selectedSkillIds, allowedSkillIds),
     selectedMcpServerIds: normalizeSelection(value.selectedMcpServerIds, allowedServerIds),
+    toolPolicy: value.toolPolicy === 'autoApprove' ? 'autoApprove' : 'standard',
+    providerId: value.providerId || null,
+    modelId: value.modelId || null,
     retryPolicy: {
       maxRetries: Number.isFinite(Number(value.maxRetries)) && Number(value.maxRetries) >= 0
         ? Math.floor(Number(value.maxRetries))
@@ -428,6 +506,9 @@ function applyGeneratedDraft (payload: Record<string, unknown>) {
       payload.selected_mcp_server_ids.filter((value): value is string => typeof value === 'string'),
       allowedServerIds
     )
+  }
+  if (payload.tool_policy === 'auto_approve' || payload.tool_policy === 'autoApprove' || payload.tool_policy === 'standard') {
+    nextDraft.toolPolicy = payload.tool_policy === 'standard' ? 'standard' : 'autoApprove'
   }
   if (Number.isFinite(Number(payload.max_retries)) && Number(payload.max_retries) >= 0) {
     nextDraft.maxRetries = Math.floor(Number(payload.max_retries))
@@ -593,6 +674,7 @@ async function toggleSelectedTaskEnabled () {
       modelId: taskToToggle.modelId == null ? null : String(taskToToggle.modelId),
       selectedSkillIds: Array.from(taskToToggle.selectedSkillIds, String),
       selectedMcpServerIds: Array.from(taskToToggle.selectedMcpServerIds, String),
+      toolPolicy: taskToToggle.toolPolicy === 'autoApprove' ? 'autoApprove' : 'standard',
       retryPolicy: {
         maxRetries: Number(taskToToggle.retryPolicy.maxRetries),
         retryDelayMinutes: Number(taskToToggle.retryPolicy.retryDelayMinutes)
@@ -644,10 +726,11 @@ async function generateDraftWithAi () {
     const systemPrompt = [
       '你是一个定时任务配置生成器。',
       '根据用户描述，返回严格 JSON，不要输出 Markdown，不要解释，不要调用任何工具。',
-      'JSON 字段仅允许使用：title, prompt, enabled, schedule_kind, run_at, every_minutes, start_at, time_of_day, weekdays, dates, selected_skill_ids, selected_mcp_server_ids, max_retries, retry_delay_minutes。',
+      'JSON 字段仅允许使用：title, prompt, enabled, schedule_kind, run_at, every_minutes, start_at, time_of_day, weekdays, dates, selected_skill_ids, selected_mcp_server_ids, tool_policy, max_retries, retry_delay_minutes。',
       'schedule_kind 只能是 once、interval、daily、weekly、dates。',
       '每天或每周固定时间执行时优先使用 daily 或 weekly，time_of_day 用 HH:mm；weekly 的 weekdays 用 1-7 表示周一到周日。',
-      'selected_skill_ids 和 selected_mcp_server_ids 必须只从提供的可用 ID 中选择。'
+      'selected_skill_ids 和 selected_mcp_server_ids 必须只从提供的可用 ID 中选择。',
+      'tool_policy 只能是 standard（默认，需确认的工具会被跳过）或 auto_approve（用户明确要求任务可以执行 shell 等需要确认的操作时使用）；只有当用户描述明确需要执行命令/shell 时才设置 auto_approve。'
     ].join('\n')
 
     const availableSkills = skills.value.map(skill => `${skill.id}: ${skill.name}`).join('\n') || '无'
@@ -683,6 +766,27 @@ async function generateDraftWithAi () {
 
 onMounted(async () => {
   await loadData()
+  void (async () => {
+    if (!window.electronAPI) return
+    try {
+      const [config, modelSettings] = await Promise.all([
+        window.electronAPI.getProviders?.() || Promise.resolve(null),
+        window.electronAPI.getScheduledTaskModelSettings?.() || Promise.resolve(null)
+      ])
+      if (config) {
+        providers.value = config.providers || []
+        activeProviderId.value = config.activeProviderId || ''
+      }
+      if (modelSettings) {
+        globalModel.value = {
+          providerId: modelSettings.providerId || null,
+          modelId: modelSettings.modelId || null
+        }
+      }
+    } catch {
+      // 供应商/执行模型加载失败不阻塞面板；下拉会退化为空列表。
+    }
+  })()
   if (window.electronAPI?.onScheduledTasksChanged) {
     cleanupTasksChanged = window.electronAPI.onScheduledTasksChanged((nextTasks) => {
       tasks.value = nextTasks
@@ -725,7 +829,18 @@ onUnmounted(() => {
           <h3>{{ $t('settings.scheduledTasks.title') }}</h3>
           <p>{{ $t('settings.scheduledTasks.description') }}</p>
         </div>
-        <button class="st-primary-btn" type="button" @click="startAdd">{{ $t('settings.scheduledTasks.addTask') }}</button>
+      </div>
+
+      <div class="st-model-bar">
+        <ProviderModelDropdown
+          class="st-model-picker"
+          :providers="schedulerProviderOptions"
+          :active-provider-id="globalModel.providerId || ''"
+          :selected-model="globalModel.modelId || ''"
+          :title="$t('settings.scheduledTasks.followDefault')"
+          @select="onExecutionModelSelect"
+        />
+        <button class="st-primary-btn st-add-btn" type="button" @click="startAdd">＋ {{ $t('settings.scheduledTasks.addTaskShort') }}</button>
       </div>
 
       <div v-if="tasks.length === 0" class="st-empty-list">
@@ -751,6 +866,9 @@ onUnmounted(() => {
         </div>
         <div class="st-task-card-meta muted">
           <span>{{ $t('settings.scheduledTasks.nextRun', { time: formatTimestamp(task.retryScheduledAt || task.nextRunAt) }) }}</span>
+        </div>
+        <div v-if="task.providerId || task.modelId" class="st-task-card-meta muted">
+          <span>{{ taskModelLabel(task) }}</span>
         </div>
       </button>
     </aside>
@@ -932,6 +1050,45 @@ onUnmounted(() => {
                 </label>
               </div>
             </div>
+
+            <div class="st-retry-block full-span">
+              <span class="st-field-label">{{ $t('settings.scheduledTasks.taskModelTitle') }}</span>
+              <div class="st-retry-fields">
+                <label class="st-field">
+                  <span>{{ $t('settings.scheduledTasks.taskProvider') }}</span>
+                  <select v-model="draft.providerId" @change="draft.modelId = ''">
+                    <option value="">{{ $t('settings.scheduledTasks.followExecutionModel') }}</option>
+                    <option v-for="provider in providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option>
+                  </select>
+                </label>
+                <label class="st-field">
+                  <span>{{ $t('settings.scheduledTasks.taskModel') }}</span>
+                  <select v-model="draft.modelId" :disabled="!draft.providerId">
+                    <option value="">{{ $t('settings.scheduledTasks.followProviderDefault') }}</option>
+                    <option v-for="model in draftModelOptions" :key="model" :value="model">{{ model }}</option>
+                  </select>
+                </label>
+              </div>
+              <small class="st-model-hint">{{ $t('settings.scheduledTasks.taskModelHint') }}</small>
+            </div>
+
+            <div class="st-retry-block full-span">
+              <span class="st-field-label">{{ $t('settings.scheduledTasks.toolPolicy') }}</span>
+              <div class="st-tool-policy-options">
+                <label
+                  v-for="option in toolPolicyOptions"
+                  :key="option.value"
+                  class="st-check-item"
+                  :class="{ active: draft.toolPolicy === option.value }"
+                >
+                  <input v-model="draft.toolPolicy" type="radio" :value="option.value" />
+                  <span>
+                    <strong>{{ $t(option.labelKey) }}</strong>
+                    <small>{{ $t(option.detailKey) }}</small>
+                  </span>
+                </label>
+              </div>
+            </div>
           </div>
 
           <div class="st-scope-grid">
@@ -1041,6 +1198,10 @@ onUnmounted(() => {
                 <span v-if="selectedTask.selectedMcpServerIds.length === 0" class="st-empty-inline">{{ $t('settings.scheduledTasks.unlimited') }}</span>
               </div>
             </div>
+            <div class="st-summary-block">
+              <strong>{{ $t('settings.scheduledTasks.toolPolicy') }}</strong>
+              <p>{{ selectedTask.toolPolicy === 'autoApprove' ? $t('settings.scheduledTasks.toolPolicySummaryAutoApprove') : $t('settings.scheduledTasks.toolPolicySummaryStandard') }}</p>
+            </div>
           </div>
         </section>
 
@@ -1145,6 +1306,29 @@ onUnmounted(() => {
 .st-metric strong {
   margin: 0;
   color: var(--app-text);
+}
+
+/* 分类头：accent 竖条锚点 + 标题/说明基线对齐 */
+.st-section-head {
+  align-items: center;
+}
+
+.st-section-head h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.st-section-head h4::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #0284c7, #38bdf8);
 }
 
 .st-sidebar-header p,
@@ -1405,7 +1589,9 @@ onUnmounted(() => {
 
 .st-section-head span {
   color: var(--app-text-faint);
-  font-size: 0.78rem;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  text-align: right;
 }
 
 .full-span {
@@ -1421,10 +1607,23 @@ onUnmounted(() => {
 }
 
 .st-field-label {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 7px;
   margin-bottom: 10px;
-  font-size: 0.84rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   color: var(--app-text);
+}
+
+.st-field-label::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #0284c7, #38bdf8);
 }
 
 .st-field.checkbox-field {
@@ -1502,6 +1701,39 @@ onUnmounted(() => {
   border-radius: 8px;
   border: 1px solid var(--app-border);
   background: rgba(255, 255, 255, 0.025);
+}
+
+.st-model-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.st-model-bar .st-model-picker {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 触发器占满剩余宽度，与上下任务卡片对齐；高度与新建按钮一致。 */
+.st-model-bar :deep(.provider-model-trigger) {
+  width: 100%;
+  max-width: none;
+  height: 30px;
+  padding: 0 10px;
+}
+
+.st-add-btn {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.st-model-hint {
+  display: block;
+  font-size: 12px;
+  opacity: 0.65;
+  line-height: 1.5;
 }
 
 .st-mode-grid,
@@ -1585,6 +1817,25 @@ onUnmounted(() => {
   gap: 10px;
   padding: 10px 0;
   border-bottom: 1px solid var(--app-border);
+}
+
+.st-tool-policy-options {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.st-tool-policy-options .st-check-item {
+  padding: 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+}
+
+.st-tool-policy-options .st-check-item.active {
+  border-color: rgba(14, 165, 233, 0.55);
+  background: rgba(14, 165, 233, 0.08);
 }
 
 .st-check-item:last-child {

@@ -272,6 +272,7 @@ interface ScheduledTaskDefinition {
   modelId?: string | null
   selectedSkillIds: string[]
   selectedMcpServerIds: string[]
+  toolPolicy?: 'standard' | 'autoApprove'
   retryPolicy: ScheduledTaskRetryPolicy
   createdAt: string
   updatedAt: string
@@ -704,6 +705,8 @@ export interface ElectronAPI {
   saveScheduledTask: (task: ScheduledTaskDefinition) => Promise<ScheduledTaskDefinition>
   deleteScheduledTask: (taskId: string) => Promise<boolean>
   runScheduledTaskNow: (taskId: string) => Promise<ScheduledTaskRunReport>
+  getScheduledTaskModelSettings: () => Promise<{ providerId: string | null; modelId: string | null; available: boolean }>
+  setScheduledTaskModelSettings: (payload: { providerId?: string | null; modelId?: string | null }) => Promise<{ ok: boolean }>
   listScheduledTaskReports: (taskId?: string) => Promise<ScheduledTaskRunReport[]>
   getScheduledTaskReport: (reportId: string) => Promise<ScheduledTaskRunReport | null>
   onScheduledTasksChanged: (callback: (tasks: ScheduledTaskDefinition[]) => void) => () => void
@@ -1066,6 +1069,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveScheduledTask: (task: ScheduledTaskDefinition) => ipcRenderer.invoke('scheduler:saveTask', task),
   deleteScheduledTask: (taskId: string) => ipcRenderer.invoke('scheduler:deleteTask', taskId),
   runScheduledTaskNow: (taskId: string) => ipcRenderer.invoke('scheduler:runNow', taskId),
+  getScheduledTaskModelSettings: () => ipcRenderer.invoke('scheduler:getModelSettings'),
+  setScheduledTaskModelSettings: (payload: { providerId?: string | null; modelId?: string | null }) =>
+    ipcRenderer.invoke('scheduler:setModelSettings', payload),
   listScheduledTaskReports: (taskId?: string) => ipcRenderer.invoke('scheduler:listReports', taskId),
   getScheduledTaskReport: (reportId: string) => ipcRenderer.invoke('scheduler:getReport', reportId),
   onScheduledTasksChanged: (callback: (tasks: ScheduledTaskDefinition[]) => void) => {

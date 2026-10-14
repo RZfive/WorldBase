@@ -20,6 +20,8 @@ export interface TerminalSessionCreateOptions {
   cwd?: string
   cols?: number
   rows?: number
+  /** Brightness of the creating xterm canvas; selects the spawn-time COLORFGBG. */
+  colorScheme?: 'dark' | 'light'
 }
 
 export interface TerminalSessionInfo {
@@ -118,7 +120,12 @@ export class TerminalManager {
       env: {
         ...process.env,
         TERM: 'xterm-256color',
-        COLORTERM: 'truecolor'
+        COLORTERM: 'truecolor',
+        // 如实声明画布明暗（15;0=浅字深底，0;15=深字浅底），覆盖从宿主终端
+        // 泄漏进来的旧值，自适应 shell 主题与 vim 等据此选择文字颜色。会话
+        // 中途切换主题时 env 无法改写，程序靠 OSC 11 查询拿到实时背景色；
+        // 不自适应的主题由渲染端 minimumContrastRatio 兜底。
+        COLORFGBG: options.colorScheme === 'light' ? '0;15' : '15;0'
       } as Record<string, string>
     })
 

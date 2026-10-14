@@ -300,6 +300,7 @@ export class ScheduledTaskService {
       modelId: normalizeString(input.modelId) || null,
       selectedSkillIds: Array.isArray(input.selectedSkillIds) ? input.selectedSkillIds : [],
       selectedMcpServerIds: Array.isArray(input.selectedMcpServerIds) ? input.selectedMcpServerIds : [],
+      toolPolicy: input.toolPolicy === 'autoApprove' ? 'autoApprove' : 'standard',
       retryPolicy: input.retryPolicy,
       createdAt: existing?.createdAt || now,
       updatedAt: now,
@@ -828,6 +829,8 @@ export class ScheduledTaskService {
         authMode: 'auto',
         activeSkillContents,
         allowedMcpServerIds: task.selectedMcpServerIds,
+        // 任务保存的工具权限授权：无人值守运行自动批准 ask 类工具（含 shell）。
+        autoApprovePermissions: task.toolPolicy === 'autoApprove',
         targetProjectId: taskOptions?.targetProjectId ?? null,
         workspaceRoot: taskOptions?.workspaceRoot ?? null,
         customTools: taskOptions?.customTools,

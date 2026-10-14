@@ -4,6 +4,8 @@ export interface TerminalSessionCreateOptions {
   cwd?: string
   cols?: number
   rows?: number
+  /** Canvas brightness of the creating xterm surface; drives the spawn-time COLORFGBG. */
+  colorScheme?: 'dark' | 'light'
 }
 
 export interface TerminalSessionInfo {

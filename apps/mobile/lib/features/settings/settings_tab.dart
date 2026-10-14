@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/glass.dart';
 import '../../core/ios_ui.dart';
+import '../../core/memory_compaction.dart';
 import '../../core/providers.dart';
 import 'daily_suggestions_page.dart';
 
@@ -1692,7 +1693,7 @@ class _AgentGroupsCard extends ConsumerWidget {
   }
 }
 
-// ================= 记忆 =================
+// ================= 记忆（工作台，对齐桌面 MemorySettingsPanel） =================
 
 class _MemoryCard extends ConsumerStatefulWidget {
   const _MemoryCard();
@@ -1703,14 +1704,188 @@ class _MemoryCard extends ConsumerStatefulWidget {
 
 class _MemoryCardState extends ConsumerState<_MemoryCard> {
   final _queryCtrl = TextEditingController();
-  List<dynamic>? _hits;
+  List<WorkspaceMemoryEntry>? _entries;
+  String _indexSummary = '';
+  bool _compacting = false;
+  String _compactProgress = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _queryCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final entries = await HarnessClient.instance.listWorkspaceMemories(
+        query: _queryCtrl.text.trim().isEmpty ? null : _queryCtrl.text.trim(),
+      );
+      if (mounted) setState(() => _entries = entries);
+    } catch (_) {
+      if (mounted) setState(() => _entries = const []);
+    }
+    try {
+      final status = await HarnessClient.instance.memoryIndexStatus();
+      if (mounted) {
+        setState(() => _indexSummary = _describeIndexStatus(status));
+      }
+    } catch (_) {}
+  }
+
+  String _describeIndexStatus(Map<String, dynamic> status) {
+    final state = status['state']?.toString() ?? '';
+    if (state == 'disabled') return '向量召回未启用 · FTS5 全文检索可用';
+    final docs = status['documents'];
+    final total = docs is Map ? docs['total'] : null;
+    final indexed = docs is Map ? docs['indexed'] : null;
+    final label = switch (state) {
+      'ready' => '就绪',
+      'indexing' => '索引中',
+      'waiting' => '排队中',
+      'empty' => '待索引',
+      'failed' => '失败',
+      _ => state,
+    };
+    if (indexed is num && total is num) {
+      return '向量召回$label · 已索引 ${indexed.toInt()}/${total.toInt()}';
+    }
+    return '向量召回$label';
+  }
+
+  String _memoryTypeLabel(String type) => switch (type) {
+    'user_trait' => '特征',
+    'agent_skill' => '技能',
+    'step' => '步骤',
+    'knowledge' => '知识',
+    _ => type,
+  };
+
+  /// 单飞保护：同一时刻只允许一轮整理（对齐桌面端 activeMemoryCompactionPromise）。
+  Future<void> _runCompaction() async {
+    if (_compacting) return;
+    final confirmed = await showCupertinoDialog<bool>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: const Text('AI 整理记忆'),
+        content: const Padding(
+          padding: EdgeInsets.only(top: 8),
+          child: Text(
+            'AI 将合并重复记忆、改写松散表达、清理无价值碎片，并写回记忆库。'
+            '置顶记忆受保护；user 作用域的个人事实不会参与整理。',
+            style: TextStyle(fontSize: 13),
+          ),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('开始整理'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() {
+      _compacting = true;
+      _compactProgress = '正在扫描…';
+    });
+    final target = ref.read(chatTargetProvider);
+    try {
+      final result = await runMemoryCompaction(
+        HarnessClient.instance,
+        providerId: target.providerId,
+        modelId: target.model,
+        onProgress: ({
+          required stage,
+          detail,
+          required totalChunks,
+          required completedChunks,
+        }) {
+          if (mounted) {
+            setState(() {
+              _compactProgress = detail == null || detail.isEmpty
+                  ? stage
+                  : '$stage · $detail';
+            });
+          }
+        },
+      );
+      await _load();
+      if (mounted) {
+        setState(() {
+          _compacting = false;
+          _compactProgress = '';
+        });
+        _showCompactResult(result);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _compacting = false;
+          _compactProgress = '';
+        });
+        await showCupertinoDialog<void>(
+          context: context,
+          builder: (ctx) => CupertinoAlertDialog(
+            title: const Text('整理失败'),
+            content: Text('$e'),
+            actions: [
+              CupertinoDialogAction(
+                isDefaultAction: true,
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('好'),
+              ),
+            ],
+          ),
+        );
+      }
+    }
+  }
+
+  void _showCompactResult(Map<String, dynamic> result) {
+    int readInt(String key) => (result[key] as num?)?.toInt() ?? 0;
+    showCupertinoDialog<void>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: const Text('整理完成'),
+        content: Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Text(
+            '扫描 ${readInt('scanned')} 条 · 删除 '
+            '${readInt('deleted') + readInt('removedUseless')} 条 · '
+            '合并 ${readInt('merged')} 组 · 改写 ${readInt('updated')} 条',
+            style: const TextStyle(fontSize: 13),
+          ),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('好'),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final p = DawnPalette.of(context);
     return IosSection(
       header: '长期记忆',
-      footer: 'FTS5 全文检索（中文自动回退子串匹配）',
+      footer: _indexSummary.isEmpty
+          ? '与桌面端共用 user:local-user 记忆库，聊天后自动沉淀'
+          : '$_indexSummary · 聊天后自动沉淀',
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
@@ -1720,13 +1895,13 @@ class _MemoryCardState extends ConsumerState<_MemoryCard> {
                 child: CupertinoSearchTextField(
                   controller: _queryCtrl,
                   placeholder: '关键词检索',
-                  onSubmitted: (_) => _search(),
+                  onSubmitted: (_) => _load(),
                 ),
               ),
               const SizedBox(width: 8),
               CupertinoButton(
                 padding: const EdgeInsets.all(6),
-                onPressed: () => _showAddDialog(context),
+                onPressed: () => _editEntry(context, null),
                 minimumSize: Size(0, 0),
                 child: const Icon(
                   CupertinoIcons.add_circled,
@@ -1737,77 +1912,271 @@ class _MemoryCardState extends ConsumerState<_MemoryCard> {
             ],
           ),
         ),
-        if (_hits != null)
-          if (_hits!.isEmpty)
-            IosRow(
-              icon: CupertinoIcons.search,
-              iconColor: p.ink2,
-              title: '无匹配记忆',
-            )
-          else
-            for (final h in _hits!)
-              IosRow(
-                icon: CupertinoIcons.sparkles,
-                iconColor: iosPink,
-                title: (h as Map)['content']?.toString() ?? '',
-                onTap: () async {
-                  final id = (h['id'] as num?)?.toInt() ?? 0;
-                  await HarnessClient.instance.deleteMemory(id);
-                  _search();
-                },
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _compacting
+                      ? (_compactProgress.isEmpty ? '整理中…' : _compactProgress)
+                      : '用 AI 合并重复、改写松散、清理碎片记忆',
+                  style: TextStyle(fontSize: 12, color: p.ink2),
+                ),
               ),
+              CupertinoButton(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                minimumSize: const Size(0, 0),
+                onPressed: _compacting ? null : _runCompaction,
+                child: _compacting
+                    ? const CupertinoActivityIndicator(radius: 8)
+                    : const Text('AI 整理', style: TextStyle(fontSize: 13)),
+              ),
+            ],
+          ),
+        ),
+        if (_entries == null)
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: CupertinoActivityIndicator(),
+          )
+        else if (_entries!.isEmpty)
+          IosRow(
+            icon: CupertinoIcons.sparkles,
+            iconColor: p.ink2,
+            title: _queryCtrl.text.trim().isEmpty ? '暂无记忆' : '无匹配记忆',
+          )
+        else
+          for (final entry in _entries!)
+            IosRow(
+              icon: entry.pinned
+                  ? CupertinoIcons.pin_fill
+                  : CupertinoIcons.pin,
+              iconColor: entry.pinned ? iosOrange : p.ink2,
+              title: entry.title,
+              subtitle:
+                  '[${_memoryTypeLabel(entry.memoryType)}] ${entry.summary}',
+              onTap: () => _showActions(context, entry),
+            ),
       ],
     );
   }
 
-  Future<void> _search() async {
-    final query = _queryCtrl.text.trim();
-    if (query.isEmpty) return;
-    try {
-      final result = await HarnessClient.instance.searchMemory(query);
-      setState(() => _hits = result?['hits'] as List? ?? []);
-    } catch (e) {
-      setState(
-        () => _hits = [
-          {'content': '检索失败：$e'},
-        ],
-      );
-    }
-  }
-
-  Future<void> _showAddDialog(BuildContext context) async {
-    final ctrl = TextEditingController();
-    await showCupertinoDialog<void>(
+  void _showActions(BuildContext context, WorkspaceMemoryEntry entry) {
+    showCupertinoModalPopup<void>(
       context: context,
-      builder: (ctx) => CupertinoAlertDialog(
-        title: const Text('添加记忆'),
-        content: Padding(
-          padding: const EdgeInsets.only(top: 10),
-          child: CupertinoTextField(
-            controller: ctrl,
-            maxLines: 3,
-            autofocus: true,
-          ),
-        ),
+      builder: (ctx) => CupertinoActionSheet(
+        title: Text(entry.title),
+        message: Text(entry.summary),
         actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          CupertinoDialogAction(
-            isDefaultAction: true,
+          CupertinoActionSheetAction(
             onPressed: () async {
-              if (ctrl.text.isNotEmpty) {
-                await HarnessClient.instance.addMemory(ctrl.text);
-              }
-              if (ctx.mounted) Navigator.pop(ctx);
-              _search();
+              Navigator.pop(ctx);
+              try {
+                await HarnessClient.instance.pinWorkspaceMemory(
+                  entry.id,
+                  !entry.pinned,
+                );
+                await _load();
+              } catch (_) {}
             },
-            child: const Text('保存'),
+            child: Text(entry.pinned ? '取消置顶' : '置顶'),
+          ),
+          CupertinoActionSheetAction(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _editEntry(context, entry);
+            },
+            child: const Text('编辑'),
+          ),
+          CupertinoActionSheetAction(
+            isDestructiveAction: true,
+            onPressed: () async {
+              Navigator.pop(ctx);
+              try {
+                await HarnessClient.instance.deleteWorkspaceMemory(entry.id);
+                await _load();
+              } catch (_) {}
+            },
+            child: const Text('删除'),
           ),
         ],
+        cancelButton: CupertinoActionSheetAction(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('取消'),
+        ),
       ),
     );
+  }
+
+  Widget _memoryField(
+    TextEditingController controller,
+    String label,
+    DawnPalette p, {
+    int maxLines = 1,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: TextStyle(fontSize: 13, color: p.ink2)),
+        const SizedBox(height: 5),
+        CupertinoTextField(
+          controller: controller,
+          maxLines: maxLines,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: p.cardBg,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: p.separator),
+          ),
+          style: TextStyle(fontSize: 14, color: p.ink),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _editEntry(
+    BuildContext context,
+    WorkspaceMemoryEntry? existing,
+  ) async {
+    final titleCtrl = TextEditingController(text: existing?.title ?? '');
+    final summaryCtrl = TextEditingController(text: existing?.summary ?? '');
+    final detailsCtrl = TextEditingController(text: existing?.details ?? '');
+    final tagsCtrl = TextEditingController(
+      text: existing?.tags.join(', ') ?? '',
+    );
+    var saving = false;
+    String? error;
+
+    await showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) {
+        final p = DawnPalette.of(context);
+        return Container(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.85,
+          ),
+          decoration: BoxDecoration(
+            color: p.groupedBg,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+          ),
+          child: SafeArea(
+            child: StatefulBuilder(
+              builder: (ctx, setSheet) => SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      existing == null ? '新建记忆' : '编辑记忆',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    _memoryField(titleCtrl, '标题（必填）', p),
+                    const SizedBox(height: 10),
+                    _memoryField(summaryCtrl, '摘要（必填）', p, maxLines: 3),
+                    const SizedBox(height: 10),
+                    _memoryField(detailsCtrl, '详情（可选）', p, maxLines: 4),
+                    const SizedBox(height: 10),
+                    _memoryField(tagsCtrl, '标签（逗号分隔，可选）', p),
+                    if (error != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        error!,
+                        style: const TextStyle(fontSize: 13, color: iosRed),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: CupertinoButton(
+                            onPressed: saving ? null : () => Navigator.pop(ctx),
+                            child: const Text('取消'),
+                          ),
+                        ),
+                        Expanded(
+                          child: CupertinoButton.filled(
+                            onPressed: saving
+                                ? null
+                                : () async {
+                                    final title = titleCtrl.text.trim();
+                                    final summary = summaryCtrl.text.trim();
+                                    if (title.isEmpty || summary.isEmpty) {
+                                      setSheet(() => error = '标题和摘要不能为空');
+                                      return;
+                                    }
+                                    setSheet(() {
+                                      saving = true;
+                                      error = null;
+                                    });
+                                    try {
+                                      final tags = tagsCtrl.text
+                                          .split(RegExp(r'[,，]'))
+                                          .map((tag) => tag.trim())
+                                          .where((tag) => tag.isNotEmpty)
+                                          .toSet()
+                                          .toList();
+                                      await HarnessClient
+                                          .instance
+                                          .saveWorkspaceMemory(
+                                            WorkspaceMemoryEntry(
+                                              id: existing?.id ?? '',
+                                              // 编辑时保留原有作用域与类型；新建
+                                              // 落在桌面端同一 user:local-user 域。
+                                              scopeType:
+                                                  existing?.scopeType ?? 'user',
+                                              scopeId:
+                                                  existing?.scopeId ??
+                                                  'local-user',
+                                              memoryType:
+                                                  existing?.memoryType ??
+                                                  'knowledge',
+                                              title: title,
+                                              summary: summary,
+                                              details: detailsCtrl.text.trim(),
+                                              tags: tags,
+                                              importance:
+                                                  existing?.importance ?? 0.5,
+                                              confidence:
+                                                  existing?.confidence ?? 0.5,
+                                              pinned: existing?.pinned ?? false,
+                                            ),
+                                          );
+                                      if (ctx.mounted) Navigator.pop(ctx);
+                                      await _load();
+                                    } catch (e) {
+                                      if (ctx.mounted) {
+                                        setSheet(() {
+                                          saving = false;
+                                          error = '$e';
+                                        });
+                                      }
+                                    }
+                                  },
+                            child: Text(existing == null ? '创建' : '保存'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    titleCtrl.dispose();
+    summaryCtrl.dispose();
+    detailsCtrl.dispose();
+    tagsCtrl.dispose();
   }
 }
 
@@ -2426,6 +2795,11 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
   List<ScheduleEntry>? _schedules;
   List<SkillDescriptor> _skills = const [];
   List<McpServerSnapshot> _mcpServers = const [];
+  List<ProviderEntry> _providers = const [];
+  String? _activeProviderId;
+  /// 全局定时任务执行模型（Rust settings），未单独钉扎的任务都走它。
+  String? _schedulerProviderId;
+  String? _schedulerModelId;
 
   @override
   void initState() {
@@ -2446,6 +2820,224 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
       final state = await HarnessClient.instance.getMcpState();
       if (mounted) setState(() => _mcpServers = state.servers);
     } catch (_) {}
+    try {
+      final config = await HarnessClient.instance.listProviders();
+      final list = config['providers'] as List? ?? const [];
+      final providerValue = await HarnessClient.instance
+          .getSetting('scheduler.providerId');
+      final modelValue = await HarnessClient.instance.getSetting(
+        'scheduler.modelId',
+      );
+      final providerId = providerValue?['value']?.toString();
+      final modelId = modelValue?['value']?.toString();
+      if (mounted) {
+        setState(() {
+          _providers = list
+              .whereType<Map>()
+              .map((e) => ProviderEntry.fromJson(e.cast<String, dynamic>()))
+              .toList();
+          _activeProviderId = config['activeProviderId']?.toString();
+          _schedulerProviderId = (providerId == null || providerId.isEmpty)
+              ? null
+              : providerId;
+          _schedulerModelId = (modelId == null || modelId.isEmpty)
+              ? null
+              : modelId;
+        });
+      }
+    } catch (_) {}
+  }
+
+  String? _providerDisplayName(String? id) {
+    for (final provider in _providers) {
+      if (provider.id == id) return provider.name;
+    }
+    return id;
+  }
+
+  List<String> _modelHintsFor(String? id) {
+    if (id == null) return const [];
+    for (final provider in _providers) {
+      if (provider.id == id) {
+        return provider.models.map((model) => model.id).take(8).toList();
+      }
+    }
+    return const [];
+  }
+
+  String get _schedulerModelLabel {
+    if (_schedulerProviderId == null) {
+      if (_schedulerModelId != null) return _schedulerModelId!;
+      final active = _providerDisplayName(_activeProviderId);
+      return active == null ? '跟随默认供应商' : '跟随默认（$active）';
+    }
+    final provider =
+        _providerDisplayName(_schedulerProviderId) ?? _schedulerProviderId!;
+    return _schedulerModelId == null ? provider : '$provider / $_schedulerModelId';
+  }
+
+  Future<void> _saveSchedulerModel() async {
+    try {
+      await HarnessClient.instance.setSetting(
+        'scheduler.providerId',
+        _schedulerProviderId,
+      );
+      await HarnessClient.instance.setSetting(
+        'scheduler.modelId',
+        _schedulerModelId,
+      );
+    } catch (_) {}
+    if (mounted) setState(() {});
+  }
+
+  /// 全局执行模型编辑弹层：与「新建任务」平级的入口，任务未单独钉扎时生效。
+  Future<void> _editSchedulerModel() async {
+    var providerId = _schedulerProviderId;
+    final modelCtrl = TextEditingController(text: _schedulerModelId ?? '');
+    var saving = false;
+    await showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) {
+        final p = DawnPalette.of(context);
+        return Container(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.6,
+          ),
+          decoration: BoxDecoration(
+            color: p.groupedBg,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+          ),
+          child: SafeArea(
+            child: StatefulBuilder(
+              builder: (ctx, setSheet) => SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '定时任务执行模型',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      minimumSize: const Size(0, 0),
+                      color: p.cardBg,
+                      borderRadius: BorderRadius.circular(10),
+                      onPressed: saving
+                          ? null
+                          : () async {
+                              final picked =
+                                  await showCupertinoModalPopup<String>(
+                                    context: ctx,
+                                    builder: (sheetCtx) => CupertinoActionSheet(
+                                      title: const Text('定时任务供应商（与聊天默认分离）'),
+                                      actions: [
+                                        CupertinoActionSheetAction(
+                                          onPressed: () =>
+                                              Navigator.pop(sheetCtx, ''),
+                                          child: const Text('跟随默认供应商'),
+                                        ),
+                                        for (final provider in _providers)
+                                          CupertinoActionSheetAction(
+                                            onPressed: () => Navigator.pop(
+                                              sheetCtx,
+                                              provider.id,
+                                            ),
+                                            child: Text(provider.name),
+                                          ),
+                                      ],
+                                      cancelButton: CupertinoActionSheetAction(
+                                        onPressed: () =>
+                                            Navigator.pop(sheetCtx),
+                                        child: const Text('取消'),
+                                      ),
+                                    ),
+                                  );
+                              if (picked == null) return;
+                              setSheet(() {
+                                providerId = picked.isEmpty ? null : picked;
+                                if (providerId == null) modelCtrl.clear();
+                              });
+                            },
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '供应商：${providerId == null ? '跟随默认供应商' : _providerDisplayName(providerId) ?? providerId!}',
+                              style: TextStyle(fontSize: 14, color: p.ink),
+                            ),
+                          ),
+                          Icon(
+                            CupertinoIcons.chevron_down,
+                            size: 14,
+                            color: p.ink3,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _scheduleField(
+                      modelCtrl,
+                      '模型 ID（留空 = 供应商默认）',
+                      p,
+                      hint: _modelHintsFor(providerId).isEmpty
+                          ? '如 claude-sonnet-4'
+                          : _modelHintsFor(providerId).first,
+                    ),
+                    if (_modelHintsFor(providerId).length > 1)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          '可用模型：${_modelHintsFor(providerId).join(', ')}',
+                          style: TextStyle(fontSize: 11, color: p.ink2),
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: CupertinoButton(
+                            onPressed: saving ? null : () => Navigator.pop(ctx),
+                            child: const Text('取消'),
+                          ),
+                        ),
+                        Expanded(
+                          child: CupertinoButton.filled(
+                            onPressed: saving
+                                ? null
+                                : () async {
+                                    setSheet(() => saving = true);
+                                    setState(() {
+                                      _schedulerProviderId = providerId;
+                                      final text = modelCtrl.text.trim();
+                                      _schedulerModelId = text.isEmpty
+                                          ? null
+                                          : text;
+                                    });
+                                    await _saveSchedulerModel();
+                                    if (ctx.mounted) Navigator.pop(ctx);
+                                  },
+                            child: const Text('保存'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    modelCtrl.dispose();
   }
 
   String _scheduleLabel(ScheduleEntry entry) {
@@ -2488,8 +3080,24 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
   String _policyLabel(ScheduleEntry entry) {
     final skills = entry.selectedSkillIds.length;
     final mcp = entry.selectedMcpServerIds.length;
-    if (skills == 0 && mcp == 0) return '';
-    return ' · 技能 $skills · MCP $mcp';
+    final auto = entry.toolPolicy == 'autoApprove' ? ' · 自动批准' : '';
+    if (skills == 0 && mcp == 0) return auto;
+    return ' · 技能 $skills · MCP $mcp$auto';
+  }
+
+  /// 与桌面端 ScheduledTasksPanel 的摘要文案保持一致。
+  String _policySummary(ScheduleEntry entry) =>
+      entry.toolPolicy == 'autoApprove'
+      ? '自动批准（含 Shell，毁灭性命令仍拒绝）'
+      : '标准（需确认的工具会被跳过）';
+
+  /// 单任务供应商/模型钉扎的展示标签；未钉扎返回空串。
+  String _modelLabel(ScheduleEntry entry) {
+    if (entry.providerId == null && entry.modelId == null) return '';
+    final provider = _providerDisplayName(entry.providerId);
+    final model = entry.modelId;
+    if (provider == null) return ' · 模型 $model';
+    return ' · $provider${model == null ? '' : ' / $model'}';
   }
 
   @override
@@ -2513,9 +3121,16 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
               iconColor: s.enabled ? iosGreen : p.ink2,
               title: s.name,
               subtitle:
-                  '${_scheduleLabel(s)} · ${_statusLabel(s)}${_policyLabel(s)}',
+                  '${_scheduleLabel(s)} · ${_statusLabel(s)}${_modelLabel(s)}${_policyLabel(s)}',
               onTap: () => _showActions(context, s),
             ),
+        IosRow(
+          icon: CupertinoIcons.cube_box,
+          iconColor: iosBlue,
+          title: '执行模型',
+          subtitle: _schedulerModelLabel,
+          onTap: _editSchedulerModel,
+        ),
         IosRow(
           icon: CupertinoIcons.add_circled,
           iconColor: iosBlue,
@@ -2531,7 +3146,10 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
       context: context,
       builder: (ctx) => CupertinoActionSheet(
         title: Text(s.name),
-        message: Text('${_scheduleLabel(s)}\n${_statusLabel(s)}\n任务：${s.task}'),
+        message: Text(
+          '${_scheduleLabel(s)}\n${_statusLabel(s)}${_policyLabel(s)}\n'
+          '权限：${_policySummary(s)}\n任务：${s.task}',
+        ),
         actions: [
           CupertinoActionSheetAction(
             onPressed: () async {
@@ -2652,6 +3270,19 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
     final mcpCtrl = TextEditingController(
       text: existing?.selectedMcpServerIds.join(', ') ?? '',
     );
+    var toolPolicy = existing?.toolPolicy == 'autoApprove'
+        ? 'autoApprove'
+        : 'standard';
+    // 单任务模型覆盖：null = 未改动/新建；'' = 清除（回归「执行模型」默认）。
+    var providerId = existing?.providerId;
+    final modelCtrl = TextEditingController(text: existing?.modelId ?? '');
+
+    String providerLabel(String? id) {
+      if (id == null || id.isEmpty) return '跟随「执行模型」/ 默认供应商';
+      return _providerDisplayName(id) ?? id;
+    }
+
+    List<String> modelHints(String? id) => _modelHintsFor(id);
     final maxRetriesCtrl = TextEditingController(
       text: '${existing?.retryPolicy.maxRetries ?? 0}',
     );
@@ -2875,6 +3506,112 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
                           style: TextStyle(fontSize: 11, color: p.ink2),
                         ),
                       ),
+                    const SizedBox(height: 10),
+                    Text('模型来源', style: TextStyle(fontSize: 13, color: p.ink2)),
+                    const SizedBox(height: 6),
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      minimumSize: const Size(0, 0),
+                      color: p.cardBg,
+                      borderRadius: BorderRadius.circular(10),
+                      onPressed: saving
+                          ? null
+                          : () async {
+                              final picked = await showCupertinoModalPopup<String>(
+                                context: ctx,
+                                builder: (sheetCtx) => CupertinoActionSheet(
+                                  title: const Text('本任务供应商（可单独覆盖）'),
+                                  actions: [
+                                    CupertinoActionSheetAction(
+                                      onPressed: () =>
+                                          Navigator.pop(sheetCtx, ''),
+                                      child: const Text('跟随执行模型 / 默认'),
+                                    ),
+                                    for (final provider in _providers)
+                                      CupertinoActionSheetAction(
+                                        onPressed: () =>
+                                            Navigator.pop(sheetCtx, provider.id),
+                                        child: Text(provider.name),
+                                      ),
+                                  ],
+                                  cancelButton: CupertinoActionSheetAction(
+                                    onPressed: () => Navigator.pop(sheetCtx),
+                                    child: const Text('取消'),
+                                  ),
+                                ),
+                              );
+                              if (picked == null) return;
+                              setSheet(() {
+                                providerId = picked;
+                                if (providerId == null || providerId!.isEmpty) {
+                                  modelCtrl.clear();
+                                }
+                              });
+                            },
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '供应商：${providerLabel(providerId)}',
+                              style: TextStyle(fontSize: 14, color: p.ink),
+                            ),
+                          ),
+                          Icon(
+                            CupertinoIcons.chevron_down,
+                            size: 14,
+                            color: p.ink3,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _scheduleField(
+                      modelCtrl,
+                      '模型 ID（留空 = 跟随上层默认）',
+                      p,
+                      hint: modelHints(providerId).isEmpty
+                          ? '如 claude-sonnet-4'
+                          : modelHints(providerId).first,
+                    ),
+                    if (modelHints(providerId).length > 1)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          '可用模型：${modelHints(providerId).join(', ')}',
+                          style: TextStyle(fontSize: 11, color: p.ink2),
+                        ),
+                      ),
+                    const SizedBox(height: 10),
+                    Text('工具权限', style: TextStyle(fontSize: 13, color: p.ink2)),
+                    const SizedBox(height: 6),
+                    CupertinoSlidingSegmentedControl<String>(
+                      groupValue: toolPolicy,
+                      children: const {
+                        'standard': Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 5, vertical: 5),
+                          child: Text('标准', style: TextStyle(fontSize: 11)),
+                        ),
+                        'autoApprove': Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 5, vertical: 5),
+                          child: Text('自动批准', style: TextStyle(fontSize: 11)),
+                        ),
+                      },
+                      onValueChanged: (value) {
+                        if (!saving) {
+                          setSheet(() => toolPolicy = value ?? toolPolicy);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      toolPolicy == 'autoApprove'
+                          ? '任务运行时自动批准需要确认的工具与 shell 命令；rm -rf、sudo 等毁灭性命令仍会被拒绝。'
+                          : '只能使用无需确认的工具，shell 等需要确认的操作会被跳过。',
+                      style: TextStyle(fontSize: 11, color: p.ink2),
+                    ),
                     const SizedBox(height: 8),
                     Row(
                       children: [
@@ -2952,6 +3689,7 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
                                         skillsCtrl.text,
                                       );
                                       final mcpIds = parseStrings(mcpCtrl.text);
+                                      final modelIdText = modelCtrl.text.trim();
                                       if (existing == null) {
                                         await HarnessClient.instance
                                             .createSchedule(
@@ -2964,6 +3702,16 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
                                               enabled: enabled,
                                               selectedSkillIds: skillIds,
                                               selectedMcpServerIds: mcpIds,
+                                              toolPolicy: toolPolicy,
+                                              // 新建时空值 = 不钉扎（跟随执行模型）。
+                                              providerId:
+                                                  providerId == null ||
+                                                      providerId!.isEmpty
+                                                  ? null
+                                                  : providerId,
+                                              modelId: modelIdText.isEmpty
+                                                  ? null
+                                                  : modelIdText,
                                               retryPolicy: retryPolicy,
                                               createdBy: 'manual',
                                             );
@@ -2980,6 +3728,10 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
                                               enabled: enabled,
                                               selectedSkillIds: skillIds,
                                               selectedMcpServerIds: mcpIds,
+                                              toolPolicy: toolPolicy,
+                                              // 空字符串 = 清除钉扎，回归执行模型。
+                                              providerId: providerId,
+                                              modelId: modelIdText,
                                               retryPolicy: retryPolicy,
                                             );
                                       }
@@ -3018,6 +3770,7 @@ class _SchedulesCardState extends ConsumerState<_SchedulesCard> {
     datesCtrl.dispose();
     skillsCtrl.dispose();
     mcpCtrl.dispose();
+    modelCtrl.dispose();
     maxRetriesCtrl.dispose();
     retryDelayCtrl.dispose();
   }

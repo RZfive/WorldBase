@@ -12,7 +12,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use worldbase_memory::Store;
 pub use worldbase_protocol::types::{
-    ScheduleEntry, ScheduledTaskRetryPolicy, ScheduledTaskSchedule,
+    ScheduleEntry, ScheduleToolPolicy, ScheduledTaskRetryPolicy, ScheduledTaskSchedule,
 };
 
 /// 到期回调：由 core 注入（把 task 文本交给 agent 运行）。
@@ -27,6 +27,7 @@ pub struct ScheduledTaskRequest {
     pub schedule: ScheduledTaskSchedule,
     pub selected_skill_ids: Vec<String>,
     pub selected_mcp_server_ids: Vec<String>,
+    pub tool_policy: ScheduleToolPolicy,
     pub retry_policy: ScheduledTaskRetryPolicy,
     pub created_by: String,
 }
@@ -73,6 +74,7 @@ impl Scheduler {
             schedule: None,
             selected_skill_ids: Vec::new(),
             selected_mcp_server_ids: Vec::new(),
+            tool_policy: ScheduleToolPolicy::default(),
             retry_policy: ScheduledTaskRetryPolicy::default(),
             retry_scheduled_at: None,
             retry_attempt: 0,
@@ -137,6 +139,7 @@ impl Scheduler {
             schedule: Some(request.schedule),
             selected_skill_ids: request.selected_skill_ids,
             selected_mcp_server_ids: request.selected_mcp_server_ids,
+            tool_policy: request.tool_policy,
             retry_policy: request.retry_policy,
             retry_scheduled_at: None,
             retry_attempt: 0,
@@ -672,6 +675,7 @@ pub fn electron_task_value(entry: &ScheduleEntry) -> Value {
         "modelId": entry.model_id,
         "selectedSkillIds": entry.selected_skill_ids,
         "selectedMcpServerIds": entry.selected_mcp_server_ids,
+        "toolPolicy": entry.tool_policy,
         "retryPolicy": entry.retry_policy,
         "createdAt": entry.created_at,
         "updatedAt": entry.updated_at,
@@ -760,6 +764,27 @@ mod tests {
     }
 
     #[test]
+    fn tool_policy_round_trips_through_the_store() {
+        let dir = std::env::temp_dir().join(format!("ws-sched-policy-{}", uuid::Uuid::new_v4()));
+        let sched = Scheduler::new(Arc::new(Store::open(&dir.join("db.sqlite")).unwrap()));
+        let mut request = structured_request(
+            ScheduledTaskSchedule::Daily { time_of_day: "09:00".into() },
+            true,
+        );
+        request.tool_policy = ScheduleToolPolicy::AutoApprove;
+        sched.create_task(request).unwrap();
+        let listed = sched.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].tool_policy, ScheduleToolPolicy::AutoApprove);
+        let value = electron_task_value(&listed[0]);
+        assert_eq!(
+            value.get("toolPolicy").and_then(Value::as_str),
+            Some("autoApprove")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn computes_next_run() {
         let next = next_run("0 9 * * 1-5").unwrap().unwrap();
         assert!(next > Utc::now());
@@ -807,6 +832,7 @@ mod tests {
                     schedule: ScheduledTaskSchedule::Daily { time_of_day: "21:30".into() },
                     selected_skill_ids: Vec::new(),
                     selected_mcp_server_ids: Vec::new(),
+                    tool_policy: ScheduleToolPolicy::default(),
                     retry_policy: ScheduledTaskRetryPolicy::default(),
                     created_by: "ai".into(),
                 },
@@ -848,6 +874,7 @@ mod tests {
                 schedule: None,
                 selected_skill_ids: Vec::new(),
                 selected_mcp_server_ids: Vec::new(),
+                tool_policy: ScheduleToolPolicy::default(),
                 retry_policy: ScheduledTaskRetryPolicy::default(),
                 retry_scheduled_at: None,
                 retry_attempt: 0,
@@ -906,6 +933,7 @@ mod tests {
             schedule,
             selected_skill_ids: vec!["research".into(), "research".into(), " ".into()],
             selected_mcp_server_ids: vec!["docs".into()],
+            tool_policy: ScheduleToolPolicy::default(),
             retry_policy: ScheduledTaskRetryPolicy {
                 max_retries: 2,
                 retry_delay_minutes: 5,

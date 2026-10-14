@@ -243,6 +243,11 @@ export class RustHarnessEngine implements AIHarness {
             : undefined
           if (Array.isArray(items)) emit({ type: 'todo_update', items })
         }
+        // Rust web tools return structured JSON; re-emit them as the rich
+        // stream events the renderer renders as WebSearch/WebFetch cards.
+        for (const event of webToolResultEvents(stringValue(frame.name), frame.content)) {
+          emit(event)
+        }
       }
       if (frame.kind === 'error') {
         streamError = new Error(String(frame.message || 'Rust harness error'))
@@ -294,7 +299,8 @@ export class RustHarnessEngine implements AIHarness {
         temperature: effectiveConfig.temperature,
         planModeActive: this.planModeDefault,
         budgetLimit: this.budgetLimit,
-        computerUseEnabled: options?.computerUseEnabled === true
+        computerUseEnabled: options?.computerUseEnabled === true,
+        autoApprovePermissions: options?.autoApprovePermissions === true
       }
       // MCP/tool discovery above can await for a while. Re-check immediately
       // before handing the prompt to Rust so a stop during preparation never
@@ -551,6 +557,56 @@ function parseToolResult (content: unknown): unknown {
   } catch {
     return content
   }
+}
+
+const WEB_SEARCH_CARD_RESULT_LIMIT = 10
+
+/**
+ * Map native Rust web tool results onto the rich stream events the renderer
+ * turns into WebSearch/WebFetch blocks. Returns [] for anything that is not a
+ * recognized web tool payload so unknown shapes degrade to plain tool runs.
+ * Exported for tests.
+ */
+export function webToolResultEvents (toolName: string, content: unknown): StreamEvent[] {
+  if (toolName !== 'web_search' && toolName !== 'web_fetch' && toolName !== 'fetch_webpage') return []
+  const parsed = parseToolResult(content)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return []
+  const record = parsed as Record<string, unknown>
+  if (toolName === 'web_search') {
+    const rawResults = Array.isArray(record.results) ? record.results : []
+    return [{
+      type: 'web_search_result',
+      query: typeof record.query === 'string' ? record.query : '',
+      engine: typeof record.engine === 'string' ? record.engine : 'web',
+      results: rawResults
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry))
+        .slice(0, WEB_SEARCH_CARD_RESULT_LIMIT)
+        .map((entry, index) => ({
+          rank: typeof entry.rank === 'number' ? entry.rank : index + 1,
+          title: typeof entry.title === 'string' ? entry.title : '',
+          url: typeof entry.url === 'string' ? entry.url : '',
+          snippet: typeof entry.snippet === 'string' ? entry.snippet : '',
+          source: typeof entry.source === 'string' ? entry.source : '',
+          ...(typeof entry.published_at === 'string' ? { published_at: entry.published_at } : {})
+        }))
+    }]
+  }
+  const entries = toolName === 'fetch_webpage'
+    ? (Array.isArray(record.results) ? record.results : [])
+    : [record]
+  const query = typeof record.query === 'string' ? record.query : undefined
+  const events: StreamEvent[] = []
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const recordEntry = entry as Record<string, unknown>
+    if (typeof recordEntry.url !== 'string' || typeof recordEntry.content !== 'string') continue
+    events.push({
+      type: 'web_fetch_result',
+      ...(query !== undefined ? { query } : {}),
+      result: recordEntry as unknown as Extract<StreamEvent, { type: 'web_fetch_result' }>['result']
+    })
+  }
+  return events
 }
 
 function positiveInteger (value: unknown): number {

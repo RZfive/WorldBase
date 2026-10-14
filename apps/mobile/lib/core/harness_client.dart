@@ -6,7 +6,7 @@
 ///   Studio 生图、技能、定时任务、记忆、MCP、设置
 /// - 流式事件（seq 排序）+ 断线重连 chat.resume 续传
 /// - 权限询问（permission_request → chat.respond）
-/// - 宿主反向请求（host_request：ask_user / page_automation → host.respond）
+/// - 宿主反向请求（host_request：ask_user / page_automation / scheduler.report → host.respond）
 library;
 
 import 'dart:async';
@@ -72,6 +72,11 @@ Map<String, dynamic> buildChatSendParams({
   double? temperature,
   bool? webSearch,
   List<Map<String, dynamic>> contentParts = const [],
+  bool planModeActive = false,
+  double? budgetLimit,
+  List<Map<String, String>> memoryScopes = const [],
+  List<String>? systemPromptSections,
+  List<String> allowedToolNames = const [],
 }) {
   final params = <String, dynamic>{
     'conversationId': conversationId,
@@ -85,11 +90,22 @@ Map<String, dynamic> buildChatSendParams({
       'reasoningEffort': reasoningEffort.trim(),
     if (temperature != null) 'temperature': temperature.clamp(0, 2),
     if (contentParts.isNotEmpty) 'contentParts': contentParts,
+    // 运行上下文（对齐 Rust ChatRunContext / Electron chat.send 组装）：
+    // 计划模式由 Rust 拦截变更类工具；预算上限每次 provider 调用后检查；
+    // 空 memoryScopes 时 Rust 跳过记忆召回；非空 allowedToolNames 为白名单
+    // （Rust 语义：空 = 不限制）。
+    'planModeActive': planModeActive,
+    'budgetLimit': ?budgetLimit,
+    'memoryScopes': memoryScopes,
+    if (allowedToolNames.isNotEmpty) 'allowedToolNames': allowedToolNames,
   };
-  if (webSearch == true) {
-    params['systemPromptSections'] = <String>[
+  final sections = <String>[
+    if (webSearch == true)
       '联网搜索已开启：涉及外部信息时优先调用 web_search；必要时再调用 fetch_webpage。',
-    ];
+    ...?systemPromptSections,
+  ];
+  if (sections.isNotEmpty) {
+    params['systemPromptSections'] = sections;
   } else if (webSearch == false) {
     params['deniedToolNames'] = <String>[
       'web_search',
@@ -1355,6 +1371,9 @@ class ScheduleEntry {
     this.schedule,
     this.selectedSkillIds = const [],
     this.selectedMcpServerIds = const [],
+    this.toolPolicy = 'standard',
+    this.providerId,
+    this.modelId,
     this.retryPolicy = const ScheduledTaskRetryPolicy(),
     this.retryScheduledAt,
     this.retryAttempt = 0,
@@ -1373,6 +1392,12 @@ class ScheduleEntry {
   final ScheduledTaskSchedule? schedule;
   final List<String> selectedSkillIds;
   final List<String> selectedMcpServerIds;
+  /// 无人值守运行的工具权限模式：`standard` 保持默认（ask 类工具与 shell 一律
+  /// 跳过）；`autoApprove` 运行时自动批准（毁灭性命令仍由 Rust 权限引擎拒绝）。
+  final String toolPolicy;
+  /// 任务级供应商/模型钉扎（与全局默认供应商分离；null = 跟随默认）。
+  final String? providerId;
+  final String? modelId;
   final ScheduledTaskRetryPolicy retryPolicy;
   final String? retryScheduledAt;
   final int retryAttempt;
@@ -1404,6 +1429,12 @@ class ScheduleEntry {
             ?.whereType<String>()
             .toList() ??
         const [],
+    toolPolicy:
+        ((j['toolPolicy'] ?? j['tool_policy']) as String?) == 'autoApprove'
+        ? 'autoApprove'
+        : 'standard',
+    providerId: (j['providerId'] ?? j['provider_id']) as String?,
+    modelId: (j['modelId'] ?? j['model_id']) as String?,
     retryPolicy: ScheduledTaskRetryPolicy.fromJson(
       j['retryPolicy'] ?? j['retry_policy'],
     ),
@@ -1428,6 +1459,9 @@ class ScheduleEntry {
     if (schedule != null) 'schedule': schedule!.toJson(),
     'selectedSkillIds': selectedSkillIds,
     'selectedMcpServerIds': selectedMcpServerIds,
+    'toolPolicy': toolPolicy,
+    if (providerId != null) 'providerId': providerId,
+    if (modelId != null) 'modelId': modelId,
     'retryPolicy': retryPolicy.toJson(),
     if (retryScheduledAt != null) 'retryScheduledAt': retryScheduledAt,
     'retryAttempt': retryAttempt,
@@ -1435,6 +1469,76 @@ class ScheduleEntry {
     if (createdAt.isNotEmpty) 'createdAt': createdAt,
     if (updatedAt.isNotEmpty) 'updatedAt': updatedAt,
     'lastStatus': lastStatus,
+  };
+}
+
+/// Agent 工作区记忆条目（对齐 protocol::WorkspaceMemoryEntry，camelCase）。
+/// 手动新建时桌面端默认落在 `user:local-user` 作用域，这里保持一致。
+class WorkspaceMemoryEntry {
+  WorkspaceMemoryEntry({
+    this.id = '',
+    this.scopeType = 'user',
+    this.scopeId = 'local-user',
+    this.memoryType = 'knowledge',
+    required this.title,
+    required this.summary,
+    this.details,
+    this.tags = const [],
+    this.importance = 0.5,
+    this.confidence = 0.5,
+    this.pinned = false,
+    this.lastUsedAt,
+    this.createdAt = '',
+    this.updatedAt = '',
+  });
+
+  final String id;
+  final String scopeType;
+  final String scopeId;
+  final String memoryType;
+  final String title;
+  final String summary;
+  final String? details;
+  final List<String> tags;
+  final double importance;
+  final double confidence;
+  final bool pinned;
+  final String? lastUsedAt;
+  final String createdAt;
+  final String updatedAt;
+
+  static WorkspaceMemoryEntry fromMap(Map map) {
+    final j = map.cast<String, dynamic>();
+    return WorkspaceMemoryEntry(
+      id: j['id'] as String? ?? '',
+      scopeType: j['scopeType'] as String? ?? 'user',
+      scopeId: j['scopeId'] as String? ?? '',
+      memoryType: j['memoryType'] as String? ?? 'knowledge',
+      title: j['title'] as String? ?? '',
+      summary: j['summary'] as String? ?? '',
+      details: j['details'] as String?,
+      tags: (j['tags'] as List?)?.whereType<String>().toList() ?? const [],
+      importance: (j['importance'] as num?)?.toDouble() ?? 0.5,
+      confidence: (j['confidence'] as num?)?.toDouble() ?? 0.5,
+      pinned: j['pinned'] as bool? ?? false,
+      lastUsedAt: j['lastUsedAt'] as String?,
+      createdAt: j['createdAt'] as String? ?? '',
+      updatedAt: j['updatedAt'] as String? ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    if (id.isNotEmpty) 'id': id,
+    'scopeType': scopeType,
+    'scopeId': scopeId,
+    'memoryType': memoryType,
+    'title': title,
+    'summary': summary,
+    if (details != null && details!.trim().isNotEmpty) 'details': details,
+    'tags': tags,
+    'importance': importance,
+    'confidence': confidence,
+    'pinned': pinned,
   };
 }
 
@@ -1778,7 +1882,7 @@ class HostRequest {
   });
   final String streamId;
   final String requestId;
-  final String kind; // ask_user / page_automation / document.openOriginal
+  final String kind; // ask_user / page_automation / document.openOriginal / scheduler.progress / scheduler.report
   final Map<String, dynamic> payload;
 }
 
@@ -2123,6 +2227,11 @@ class HarnessClient {
     double? temperature,
     bool? webSearch,
     List<Map<String, dynamic>> contentParts = const [],
+    bool planModeActive = false,
+    double? budgetLimit,
+    List<Map<String, String>> memoryScopes = const [],
+    List<String>? systemPromptSections,
+    List<String> allowedToolNames = const [],
   }) async {
     final params = buildChatSendParams(
       conversationId: conversationId,
@@ -2134,6 +2243,11 @@ class HarnessClient {
       temperature: temperature,
       webSearch: webSearch,
       contentParts: contentParts,
+      planModeActive: planModeActive,
+      budgetLimit: budgetLimit,
+      memoryScopes: memoryScopes,
+      systemPromptSections: systemPromptSections,
+      allowedToolNames: allowedToolNames,
     );
     final result = await call('chat.send', params);
     final streamId = _readStreamId(result, method: 'chat.send');
@@ -2145,6 +2259,44 @@ class HarnessClient {
   Future<Map<String, dynamic>> parseDocumentFile(String path) async {
     final result = await call('doc.parse', {'path': path});
     return (result as Map).cast<String, dynamic>();
+  }
+
+  // ---------- 文档草稿（AI 草稿生命周期，状态在 Rust 侧） ----------
+
+  /// 把 staged 草稿写回原文件；`sourceSha256` 用于乐观并发校验（可选）。
+  Future<Map<String, dynamic>> applyDocumentDraft(
+    String artifactId, {
+    String? sourceSha256,
+  }) async {
+    final result = await call('doc.draft.apply', {
+      'artifactId': artifactId,
+      if (sourceSha256 != null && sourceSha256.isNotEmpty)
+        'sourceSha256': sourceSha256,
+    });
+    return (result as Map?)?.cast<String, dynamic>() ?? const {};
+  }
+
+  /// 把草稿导出为一份新文件（绝对路径或相对工作区路径）。
+  Future<Map<String, dynamic>> saveDocumentDraftAs(
+    String artifactId, {
+    required String targetPath,
+  }) async {
+    final result = await call('doc.draft.saveAs', {
+      'artifactId': artifactId,
+      'targetPath': targetPath,
+    });
+    return (result as Map?)?.cast<String, dynamic>() ?? const {};
+  }
+
+  Future<Map<String, dynamic>> discardDocumentDraft(String artifactId) async {
+    final result = await call('doc.draft.discard', {'artifactId': artifactId});
+    return (result as Map?)?.cast<String, dynamic>() ?? const {};
+  }
+
+  Future<Map<String, dynamic>?> getDocumentDraft(String filePath) async {
+    final result = await call('doc.draft.get', {'filePath': filePath});
+    if (result == null || result is! Map) return null;
+    return result.cast<String, dynamic>();
   }
 
   /// Import a document through the shared document-workbench contract.
@@ -2827,6 +2979,9 @@ class HarnessClient {
     bool enabled = true,
     List<String> selectedSkillIds = const [],
     List<String> selectedMcpServerIds = const [],
+    String toolPolicy = 'standard',
+    String? providerId,
+    String? modelId,
     ScheduledTaskRetryPolicy? retryPolicy,
     String? createdBy,
   }) {
@@ -2839,6 +2994,9 @@ class HarnessClient {
       if (selectedSkillIds.isNotEmpty) 'selectedSkillIds': selectedSkillIds,
       if (selectedMcpServerIds.isNotEmpty)
         'selectedMcpServerIds': selectedMcpServerIds,
+      'toolPolicy': toolPolicy == 'autoApprove' ? 'autoApprove' : 'standard',
+      'providerId': ?providerId,
+      'modelId': ?modelId,
       if (retryPolicy != null) 'retryPolicy': retryPolicy.toJson(),
       if (createdBy != null && createdBy.trim().isNotEmpty)
         'createdBy': createdBy.trim(),
@@ -2855,6 +3013,9 @@ class HarnessClient {
     bool? enabled,
     List<String>? selectedSkillIds,
     List<String>? selectedMcpServerIds,
+    String? toolPolicy,
+    String? providerId,
+    String? modelId,
     ScheduledTaskRetryPolicy? retryPolicy,
     String? createdBy,
   }) async {
@@ -2867,6 +3028,11 @@ class HarnessClient {
       'enabled': ?enabled,
       'selectedSkillIds': ?selectedSkillIds,
       'selectedMcpServerIds': ?selectedMcpServerIds,
+      'toolPolicy': ?toolPolicy,
+      // 空字符串 = 清除任务级钉扎（回归默认）；null = 不修改。
+      if (providerId != null)
+        'providerId': providerId == '' ? null : providerId,
+      if (modelId != null) 'modelId': modelId == '' ? null : modelId,
       if (retryPolicy != null) 'retryPolicy': retryPolicy.toJson(),
       'createdBy': ?createdBy,
     };
@@ -2898,6 +3064,107 @@ class HarnessClient {
       call('memory.add', {'content': content, 'tags': tags});
 
   Future<void> deleteMemory(int id) => call('memory.delete', {'id': id});
+
+  // ---------- 记忆工作台（对齐 Electron memory.list/save/pin/...） ----------
+
+  /// 工作台记忆列表；空 scopes 在 Rust `memory.list` 语义下不过滤作用域。
+  Future<List<WorkspaceMemoryEntry>> listWorkspaceMemories({
+    String? query,
+    List<String> memoryTypes = const [],
+    int limit = 200,
+  }) async {
+    final result = await call('memory.list', {
+      if (query != null && query.trim().isNotEmpty) 'query': query.trim(),
+      if (memoryTypes.isNotEmpty) 'memoryTypes': memoryTypes,
+      'limit': limit,
+    });
+    final list = result?['entries'] as List? ?? [];
+    return list.map((e) => WorkspaceMemoryEntry.fromMap(e as Map)).toList();
+  }
+
+  /// 新建或更新一条工作台记忆（title 与 summary 必填，Rust 侧强校验）。
+  Future<WorkspaceMemoryEntry> saveWorkspaceMemory(
+    WorkspaceMemoryEntry entry,
+  ) async {
+    final result = await call('memory.save', {'entry': entry.toJson()});
+    final saved = result?['entry'];
+    if (saved is! Map) throw FormatException('memory.save missing entry');
+    return WorkspaceMemoryEntry.fromMap(saved);
+  }
+
+  Future<bool> pinWorkspaceMemory(String id, bool pinned) async {
+    final result = await call('memory.pin', {'id': id, 'pinned': pinned});
+    return result?['updated'] == true;
+  }
+
+  Future<bool> deleteWorkspaceMemory(String id) async {
+    final result = await call('memory.delete', {'id': id});
+    return result?['deleted'] == true;
+  }
+
+  /// 应用压缩计划（Rust 只执行 plan；AI 编排在宿主侧）。
+  Future<Map<String, dynamic>> compactWorkspaceMemories(
+    Map<String, dynamic> plan,
+  ) async {
+    final result = await call('memory.compact', {'plan': plan});
+    return (result as Map?)?.cast<String, dynamic>() ?? const {};
+  }
+
+  Future<Map<String, dynamic>> memoryCompactionStatus() async {
+    final result = await call('memory.compactStatus', {});
+    return (result as Map?)?.cast<String, dynamic>() ?? const {};
+  }
+
+  Future<Map<String, dynamic>> memoryIndexStatus() async {
+    final result = await call('memory.indexStatus', {});
+    return (result as Map?)?.cast<String, dynamic>() ?? const {};
+  }
+
+  /// 配置向量召回管线；`config: null` 表示关闭。移动端暂只读展示索引状态，
+  /// 预留该接口供后续设置页接入。
+  Future<void> configureMemoryEmbedding({
+    Map<String, dynamic>? config,
+    bool retryFailed = false,
+  }) => call('memory.configureEmbedding', {
+      'config': config,
+      'retryFailed': retryFailed,
+    });
+
+  /// 会话结束后把本轮对话写入记忆库（对齐 Electron 的会话后 ingest，
+  /// 与 chat.send 的召回 scopes 保持同域）。
+  Future<void> ingestConversationMemory({
+    required List<Map<String, String>> scopes,
+    required String userMessage,
+    String? finalAssistantText,
+    String? sourceConversationId,
+    List<String> toolNames = const [],
+    Map<String, dynamic>? agent,
+  }) {
+    final assistant = (finalAssistantText ?? '').trim();
+    final conversation = (sourceConversationId ?? '').trim();
+    return call('memory.ingest', {
+      'scopes': scopes,
+      'userMessages': [userMessage],
+      if (assistant.isNotEmpty) 'finalAssistantText': assistant,
+      if (conversation.isNotEmpty) 'sourceConversationId': conversation,
+      if (toolNames.isNotEmpty) 'toolNames': toolNames,
+      'agent': ?agent,
+    });
+  }
+
+  /// 聊天召回作用域（对齐 Electron agent-context.ts 的 resolveRustMemoryScopes
+  /// 子集）：手动/自动记忆都落在 `user:local-user`，选中 Agent 时追加其私有域。
+  static List<Map<String, String>> buildChatMemoryScopes(
+    AgentDefinition? agent,
+  ) {
+    final enabled = agent?.memoryScopes ?? const ['user', 'agent', 'project'];
+    return [
+      if (enabled.contains('user'))
+        {'scopeType': 'user', 'scopeId': 'local-user'},
+      if (agent != null && agent.id.isNotEmpty && enabled.contains('agent'))
+        {'scopeType': 'agent', 'scopeId': agent.id},
+    ];
+  }
 
   // ---------- MCP ----------
 

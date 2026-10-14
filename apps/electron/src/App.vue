@@ -21,8 +21,10 @@ import type { ActiveTerminalContext } from './shared/terminal-types'
 import type {
   ActivePageAutomationContext,
   BrowserAutomationAction,
+  BrowserAutomationArticle,
   BrowserAutomationActionResult,
   BrowserAutomationSnapshot,
+  PageAutomationRendererResult,
   PageAutomationRequestEnvelope,
   PageAutomationResponseEnvelope
 } from './shared/page-automation-types'
@@ -96,6 +98,7 @@ interface ActivePageSurfaceSummary {
 
 interface BrowserAutomationViewHandle {
   captureAutomationSnapshot: () => Promise<BrowserAutomationSnapshot>
+  captureArticleSnapshot?: () => Promise<BrowserAutomationArticle>
   runAutomationAction: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
 }
 
@@ -402,9 +405,14 @@ async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelo
       throw new Error(t('appShell.pageAutomationNoActivePage'))
     }
 
-    const result = payload.request.type === 'snapshot'
-      ? await handle.captureAutomationSnapshot()
-      : await handle.runAutomationAction(payload.request.action)
+    let result: PageAutomationRendererResult
+    if (payload.request.type === 'snapshot') {
+      result = payload.request.mode === 'article' && handle.captureArticleSnapshot
+        ? await handle.captureArticleSnapshot()
+        : await handle.captureAutomationSnapshot()
+    } else {
+      result = await handle.runAutomationAction(payload.request.action)
+    }
 
     response = {
       requestId: payload.requestId,

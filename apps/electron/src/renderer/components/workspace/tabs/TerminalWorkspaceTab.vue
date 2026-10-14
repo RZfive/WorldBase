@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Terminal } from '@xterm/xterm'
+import type { ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { PromptEolMarkFilter } from '../../../../../electron/main-process/terminal/terminal-ansi'
@@ -24,12 +25,42 @@ const hostRef = ref<HTMLDivElement | null>(null)
 let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let resizeObserver: ResizeObserver | null = null
+let themeObserver: MutationObserver | null = null
 let dataCleanup: (() => void) | null = null
 let exitCleanup: (() => void) | null = null
 let sessionId = ''
 let exited = false
 /** Streams PTY data through the zsh partial-line-mark filter before display. */
 const eolMarkFilter = new PromptEolMarkFilter()
+
+/** Reactive so the container background and xterm palette switch in lockstep. */
+const colorScheme = ref<'dark' | 'light'>(currentColorScheme())
+
+/** Canvas palettes; colors mirror the app surfaces of each theme. */
+const DARK_PALETTE: ITheme = {
+  background: '#1b1f27',
+  foreground: '#d7dce5',
+  cursor: '#d7dce5',
+  selectionBackground: 'rgba(96, 130, 200, 0.35)'
+}
+const LIGHT_PALETTE: ITheme = {
+  background: '#f4f5f9',
+  foreground: '#1d2133',
+  cursor: '#1d2133',
+  selectionBackground: 'rgba(67, 83, 214, 0.22)'
+}
+
+/** Resolved theme lands on <html data-theme> (App.vue, async at startup);
+ * before it does, follow the same system hint utils/theme.ts uses. */
+function currentColorScheme (): 'dark' | 'light' {
+  const applied = document.documentElement.dataset.theme
+  if (applied === 'light' || applied === 'dark') return applied
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+function paletteFor (scheme: 'dark' | 'light'): ITheme {
+  return scheme === 'light' ? LIGHT_PALETTE : DARK_PALETTE
+}
 
 function persistState (): void {
   emit('updateWorkspace', {
@@ -55,7 +86,8 @@ async function createSession (): Promise<void> {
   const info = await window.electronAPI.createTerminalSession({
     cwd: initialCwd || undefined,
     cols: term?.cols || 80,
-    rows: term?.rows || 24
+    rows: term?.rows || 24,
+    colorScheme: colorScheme.value
   })
   sessionId = info.id
 
@@ -89,12 +121,11 @@ onMounted(async () => {
     cursorBlink: true,
     scrollback: 5000,
     allowProposedApi: true,
-    theme: {
-      background: '#1b1f27',
-      foreground: '#d7dce5',
-      cursor: '#d7dce5',
-      selectionBackground: 'rgba(96, 130, 200, 0.35)'
-    }
+    // Shell/prompt themes tuned for the opposite brightness emit near-invisible
+    // text; the renderer lifts any color below WCAG AA contrast so echoes stay
+    // readable on either canvas.
+    minimumContrastRatio: 4.5,
+    theme: paletteFor(colorScheme.value)
   })
   fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
@@ -123,6 +154,14 @@ onMounted(async () => {
   })
   resizeObserver.observe(host)
 
+  // Theme is applied imperatively to <html data-theme> (utils/theme.ts); live
+  // xterm colors must follow it the same way CSS consumers do.
+  themeObserver = new MutationObserver(() => {
+    colorScheme.value = currentColorScheme()
+    if (term) term.options.theme = paletteFor(colorScheme.value)
+  })
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+
   await createSession()
 })
 
@@ -138,6 +177,8 @@ onActivated(() => {
 })
 
 onBeforeUnmount(() => {
+  themeObserver?.disconnect()
+  themeObserver = null
   resizeObserver?.disconnect()
   resizeObserver = null
   dataCleanup?.()
@@ -180,7 +221,7 @@ defineExpose({
 </script>
 
 <template>
-  <div class="terminal-workspace-tab">
+  <div class="terminal-workspace-tab" :class="{ 'scheme-light': colorScheme === 'light' }">
     <div ref="hostRef" class="terminal-host"></div>
   </div>
 </template>
@@ -192,9 +233,15 @@ defineExpose({
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* Must match the active xterm canvas palette exactly — a seam would show
+     around the terminal grid. */
   background: #1b1f27;
   overflow: hidden;
   padding: 6px 4px 6px 8px;
+}
+
+.terminal-workspace-tab.scheme-light {
+  background: #f4f5f9;
 }
 
 .terminal-host {
@@ -206,5 +253,13 @@ defineExpose({
 .terminal-host :deep(.xterm) {
   height: 100%;
   padding: 4px 0;
+}
+
+/* xterm.css paints the viewport #000 (so macOS scrollbars read as opaque) and
+   only syncs the theme color onto its inner scrollable node — the grid rounds
+   down to whole rows, leaving #000 slivers above/below the screen. Transparent
+   lets the theme-following container show through instead. */
+.terminal-host :deep(.xterm .xterm-viewport) {
+  background-color: transparent;
 }
 </style>

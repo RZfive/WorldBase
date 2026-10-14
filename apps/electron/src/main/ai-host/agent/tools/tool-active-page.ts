@@ -1,10 +1,13 @@
 import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 import type { ProgressCallback } from '../agent-core.js'
-import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationInputField, BrowserAutomationSnapshot } from '../../../../shared/page-automation-types.js'
+import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationArticle, BrowserAutomationInputField, BrowserAutomationSnapshot } from '../../../../shared/page-automation-types.js'
 import type { DocumentArtifact } from '../../../document-workbench/document-types.js'
 import type { ToolServices } from './index.js'
 
+type ReadPageMode = 'interactive' | 'article'
+
 interface ReadCurrentPageArgs {
+  mode?: ReadPageMode
   max_chars?: number
 }
 
@@ -41,6 +44,7 @@ function truncateText (value: string, maxChars: number): string {
 
 function normalizeReadArgs (args: Record<string, unknown>): ReadCurrentPageArgs {
   return {
+    mode: args.mode === 'article' || args.mode === 'interactive' ? args.mode : undefined,
     max_chars: typeof args.max_chars === 'number' ? args.max_chars : undefined
   }
 }
@@ -150,12 +154,24 @@ function sanitizeSnapshot (snapshot: BrowserAutomationSnapshot, maxChars: number
   }
 }
 
-async function ensurePageSnapshot (services: ToolServices): Promise<BrowserAutomationSnapshot> {
+function isArticle (value: BrowserAutomationSnapshot | BrowserAutomationArticle): value is BrowserAutomationArticle {
+  return 'text' in value && 'wordCount' in value
+}
+
+async function ensurePageSnapshot (services: ToolServices, mode?: ReadPageMode): Promise<BrowserAutomationSnapshot | BrowserAutomationArticle> {
   if (!services.readActivePage) {
     throw new Error('Current page automation is unavailable in this session.')
   }
 
-  return await services.readActivePage()
+  return await services.readActivePage(mode)
+}
+
+async function ensureInteractiveSnapshot (services: ToolServices): Promise<BrowserAutomationSnapshot> {
+  const result = await ensurePageSnapshot(services)
+  if (isArticle(result)) {
+    throw new Error('Interactive page snapshot is unavailable for this page surface.')
+  }
+  return result
 }
 
 async function ensurePageActionResult (services: ToolServices, action: BrowserAutomationAction): Promise<BrowserAutomationActionResult> {
@@ -223,21 +239,46 @@ export function toolReadCurrentPage (services: ToolServices): Tool {
   return {
     definition: {
       name: 'read_current_page',
-      description: 'Inspect the currently active in-app browser page. Returns the live page title, URL, a readable text preview, a list of likely interactive elements, and detected form fields with selectors. Use this before interacting with the page.',
+      description: 'Inspect the currently active in-app browser page. Two modes: mode "interactive" (default) returns the live page title, URL, a readable text preview, likely interactive elements, and form fields with selectors — use it before operating the page. mode "article" returns a readability-style extraction of the primary page content as markdown — use it for reading and information retrieval. When a web_search/web_fetch result reports access "blocked"/"degraded", open the page with open_workspace_tab(kind="browser") and read it here with mode "article".',
       parameters: {
         type: 'object',
         properties: {
+          mode: {
+            type: 'string',
+            enum: ['interactive', 'article'],
+            description: 'interactive (default): DOM snapshot with interactive elements and form selectors. article: readable primary-content text for retrieval.'
+          },
           max_chars: {
             type: 'integer',
-            description: `Maximum characters from the live page text preview to return. Default ${DEFAULT_MAX_CHARS}, maximum ${MAX_TEXT_CHARS}.`
+            description: `Maximum characters from the live page text preview to return (interactive mode). Default ${DEFAULT_MAX_CHARS}, maximum ${MAX_TEXT_CHARS}.`
           }
         }
       }
     },
     handler: async (args, onProgress) => {
       const normalized = normalizeReadArgs(args)
+      if (normalized.mode === 'article') {
+        onProgress?.('🌐 Reading current page', 'Extracting readable article content from the active embedded browser page')
+        const result = await ensurePageSnapshot(services, 'article')
+        if (!isArticle(result)) {
+          throw new Error('Article extraction is unavailable for this page surface.')
+        }
+        onProgress?.('✅ Current page captured', result.title || result.url)
+        return {
+          ok: true,
+          mode: 'article',
+          page: result,
+          guidance: [
+            'The page content above is the primary article text (headings, paragraphs, lists) as markdown.',
+            result.truncated
+              ? `Text was truncated around ${result.text.length} characters; use interact_current_page with action "extract" plus offset/max_chars, or save_current_page_as_document, to read the remainder.`
+              : '',
+            'Call this tool with mode "interactive" (default) when you need clickable elements and form selectors instead of article text.'
+          ].filter(Boolean).join(' ')
+        }
+      }
       onProgress?.('🌐 Reading current page', 'Collecting a live snapshot from the active embedded browser page')
-      const snapshot = await ensurePageSnapshot(services)
+      const snapshot = await ensureInteractiveSnapshot(services)
       const sanitized = sanitizeSnapshot(snapshot, normalized.max_chars || DEFAULT_MAX_CHARS)
       onProgress?.('✅ Current page captured', sanitized.title || sanitized.url)
       return {
@@ -335,7 +376,7 @@ export function toolInteractCurrentPage (services: ToolServices): Tool {
       const action = normalizeInteractArgs(args)
       onProgress?.('🖱️ Interacting with current page', `${action.type}${'selector' in action && action.selector ? `: ${action.selector}` : ''}`)
       const actionResult = await ensurePageActionResult(services, action)
-      const snapshot = sanitizeSnapshot(await ensurePageSnapshot(services), DEFAULT_MAX_CHARS)
+      const snapshot = sanitizeSnapshot(await ensureInteractiveSnapshot(services), DEFAULT_MAX_CHARS)
       onProgress?.('✅ Page interaction complete', action.type)
       return {
         ok: true,
@@ -388,7 +429,7 @@ export function toolFillCurrentPageForm (services: ToolServices): Tool {
 
       onProgress?.('📝 Filling current page form', `${fields.length} field(s)`)
       const actionResult = await ensurePageActionResult(services, { type: 'batch_input', fields })
-      const snapshot = sanitizeSnapshot(await ensurePageSnapshot(services), DEFAULT_MAX_CHARS)
+      const snapshot = sanitizeSnapshot(await ensureInteractiveSnapshot(services), DEFAULT_MAX_CHARS)
       onProgress?.('✅ Form fill complete', `filled ${(actionResult as BrowserAutomationActionResult).filled ?? '?'} field(s)`)
       return {
         ok: true,

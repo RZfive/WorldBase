@@ -5,6 +5,7 @@ import { resolveProjectIcon } from "../../utils/project-icon";
 import { normalizeWebUrlInput } from "../../utils/web-app";
 import type {
   BrowserAutomationAction,
+  BrowserAutomationArticle,
   BrowserAutomationActionResult,
   BrowserAutomationSnapshot,
   BrowserAutomationSnapshotElement,
@@ -427,6 +428,114 @@ async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
   `);
 }
 
+const ARTICLE_TEXT_LIMIT = 24000;
+/** Non-content chrome excluded from reading-mode extraction. */
+const ARTICLE_SKIP_TAGS = 'nav, header, footer, aside, script, style, noscript, form, template, iframe, svg, button, select, input, textarea';
+
+/**
+ * Reading-mode extraction: pick the densest content container and serialize
+ * its headings/paragraphs/lists as markdown-ish text. Skips navigation,
+ * headers/footers, asides, and forms so retrieval gets the article, not the
+ * page chrome.
+ */
+async function captureArticleSnapshot(): Promise<BrowserAutomationArticle> {
+  return await executeInPage<BrowserAutomationArticle>(`
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+
+    const containerScore = (element) => {
+      const copy = element.cloneNode(true);
+      copy.querySelectorAll('${ARTICLE_SKIP_TAGS}').forEach((node) => node.remove());
+      let score = 0;
+      copy.querySelectorAll('p, li, blockquote, article, section, td, pre, h1, h2, h3, h4, h5, h6').forEach((node) => {
+        score += (node.textContent || '').length;
+      });
+      return score;
+    };
+
+    const candidates = Array.from(document.querySelectorAll(
+      'article, main, [role="main"], .post, .article, .entry-content, .markdown-body, #content, .content, body'
+    ));
+    let best = document.body;
+    let bestScore = -1;
+    for (const candidate of candidates) {
+      const score = containerScore(candidate);
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+
+    const isBlock = (element) => {
+      const display = getComputedStyle(element).display;
+      return display === 'block' || display === 'list-item' || display === 'flex' || display === 'grid';
+    };
+
+    const lines = [];
+    const pushBlock = (element) => {
+      if (element.closest('${ARTICLE_SKIP_TAGS}')) return;
+      const tag = element.tagName.toLowerCase();
+      if (/^h[1-6]$/.test(tag)) {
+        const level = Number(tag[1]);
+        const text = normalize(element.textContent);
+        if (text) lines.push('#'.repeat(level) + ' ' + text);
+        return;
+      }
+      if (tag === 'li') {
+        const text = normalize(element.textContent);
+        if (text) lines.push('- ' + text);
+        return;
+      }
+      if (tag === 'pre') {
+        const text = (element.textContent || '').replace(/\\n+$/, '');
+        if (text.trim()) lines.push('\\n\`\`\`\\n' + text + '\\n\`\`\`\\n');
+        return;
+      }
+      if (tag === 'br') return;
+      if (['p', 'blockquote', 'dd', 'dt', 'figcaption', 'td', 'th'].includes(tag)) {
+        const text = normalize(element.textContent);
+        if (text) lines.push(text);
+        return;
+      }
+      if (element.children.length === 0) {
+        const ownText = Array.from(element.childNodes)
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => normalize(node.textContent))
+          .filter(Boolean)
+          .join(' ');
+        if (ownText) lines.push(ownText);
+        return;
+      }
+      if (isBlock(element)) {
+        for (const child of element.children) pushBlock(child);
+      }
+    };
+
+    const body = [];
+    const LIMIT = ${ARTICLE_TEXT_LIMIT};
+    for (const child of best.children) {
+      pushBlock(child);
+      if (lines.length && lines.join('\\n\\n').length > LIMIT) break;
+    }
+    for (const line of lines) {
+      body.push(line);
+      if (body.join('\\n\\n').length > LIMIT) break;
+    }
+    let text = body.join('\\n\\n');
+    const truncated = text.length > LIMIT;
+    if (truncated) text = text.slice(0, LIMIT);
+
+    return {
+      url: location.href,
+      title: document.title,
+      origin: location.origin || null,
+      text,
+      wordCount: text ? text.split(/\\s+/).length : 0,
+      truncated,
+      capturedAt: Date.now(),
+    };
+  `);
+}
+
 async function runAutomationAction(action: BrowserAutomationAction): Promise<BrowserAutomationActionResult> {
   return await executeInPage<BrowserAutomationActionResult>(`
     const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -818,6 +927,7 @@ function requestAiOperate() {
 
 defineExpose({
   captureAutomationSnapshot,
+  captureArticleSnapshot,
   runAutomationAction,
   reload: reloadPage,
 });

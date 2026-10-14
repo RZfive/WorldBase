@@ -5384,6 +5384,7 @@ impl Tool for CreateScheduledTaskTool {
             schedule: canonical_schedule(&input)?,
             selected_skill_ids: schedule_string_array(&input, "selected_skill_ids"),
             selected_mcp_server_ids: schedule_string_array(&input, "selected_mcp_server_ids"),
+            tool_policy: worldbase_scheduler::ScheduleToolPolicy::default(),
             retry_policy: worldbase_scheduler::ScheduledTaskRetryPolicy {
                 max_retries: input
                     .get("max_retries")

@@ -34,7 +34,7 @@ import { DailySuggestionStore } from '../../src/main/settings/daily-suggestion-s
 import { DailySuggestionService, type SuggestionProjectContext } from '../../src/main/suggestions/daily-suggestion-service.js'
 import { getMainLocale } from '../../src/main/i18n/main-i18n.js'
 import type { AppUpdateState } from '../../src/shared/app-update-types.js'
-import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../src/shared/page-automation-types.js'
+import type { BrowserAutomationAction, BrowserAutomationArticle, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../src/shared/page-automation-types.js'
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AgentDefinition, AgentGroupDefinition } from '../../src/shared/agent-workspace-types.js'
 import { mainState } from './state.js'
@@ -659,6 +659,7 @@ export async function migrateScheduledTasksToRust (): Promise<void> {
         modelId: task.modelId || null,
         selectedSkillIds: task.selectedSkillIds || [],
         selectedMcpServerIds: task.selectedMcpServerIds || [],
+        toolPolicy: task.toolPolicy === 'autoApprove' ? 'autoApprove' : 'standard',
         retryPolicy: task.retryPolicy,
         nextRunAt: task.nextRunAt || null
       })
@@ -766,6 +767,7 @@ function normalizeRustScheduleTask (task: Record<string, unknown>): ScheduledTas
     modelId: typeof task.modelId === 'string' ? task.modelId : null,
     selectedSkillIds: Array.isArray(task.selectedSkillIds) ? task.selectedSkillIds.map(String) : [],
     selectedMcpServerIds: Array.isArray(task.selectedMcpServerIds) ? task.selectedMcpServerIds.map(String) : [],
+    toolPolicy: task.toolPolicy === 'autoApprove' ? 'autoApprove' as const : 'standard' as const,
     retryPolicy: (task.retryPolicy && typeof task.retryPolicy === 'object'
       ? task.retryPolicy
       : { maxRetries: 1, retryDelayMinutes: 10 }) as ScheduledTaskDefinition['retryPolicy'],
@@ -887,7 +889,10 @@ export async function initializeServices (): Promise<void> {
     imageLibraryStore: mainState.imageLibraryStore ?? undefined,
     usageStore: mainState.usageStore ?? undefined,
     getMainWindow: () => getActiveAiRequestWindow(),
-    readActivePage: async () => {
+    readActivePage: async (mode?: 'interactive' | 'article') => {
+      if (mode === 'article') {
+        return await requestPageAutomationFromRenderer<BrowserAutomationArticle>({ type: 'snapshot', mode: 'article' })
+      }
       return await requestPageAutomationFromRenderer<BrowserAutomationSnapshot>({ type: 'snapshot' })
     },
     interactWithActivePage: async (action: BrowserAutomationAction) => {

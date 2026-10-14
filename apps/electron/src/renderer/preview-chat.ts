@@ -8,7 +8,7 @@ import ChatInput from './components/chat/layout/ChatInput.vue'
 import PinnedTodoPanel from './components/chat/layout/PinnedTodoPanel.vue'
 import AuthPermissionPanel from './components/chat/layout/AuthPermissionPanel.vue'
 import AskUserPanel from './components/chat/layout/AskUserPanel.vue'
-import { createAttentionAccordion } from './components/chat/panel/attention-accordion'
+import { createAttentionAccordion, type AttentionPanelId } from './components/chat/panel/attention-accordion'
 import type { ChatMessage } from './components/chat/types'
 import type { AgentSidebarItem, ConversationSidebarItem, GroupSidebarItem, LongTermGoalSidebarItem } from './components/chat/layout/ConversationSidebar.types'
 
@@ -66,8 +66,8 @@ const App = defineComponent({
     const isNew = params.get('new') === '1'
     const isLoading = busy || auth
     // Same one-expanded-at-a-time accordion as ChatPanelContainer.
-    const pendingAttentionPanels = computed<string[]>(() => {
-      const ids: string[] = []
+    const pendingAttentionPanels = computed<AttentionPanelId[]>(() => {
+      const ids: AttentionPanelId[] = []
       if (auth) ids.push('auth')
       if (ask) ids.push('ask')
       ids.push('todo')
