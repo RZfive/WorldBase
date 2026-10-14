@@ -33,7 +33,7 @@ export interface AIEngineServices {
   settingsStore?: SettingsStore
   imageLibraryStore?: ImageLibraryStore
   getMainWindow?: () => BrowserWindow | null
-  readActivePage?: () => Promise<BrowserAutomationSnapshot>
+  readActivePage?: (mode?: 'interactive' | 'article') => Promise<BrowserAutomationSnapshot | BrowserAutomationArticle>
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
@@ -43,7 +43,7 @@ export interface AIEngineServices {
   usageStore?: UsageStore
 }
 
-import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../shared/page-automation-types.js'
+import type { BrowserAutomationAction, BrowserAutomationArticle, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../shared/page-automation-types.js'
 
 export interface AIConfigInput {
   apiKey?: string

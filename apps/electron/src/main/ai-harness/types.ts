@@ -88,6 +88,12 @@ export interface AIRequestOptions {
   subagentNestingDepth?: number
   /** Explicit per-run opt-in for OS-level Computer Use tools. */
   computerUseEnabled?: boolean
+  /**
+   * 无人值守运行（定时任务）的工具权限授权：把 ask 类工具（含 shell）视为
+   * 允许，毁灭性命令仍由 Rust 权限引擎拒绝。只应由任务保存的 toolPolicy
+   * 设置，交互式运行不要传。
+   */
+  autoApprovePermissions?: boolean
 }
 
 /** Minimal model/tool-loop surface shared by the legacy and Rust harnesses. */

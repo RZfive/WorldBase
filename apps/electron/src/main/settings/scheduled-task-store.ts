@@ -4,6 +4,12 @@ import path from 'node:path'
 export type ScheduledTaskStatus = 'idle' | 'running' | 'retrying' | 'completed' | 'failed'
 export type ScheduledTaskRunStatus = 'running' | 'retrying' | 'completed' | 'failed'
 export type ScheduledTaskTrigger = 'manual' | 'schedule'
+/**
+ * 无人值守运行的工具权限模式。`standard` 保持默认（ask 类工具与 shell 一律
+ * 拒绝）；`autoApprove` 在任务运行时自动批准需要确认的工具（含 shell），
+ * 毁灭性命令仍由 Rust 权限引擎拒绝。
+ */
+export type ScheduledTaskToolPolicy = 'standard' | 'autoApprove'
 
 export interface ScheduledTaskProgressEntry {
   at: string
@@ -64,6 +70,7 @@ export interface ScheduledTaskDefinition {
   modelId?: string | null
   selectedSkillIds: string[]
   selectedMcpServerIds: string[]
+  toolPolicy?: ScheduledTaskToolPolicy
   retryPolicy: ScheduledTaskRetryPolicy
   createdAt: string
   updatedAt: string
@@ -235,6 +242,10 @@ function normalizeSchedule (value: unknown): ScheduledTaskSchedule | null {
   return null
 }
 
+function normalizeToolPolicy (value: unknown): ScheduledTaskToolPolicy {
+  return value === 'autoApprove' ? 'autoApprove' : 'standard'
+}
+
 function normalizeTask (value: unknown): ScheduledTaskDefinition | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
 
@@ -266,6 +277,7 @@ function normalizeTask (value: unknown): ScheduledTaskDefinition | null {
     modelId: normalizeString(record.modelId) || null,
     selectedSkillIds: normalizeStringArray(record.selectedSkillIds),
     selectedMcpServerIds: normalizeStringArray(record.selectedMcpServerIds),
+    toolPolicy: normalizeToolPolicy(record.toolPolicy),
     retryPolicy: normalizeRetryPolicy(record.retryPolicy),
     createdAt,
     updatedAt,

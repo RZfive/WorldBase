@@ -124,6 +124,12 @@ export interface RustChatOptions {
   memoryEmbedding?: MemoryEmbeddingRuntimeConfig
   /** Explicit per-run opt-in for OS-level Computer Use tools. */
   computerUseEnabled?: boolean
+  /**
+   * Unattended-run (scheduled task) tool-permission grant: the Rust engine
+   * treats ask-policy tools (including shell) as allowed. Destructive
+   * commands stay denied by the safety classifier.
+   */
+  autoApprovePermissions?: boolean
 }
 
 /** Durable member identity supplied when Electron opens a Rust group session. */
@@ -836,7 +842,8 @@ export class RustHarnessClient {
         memoryScopes: Array.isArray(options?.memoryScopes) ? options.memoryScopes : [],
         memoryQuery: normalizeOptionalString(options?.memoryQuery || text),
         ...(memoryEmbedding ? { memoryEmbedding } : {}),
-        computerUseEnabled: options?.computerUseEnabled === true
+        computerUseEnabled: options?.computerUseEnabled === true,
+        autoApprovePermissions: options?.autoApprovePermissions === true
       })
       const streamId = result.streamId || result.stream_id
       if (!streamId) throw new Error('Rust harness did not return a stream id')

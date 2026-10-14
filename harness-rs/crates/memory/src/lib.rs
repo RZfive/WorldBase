@@ -2874,6 +2874,7 @@ impl Store {
                     schedule: None,
                     selected_skill_ids: Vec::new(),
                     selected_mcp_server_ids: Vec::new(),
+                    tool_policy: Default::default(),
                     retry_policy: Default::default(),
                     retry_scheduled_at: None,
                     retry_attempt: 0,

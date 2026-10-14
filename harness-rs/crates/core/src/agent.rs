@@ -3864,31 +3864,43 @@ pub async fn run_scheduled_task(
     name: &str,
     task: &str,
 ) -> Result<()> {
-    run_scheduled_task_with_context(hub, schedule_id, name, task, ChatRunContext::default()).await
+    run_scheduled_task_with_context(
+        hub,
+        schedule_id,
+        name,
+        task,
+        None,
+        None,
+        ChatRunContext::default(),
+    )
+    .await
 }
 
 /// Manual `schedule.run` entry: prepare the run, then execute it in the
 /// background with the same progress/report bridge as the scheduler loop, so
 /// the desktop 执行日志 updates live for 立即执行 too. Returns the stream and
 /// conversation ids immediately instead of blocking until the task finishes.
+/// The stored entry supplies the same context as a scheduled trigger, so a
+/// manual run honors the saved Skill/MCP selection and tool policy.
 pub async fn start_scheduled_task(
     hub: Arc<Hub>,
-    schedule_id: &str,
-    name: &str,
-    task: &str,
+    entry: &worldbase_protocol::types::ScheduleEntry,
 ) -> Result<(String, String)> {
+    let context = hub.scheduled_task_context(entry);
     let setup = prepare_scheduled_run(
         hub.clone(),
-        schedule_id,
-        name,
-        task,
-        ChatRunContext::default(),
+        &entry.id,
+        &entry.name,
+        &entry.task,
+        entry.provider_id.clone(),
+        entry.model_id.clone(),
+        context,
     )
     .await?;
     let stream_id = setup.stream_id.clone();
     let conversation_id = setup.conversation_id.clone();
-    let schedule_id_owned = schedule_id.to_string();
-    let name_owned = name.to_string();
+    let schedule_id_owned = entry.id.clone();
+    let name_owned = entry.name.clone();
     tokio::spawn(async move {
         if let Err(error) =
             execute_scheduled_run(hub, &schedule_id_owned, &name_owned, setup, "manual").await
@@ -3905,9 +3917,20 @@ pub async fn run_scheduled_task_with_context(
     schedule_id: &str,
     name: &str,
     task: &str,
+    provider_id: Option<String>,
+    model_id: Option<String>,
     context: ChatRunContext,
 ) -> Result<()> {
-    let setup = prepare_scheduled_run(hub.clone(), schedule_id, name, task, context).await?;
+    let setup = prepare_scheduled_run(
+        hub.clone(),
+        schedule_id,
+        name,
+        task,
+        provider_id,
+        model_id,
+        context,
+    )
+    .await?;
     execute_scheduled_run(hub, schedule_id, name, setup, "schedule")
         .await
         .map(|_| ())
@@ -3929,8 +3952,31 @@ async fn prepare_scheduled_run(
     schedule_id: &str,
     name: &str,
     task: &str,
+    provider_id: Option<String>,
+    model_id: Option<String>,
     context: ChatRunContext,
 ) -> Result<ScheduledRunSetup> {
+    // 任务级钉扎优先；未钉扎时回落到全局的「定时任务供应商/模型」设置
+    // （settings.set 的 scheduler.providerId / scheduler.modelId），都没有
+    // 才走默认供应商。
+    let (provider_id, model_id) = match (&provider_id, &model_id) {
+        (Some(_), _) | (_, Some(_)) => (provider_id, model_id),
+        (None, None) => {
+            let scheduler_provider = hub
+                .store
+                .get_setting("scheduler.providerId")
+                .ok()
+                .flatten()
+                .and_then(|value| value.as_str().map(str::to_string));
+            let scheduler_model = hub
+                .store
+                .get_setting("scheduler.modelId")
+                .ok()
+                .flatten()
+                .and_then(|value| value.as_str().map(str::to_string));
+            (scheduler_provider, scheduler_model)
+        }
+    };
     let conv = hub
         .store
         .create_conversation(&format!("[定时] {name}"), None)?;
@@ -3975,8 +4021,9 @@ async fn prepare_scheduled_run(
             capabilities: Capabilities::desktop(),
             interactive: false,
             agent_id: None,
-            provider_id: None,
-            model: None,
+            // 任务保存的供应商/模型钉扎：与默认供应商分离（None = 跟随默认）。
+            provider_id,
+            model: model_id,
             context,
             group_collaboration: None,
             subagent_nesting_depth: 0,
@@ -4250,6 +4297,7 @@ async fn execute_tool_for_run(
     tools: &[Arc<dyn worldbase_tools::Tool>],
     custom_tools: &[ToolDescriptor],
     interactive: bool,
+    auto_approve: bool,
     stream_id: &str,
     abort: &CancellationToken,
     tool_input_errors: &std::collections::HashMap<String, String>,
@@ -4275,6 +4323,7 @@ async fn execute_tool_for_run(
             &name,
             &input,
             interactive,
+            auto_approve,
             Some(abort),
         )
         .await;
@@ -5056,6 +5105,7 @@ async fn run_chat_inner(
                         &tools,
                         &custom_tools,
                         interactive,
+                        context.auto_approve_permissions,
                         &stream_id,
                         &abort,
                         &tool_input_errors,
@@ -5074,6 +5124,7 @@ async fn run_chat_inner(
                         &tools,
                         &custom_tools,
                         interactive,
+                        context.auto_approve_permissions,
                         &stream_id,
                         &abort,
                         &tool_input_errors,

@@ -871,12 +871,208 @@ class _GlobalDialogHostState extends ConsumerState<GlobalDialogHost> {
           'supported': false,
           'error': 'Opening original documents is not supported on mobile hosts',
         },
+      'scheduler.progress' || 'scheduler.report' => _acceptSchedulerRequest(req),
+      'document.draftStaged' => _acceptDocumentDraftStaged(req),
       _ => {'ok': false, 'error': 'unknown host request: ${req.kind}'},
     };
     if (_disposing || !mounted || _terminalStreams.contains(req.streamId)) {
       return;
     }
     await HarnessClient.instance.respondHost(req.requestId, result);
+  }
+
+  /// 定时任务的进度/报告回流（Rust 在合成流 worldbase-scheduler-* 上发起）。
+  /// 桌面端把 report 写入执行日志；移动端按契约应答后把报告弹窗呈现。
+  Map<String, Object?> _acceptSchedulerRequest(HostRequest req) {
+    if (req.kind == 'scheduler.report') _showSchedulerReport(req.payload);
+    return {'success': true};
+  }
+
+  /// AI 通过 doc_draft 工具staged 一份文档草稿后的通知。先按契约应答
+  /// （15s 超时、非致命），再弹窗让用户决定写回 / 丢弃。
+  Map<String, Object?> _acceptDocumentDraftStaged(HostRequest req) {
+    unawaited(_showDraftStagedDialog(req.payload));
+    return {'success': true};
+  }
+
+  Future<void> _showDraftStagedDialog(Map<String, dynamic> payload) async {
+    final artifactId = payload['artifactId']?.toString() ?? '';
+    if (artifactId.isEmpty || _disposing || !mounted) return;
+    final p = DawnPalette.of(context);
+    final fileType = payload['fileType']?.toString() ?? '';
+    final summary = payload['summary']?.toString() ?? '';
+    final sourceSha = payload['sourceSha256']?.toString() ?? '';
+    final dataLossRisk = payload['dataLossRisk'];
+    final risky =
+        dataLossRisk == true ||
+        dataLossRisk.toString() == 'true' ||
+        dataLossRisk.toString() == 'high';
+    final changes = payload['changes'];
+    final changeHint = changes is List && changes.isNotEmpty
+        ? '（${changes.length} 处修改）'
+        : '';
+
+    final action = await showCupertinoDialog<String>(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: false,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: const Text('AI 生成了文档草稿'),
+        content: Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${fileType.isEmpty ? '文档' : fileType.toUpperCase()}$changeHint',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 6),
+              if (summary.isNotEmpty)
+                Text(summary, style: TextStyle(fontSize: 13, color: p.ink2)),
+              if (risky) ...[
+                const SizedBox(height: 6),
+                const Text(
+                  '注意：草稿可能覆盖文件的现有内容。',
+                  style: TextStyle(fontSize: 13, color: iosOrange),
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(ctx).pop('ignore'),
+            child: const Text('忽略'),
+          ),
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(ctx).pop('discard'),
+            child: const Text('丢弃', style: TextStyle(color: iosRed)),
+          ),
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.of(ctx).pop('apply'),
+            child: const Text(
+              '写回原文件',
+              style: TextStyle(color: iosBlue, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (action == null || action == 'ignore' || !mounted) return;
+    try {
+      if (action == 'apply') {
+        await HarnessClient.instance.applyDocumentDraft(
+          artifactId,
+          sourceSha256: sourceSha,
+        );
+        _toast('草稿已写回原文件');
+      } else {
+        await HarnessClient.instance.discardDocumentDraft(artifactId);
+        _toast('草稿已丢弃');
+      }
+    } catch (e) {
+      if (mounted) {
+        await showCupertinoDialog<void>(
+          context: context,
+          useRootNavigator: true,
+          builder: (ctx) => CupertinoAlertDialog(
+            title: const Text('操作失败'),
+            content: Text('$e'),
+            actions: [
+              CupertinoDialogAction(
+                isDefaultAction: true,
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('好'),
+              ),
+            ],
+          ),
+        );
+      }
+    }
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    final overlay = Overlay.of(context, rootOverlay: true);
+    late final OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (_) => Positioned(
+        bottom: 96,
+        left: 32,
+        right: 32,
+        child: IgnorePointer(
+          child: GlassContainer(
+            level: GlassLevel.l2,
+            radius: 12,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            child: Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 13),
+            ),
+          ),
+        ),
+      ),
+    );
+    overlay.insert(entry);
+    Timer(const Duration(seconds: 2), () {
+      if (entry.mounted) entry.remove();
+    });
+  }
+
+  void _showSchedulerReport(Map<String, dynamic> payload) {
+    final taskName = payload['taskName']?.toString() ?? '';
+    final resultText = payload['resultText']?.toString() ?? '';
+    final error = payload['error']?.toString() ?? '';
+    final trigger = payload['trigger']?.toString() == 'manual'
+        ? '手动运行'
+        : '定时触发';
+    final failed = error.isNotEmpty;
+    final body = failed
+        ? error
+        : resultText.isEmpty
+        ? '（无文本结果）'
+        : resultText.length > 800
+        ? '${resultText.substring(0, 800)}…'
+        : resultText;
+    if (!mounted) return;
+    final p = DawnPalette.of(context);
+    showCupertinoDialog<void>(
+      context: context,
+      useRootNavigator: true,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: Text(failed ? '定时任务失败' : '定时任务完成'),
+        content: Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${taskName.isEmpty ? '定时任务' : taskName} · $trigger',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(body, style: TextStyle(fontSize: 13, color: p.ink2)),
+            ],
+          ),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('好'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override

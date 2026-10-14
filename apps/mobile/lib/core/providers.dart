@@ -288,26 +288,38 @@ class ChatSwitches {
     this.enableThinking = false,
     this.reasoningStrength = 'max',
     this.temperature,
+    this.planMode = false,
+    this.budgetLimit,
   });
 
   final bool enableThinking;
   final String reasoningStrength;
   final double? temperature;
+  /// 计划模式：Rust 侧拦截变更类工具（不隐藏工具目录）。
+  final bool planMode;
+  /// 本次运行的费用上限（美元），每次 provider 调用后由 Rust 检查。
+  final double? budgetLimit;
 
   ChatSwitches copyWith({
     bool? enableThinking,
     String? reasoningStrength,
     double? temperature,
+    bool? planMode,
+    double? budgetLimit,
   }) => ChatSwitches(
     enableThinking: enableThinking ?? this.enableThinking,
     reasoningStrength: reasoningStrength ?? this.reasoningStrength,
     temperature: temperature ?? this.temperature,
+    planMode: planMode ?? this.planMode,
+    budgetLimit: budgetLimit ?? this.budgetLimit,
   );
 
   ChatSwitches withTemperature(double value) => ChatSwitches(
     enableThinking: enableThinking,
     reasoningStrength: reasoningStrength,
     temperature: value.clamp(0, 2).toDouble(),
+    planMode: planMode,
+    budgetLimit: budgetLimit,
   );
 }
 
@@ -325,6 +337,17 @@ class ChatSwitchesNotifier extends Notifier<ChatSwitches> {
   }
 
   void setTemperature(double value) => state = state.withTemperature(value);
+
+  void setPlanMode(bool value) => state = state.copyWith(planMode: value);
+
+  void setBudgetLimit(double? value) =>
+      state = ChatSwitches(
+        enableThinking: state.enableThinking,
+        reasoningStrength: state.reasoningStrength,
+        temperature: state.temperature,
+        planMode: state.planMode,
+        budgetLimit: value != null && value > 0 ? value : null,
+      );
 }
 
 final chatSwitchesProvider =
@@ -399,6 +422,21 @@ class _AssistantCheckpoint {
   final List<ChatAttachment> attachments;
 }
 
+/// 一轮对话完成后写入记忆库的计划（发送时刻的快照）。
+class _MemoryIngestPlan {
+  const _MemoryIngestPlan({
+    required this.conversationId,
+    required this.userMessage,
+    required this.scopes,
+    this.agent,
+  });
+
+  final String conversationId;
+  final String userMessage;
+  final List<Map<String, String>> scopes;
+  final Map<String, dynamic>? agent;
+}
+
 /// 聊天控制器：流式接收、工具渲染、分叉/编辑。
 class ChatController extends Notifier<List<UiMessage>> {
   static const _draftConversationId = '__new_conversation__';
@@ -429,6 +467,8 @@ class ChatController extends Notifier<List<UiMessage>> {
   final Map<String, String> _streamConversationIds = {};
   final Map<String, String> _conversationStreamIds = {};
   final Map<String, StreamSubscription<EventFrame>> _chatSubscriptions = {};
+  // 会话结束后写入记忆库所需的每流快照（scopes 与 agent 随发送时刻固定）。
+  final Map<String, _MemoryIngestPlan> _memoryIngestPlans = {};
   final Set<String> _startingConversationIds = {};
   final Set<String> _deletedConversationIds = {};
   final Map<String, _ChatImageTarget> _imageStreamMessages = {};
@@ -772,6 +812,9 @@ class ChatController extends Notifier<List<UiMessage>> {
     // message, not this one.
     final target = ref.read(chatTargetProvider);
     final switches = ref.read(chatSwitchesProvider);
+    // 记忆召回作用域与 Agent 随本轮发送快照（对齐桌面端 runtimeContext）。
+    final agent = ref.read(selectedAgentProvider);
+    final memoryScopes = HarnessClient.buildChatMemoryScopes(agent);
     var conversationId = initialConversationId;
     try {
       final filesPrompt = buildChatUploadedFilesPrompt(attachments);
@@ -837,7 +880,18 @@ class ChatController extends Notifier<List<UiMessage>> {
         reasoningEffort: switches.reasoningStrength,
         temperature: switches.temperature,
         contentParts: contentParts,
+        planModeActive: switches.planMode,
+        budgetLimit: switches.budgetLimit,
+        memoryScopes: memoryScopes,
       );
+      if (normalized.isNotEmpty && memoryScopes.isNotEmpty) {
+        _memoryIngestPlans[streamId] = _MemoryIngestPlan(
+          conversationId: conversationId,
+          userMessage: normalized,
+          scopes: memoryScopes,
+          agent: agent?.toJson(),
+        );
+      }
 
       if (_deletedConversationIds.contains(conversationId)) {
         _startingConversationIds.remove(conversationId);
@@ -970,6 +1024,37 @@ class ChatController extends Notifier<List<UiMessage>> {
     _assistantCheckpoints.remove(conversationId);
     _chatSubscriptions.remove(streamId)?.cancel();
     _publishRuntimeChange(conversationId);
+    final plan = _memoryIngestPlans.remove(streamId);
+    if (plan != null) unawaited(_ingestConversationMemory(plan));
+  }
+
+  /// 会话结束后把本轮对话写入 Rust 记忆库（对齐桌面端 done 后的
+  /// ingestMemory：同 scopes 读写，带 Agent 写入策略）。失败静默，
+  /// 不影响聊天主流程。
+  Future<void> _ingestConversationMemory(_MemoryIngestPlan plan) async {
+    try {
+      final messages = _messagesFor(plan.conversationId);
+      var assistantText = '';
+      final toolNames = <String>[];
+      for (final message in messages) {
+        if (message.role == 'assistant' && message.text.isNotEmpty) {
+          assistantText = message.text;
+        } else if (message.isTool && message.toolName?.isNotEmpty == true) {
+          toolNames.add(message.toolName!);
+        }
+      }
+      if (assistantText.isEmpty && toolNames.isEmpty) return;
+      await HarnessClient.instance.ingestConversationMemory(
+        scopes: plan.scopes,
+        userMessage: plan.userMessage,
+        finalAssistantText: assistantText,
+        sourceConversationId: plan.conversationId,
+        toolNames: toolNames,
+        agent: plan.agent,
+      );
+    } catch (_) {
+      // 记忆写入失败不影响会话；下次会话仍会重试写入。
+    }
   }
 
   void _appendToLastAssistant(String conversationId, String delta) {

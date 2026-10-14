@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import './register-ts-hooks.mjs'
-import { RustHarnessEngine, planModeExitedAfterNativeResult } from '../src/main/ai-harness/rust-harness-engine.ts'
+import { RustHarnessEngine, planModeExitedAfterNativeResult, webToolResultEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
 import { ElectronToolRegistry } from '../src/main/ai-harness/electron-tool-registry.ts'
 import { MCPService } from '../src/main/mcp/mcp-service.ts'
 import { RustHarnessClient } from '../electron/main-process/rust-harness-client.ts'
@@ -1627,4 +1627,52 @@ test('disabling memory while a chat is preparing cannot re-enable a stale embedd
   client.request = async (_method, params) => { payload = params; return { streamId: 'disabled-memory' } }
   await client.chatStream('disabled-session', 'disabled-conversation', 'hello', { memoryEmbedding: stale })
   assert.equal(Object.hasOwn(payload, 'memoryEmbedding'), false)
+})
+
+test('web tool results re-emit as rich web_search_result stream events', () => {
+  const payload = {
+    query: 'electron webview automation',
+    engine: 'bing + duckduckgo',
+    results: [
+      { rank: 1, title: 'Electron docs', url: 'https://www.electronjs.org/docs', snippet: 'webview tag', source: 'bing' },
+      { rank: 2, title: 'Example', url: 'https://example.com/', snippet: 'example', source: 'duckduckgo', published_at: '2026-01-01T00:00:00Z' }
+    ],
+    fetched_at: '2026-01-01T00:00:00Z'
+  }
+  const events = webToolResultEvents('web_search', JSON.stringify(payload))
+  assert.equal(events.length, 1)
+  assert.equal(events[0].type, 'web_search_result')
+  assert.equal(events[0].query, 'electron webview automation')
+  assert.equal(events[0].results.length, 2)
+  assert.equal(events[0].results[1].published_at, '2026-01-01T00:00:00Z')
+
+  // Blocked classification still flows through the card payload untouched.
+  const blocked = webToolResultEvents('web_search', JSON.stringify({
+    query: 'q', engine: 'bing', results: [], access: 'blocked', access_detail: { reason: 'search_sources_failed' }
+  }))
+  assert.equal(blocked.length, 1)
+  assert.equal(blocked[0].results.length, 0)
+})
+
+test('web fetch and batch fetch results re-emit as web_fetch_result events', () => {
+  const entry = {
+    url: 'https://example.com/docs', final_url: 'https://example.com/docs/', ok: false, status: 403,
+    content: 'denied', truncated: false, fetched_at: '2026-01-01T00:00:00Z',
+    access: 'blocked', access_detail: { reason: 'http_blocked' },
+    fallback: { suggested_tools: ['open_workspace_tab', 'read_current_page'], hint: 'use the browser' }
+  }
+  const single = webToolResultEvents('web_fetch', JSON.stringify(entry))
+  assert.equal(single.length, 1)
+  assert.equal(single[0].type, 'web_fetch_result')
+  assert.equal(single[0].result.access, 'blocked')
+  assert.equal(single[0].result.fallback.hint, 'use the browser')
+
+  const batch = webToolResultEvents('fetch_webpage', JSON.stringify({ query: 'q', results: [entry, entry], success_count: 0, failure_count: 2 }))
+  assert.equal(batch.length, 2)
+  assert.equal(batch[0].query, 'q')
+
+  // Unrecognized shapes degrade to no rich events, not renderer errors.
+  assert.deepEqual(webToolResultEvents('web_fetch', 'upstream exploded'), [])
+  assert.deepEqual(webToolResultEvents('read_file', JSON.stringify({ content: 'x' })), [])
+  assert.deepEqual(webToolResultEvents('fetch_webpage', JSON.stringify({ results: ['nope'] })), [])
 })

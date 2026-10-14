@@ -81,7 +81,7 @@ export function installWebviewDownloadHandler (targetSession: Session): void {
   })
 }
 
-export function openWebviewPopupInDock (url: string): void {
+export function openWebviewPopupInDock (url: string, sourceWebContentsId?: number): void {
   let parsedUrl: URL
 
   try {
@@ -96,7 +96,12 @@ export function openWebviewPopupInDock (url: string): void {
   }
 
   if (mainState.mainWindow && !mainState.mainWindow.isDestroyed()) {
-    mainState.mainWindow.webContents.send('browser:openUrlInDock', { url: parsedUrl.toString() })
+    // The source id lets the renderer keep workspace-tab popups inside the
+    // workspace panel instead of bouncing the whole UI to the docked app view.
+    mainState.mainWindow.webContents.send('browser:openUrlInDock', {
+      url: parsedUrl.toString(),
+      ...(typeof sourceWebContentsId === 'number' ? { webContentsId: sourceWebContentsId } : {})
+    })
   }
 }
 
@@ -105,7 +110,7 @@ export function attachMainWindowWebviewHandlers (win: BrowserWindow): void {
     installWebviewDownloadHandler(guestContents.session)
 
     guestContents.setWindowOpenHandler(({ url }) => {
-      openWebviewPopupInDock(url)
+      openWebviewPopupInDock(url, guestContents.id)
       return { action: 'deny' }
     })
 
@@ -445,6 +450,26 @@ export function buildActivePagePromptSection (activePageContext?: ActivePageAuto
   ]
 
   return lines.join('\n')
+}
+
+/**
+ * Routing policy for web retrieval: static fetches first, the built-in
+ * workspace browser when they are blocked, external browser MCP only as a
+ * last resort. Kept as a single static section so every run gets the same
+ * ladder (see docs/web-capability-router-design.md §3).
+ */
+export function buildWebCapabilityPolicySection (): string {
+  return [
+    '## Web access policy (built-in first)',
+    '- For public web content, start with web_search / web_fetch. They are fast and silent, but they do not run JavaScript and have no login session.',
+    '- When a web_search / web_fetch result reports `access: "blocked"` or `"degraded"` (HTTP 401/403/429/503, an anti-bot challenge, a thin JS-only shell page, or all search sources failed), do NOT retry the same static request. Switch to the built-in workspace browser:',
+    '  1. open_workspace_tab with kind "browser" and the target URL — it opens visibly so the user can follow along;',
+    '  2. read_current_page with mode "article" to extract the readable page content;',
+    '  3. interact_current_page only when the information requires an action (site search box, pagination, cookie banner).',
+    '- The built-in browser reuses the app\'s persistent session, so pages behind the user\'s existing logins usually work there. Prefer it over external browser automation.',
+    '- Only use browser-class mcp__ tools (chrome/playwright MCP) when the built-in browser genuinely cannot do the job (multi-tab orchestration, network-level capture) AND such an MCP server is configured; those calls require user approval.',
+    '- Never call web_search/web_fetch for a page that is already open in the embedded browser; read_current_page is the source of truth for it.'
+  ].join('\n')
 }
 
 export function buildActiveTerminalPromptSection (activeTerminalContext?: ActiveTerminalContext | null): string | null {

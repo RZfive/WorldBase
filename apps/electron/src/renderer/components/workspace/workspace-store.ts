@@ -19,7 +19,10 @@ export const DEFAULT_WORKSPACE_WIDTH = DEFAULT_FOLDER_WORKSPACE_WIDTH
 /** Automation handle exposed by a browser tab's embedded webview. */
 export interface WorkspaceBrowserHandle {
   captureAutomationSnapshot: () => Promise<BrowserAutomationSnapshot>
+  captureArticleSnapshot?: () => Promise<import('../../../shared/page-automation-types.js').BrowserAutomationArticle>
   runAutomationAction: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
+  /** Guest webContents id of the tab's page, or null before it attaches. */
+  getWebContentsId?: () => number | null
 }
 
 /** Live page state of a browser tab; kept current by BrowserWorkspaceTab. */

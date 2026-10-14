@@ -982,6 +982,7 @@ interface ScheduledTaskDefinition {
   modelId?: string | null
   selectedSkillIds: string[]
   selectedMcpServerIds: string[]
+  toolPolicy?: 'standard' | 'autoApprove'
   retryPolicy: ScheduledTaskRetryPolicy
   createdAt: string
   updatedAt: string
@@ -1223,7 +1224,7 @@ interface ElectronAPI {
   focusProjectWindow: (projectId: string) => Promise<{ success: boolean }>
   onProjectWindowClosed: (callback: (event: { projectId: string }) => void) => () => void
   onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => () => void
-  onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => () => void
+  onBrowserOpenUrlInDock: (callback: (event: { url: string; webContentsId?: number }) => void) => () => void
   onWorkspaceOpenTab: (callback: (event: WorkspaceOpenTabEvent) => void) => () => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
   getComputerUsePermissions: () => Promise<import('./shared/computer-use-permissions').ComputerUsePermissionStatus>
@@ -1289,6 +1290,8 @@ interface ElectronAPI {
   saveScheduledTask: (task: ScheduledTaskDefinition) => Promise<ScheduledTaskDefinition>
   deleteScheduledTask: (taskId: string) => Promise<boolean>
   runScheduledTaskNow: (taskId: string) => Promise<ScheduledTaskRunReport>
+  getScheduledTaskModelSettings: () => Promise<{ providerId: string | null; modelId: string | null; available: boolean }>
+  setScheduledTaskModelSettings: (payload: { providerId?: string | null; modelId?: string | null }) => Promise<{ ok: boolean }>
   listScheduledTaskReports: (taskId?: string) => Promise<ScheduledTaskRunReport[]>
   getScheduledTaskReport: (reportId: string) => Promise<ScheduledTaskRunReport | null>
   onScheduledTasksChanged: (callback: (tasks: ScheduledTaskDefinition[]) => void) => () => void

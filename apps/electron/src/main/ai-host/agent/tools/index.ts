@@ -8,7 +8,7 @@ import type { SettingsStore } from '../../../settings/settings-store.js'
 import type { ScheduledTaskService } from '../../../scheduler/scheduled-task-service.js'
 import type { BrowserWindow } from 'electron'
 
-import type { BrowserAutomationAction, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../../../shared/page-automation-types.js'
+import type { BrowserAutomationAction, BrowserAutomationArticle, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../../../shared/page-automation-types.js'
 
 export interface ToolServices {
   dataAccess: ProjectDataAccess
@@ -16,7 +16,7 @@ export interface ToolServices {
   persistDocumentArtifact?: (artifact: Record<string, unknown> & { id: string }) => void
   settingsStore?: SettingsStore
   getMainWindow?: () => BrowserWindow | null
-  readActivePage?: () => Promise<BrowserAutomationSnapshot>
+  readActivePage?: (mode?: 'interactive' | 'article') => Promise<BrowserAutomationSnapshot | BrowserAutomationArticle>
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void

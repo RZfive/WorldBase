@@ -333,6 +333,11 @@ pub struct ChatRunContext {
     /// intentionally ephemeral and does not alter the persisted conversation.
     #[serde(default)]
     pub computer_use_enabled: bool,
+    /// 无人值守运行（定时任务）的工具权限授权。为 true 时权限引擎把 ask 类
+    /// 工具（含 shell）视为允许，毁灭性命令仍然拒绝；只应由任务保存的
+    /// toolPolicy 设置，交互式运行永远不需要它。
+    #[serde(default)]
+    pub auto_approve_permissions: bool,
 }
 
 /// A concrete memory scope selected for one agent run.
@@ -1166,6 +1171,28 @@ pub struct SkillDescriptor {
     pub path: String,
 }
 
+/// 定时任务的工具权限模式。任务在无人值守下运行，没有人应答权限询问。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ScheduleToolPolicy {
+    /// 标准：只执行 "allow" 策略的工具与安全命令；ask 类工具（含 shell）
+    /// 一律拒绝。
+    #[default]
+    Standard,
+    /// 自动批准：本次运行把 ask 类工具（含 shell）视为允许，毁灭性命令
+    /// （rm -rf、sudo、mkfs 等 Deny 级分类）仍然拒绝。
+    AutoApprove,
+}
+
+impl ScheduleToolPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::AutoApprove => "autoApprove",
+        }
+    }
+}
+
 /// Electron-compatible scheduled-task cadence. Legacy callers may continue
 /// using [`ScheduleEntry::cron`] without populating this field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1240,6 +1267,9 @@ pub struct ScheduleEntry {
     pub selected_skill_ids: Vec<String>,
     #[serde(default)]
     pub selected_mcp_server_ids: Vec<String>,
+    /// 无人值守运行的工具权限模式（标准 / 自动批准）。
+    #[serde(default)]
+    pub tool_policy: ScheduleToolPolicy,
     #[serde(default)]
     pub retry_policy: ScheduledTaskRetryPolicy,
     #[serde(default)]

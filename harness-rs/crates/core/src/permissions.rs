@@ -46,6 +46,10 @@ impl Drop for PendingPermissionGuard<'_> {
 
 /// 检查工具执行许可。ask 策略下向流发布 PermissionRequest 事件并等待宿主应答；
 /// 非交互宿主（CLI one-shot / 无应答通道）视为拒绝并发布 Notice。
+///
+/// `auto_approve` 是无人值守运行（定时任务）的任务级授权：没有人能应答询问，
+/// ask 类工具与 shell 改为直接放行，但毁灭性命令（Deny 级分类）仍然拒绝。
+/// 它只应由任务保存的 toolPolicy 设置，交互式运行永远传 false。
 pub async fn check(
     hub: &Hub,
     stream_id: &str,
@@ -53,6 +57,7 @@ pub async fn check(
     tool_name: &str,
     args: &Value,
     interactive: bool,
+    auto_approve: bool,
     abort: Option<&CancellationToken>,
 ) -> bool {
     let configured = configured_rule_decision(hub, tool_name, args);
@@ -65,7 +70,12 @@ pub async fn check(
         // Keep the safety classifier for execute/project commands, but do not
         // silently auto-approve this user-machine capability.
         _ if tool_name == "local_run_command" => {
-            if !interactive {
+            if auto_approve {
+                // Even with the task-level grant, an unattended shell must
+                // never run the destructive-command class (rm -rf, sudo,
+                // mkfs, fork bombs, ...).
+                classify_command_args(args) != SafetyLevel::Deny
+            } else if !interactive {
                 false
             } else {
                 ask_host(hub, stream_id, tool_name, args, abort).await
@@ -75,6 +85,9 @@ pub async fn check(
             SafetyLevel::Deny => false,
             SafetyLevel::Safe => true,
             SafetyLevel::Risky => {
+                if auto_approve {
+                    return true;
+                }
                 if !interactive {
                     return false;
                 }
@@ -82,6 +95,9 @@ pub async fn check(
             }
         },
         _ => {
+            if auto_approve {
+                return true;
+            }
             if !interactive {
                 return false;
             }

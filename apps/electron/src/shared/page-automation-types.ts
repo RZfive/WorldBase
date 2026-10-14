@@ -40,6 +40,21 @@ export interface BrowserAutomationSnapshot {
   capturedAt: number
 }
 
+/**
+ * Reading-mode extraction of the active page (readability-style): markdown-ish
+ * text of the primary content container. Built for information retrieval —
+ * use `BrowserAutomationSnapshot` when the page must be operated instead.
+ */
+export interface BrowserAutomationArticle {
+  url: string
+  title: string
+  origin: string | null
+  text: string
+  wordCount: number
+  truncated: boolean
+  capturedAt: number
+}
+
 export interface BrowserAutomationInputField {
   selector: string
   text: string
@@ -77,11 +92,16 @@ export interface BrowserAutomationActionResult {
   key?: string
 }
 
+export type PageAutomationSnapshotMode = 'interactive' | 'article'
+
 export type PageAutomationRendererRequest =
-  | { type: 'snapshot' }
+  | { type: 'snapshot'; mode?: PageAutomationSnapshotMode }
   | { type: 'action'; action: BrowserAutomationAction }
 
-export type PageAutomationRendererResult = BrowserAutomationSnapshot | BrowserAutomationActionResult
+export type PageAutomationRendererResult =
+  | BrowserAutomationSnapshot
+  | BrowserAutomationArticle
+  | BrowserAutomationActionResult
 
 export interface BrowserPageContextMenuParams {
   x: number

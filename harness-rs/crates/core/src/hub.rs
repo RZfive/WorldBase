@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use worldbase_mcp_client::McpManager;
 use worldbase_memory::Store;
 use worldbase_protocol::event::StreamChannel;
-use worldbase_protocol::types::{Capabilities, ChatRunContext, ProviderConfig};
+use worldbase_protocol::types::{Capabilities, ChatRunContext, ProviderConfig, ScheduleEntry};
 use worldbase_scheduler::Scheduler;
 use worldbase_skills::SkillRegistry;
 use worldbase_tools::{filter_tools, Tool, ToolServices};
@@ -456,6 +456,29 @@ impl Hub {
         filter_tools(&self.tools, caps)
     }
 
+    /// 定时任务（计划触发或立即执行）运行上下文：任务保存的 Skill 内容、
+    /// MCP 白名单与工具权限模式。
+    pub fn scheduled_task_context(&self, entry: &ScheduleEntry) -> ChatRunContext {
+        let active_skill_contents = entry
+            .selected_skill_ids
+            .iter()
+            .filter_map(|skill_id| self.skills.get(skill_id).ok().flatten())
+            .map(|skill| skill.instructions)
+            .filter(|instructions| !instructions.trim().is_empty())
+            .collect();
+        ChatRunContext {
+            active_skill_contents,
+            // Electron treats an empty saved selection as the
+            // unrestricted default; a non-empty list narrows it.
+            allowed_mcp_server_ids: Some(entry.selected_mcp_server_ids.clone()),
+            // Unattended runs have nobody to answer permission prompts; the
+            // saved toolPolicy is the user's explicit per-task grant.
+            auto_approve_permissions: entry.tool_policy
+                == worldbase_protocol::types::ScheduleToolPolicy::AutoApprove,
+            ..Default::default()
+        }
+    }
+
     /// 启动后台任务：scheduler 与项目网关循环。
     pub fn start_background(self: &Arc<Self>) {
         let hub = self.clone();
@@ -464,25 +487,14 @@ impl Hub {
             let on_due: worldbase_scheduler::OnDue = Arc::new(move |entry| {
                 let hub = hub_for_due.clone();
                 Box::pin(async move {
-                    let active_skill_contents = entry
-                        .selected_skill_ids
-                        .iter()
-                        .filter_map(|skill_id| hub.skills.get(skill_id).ok().flatten())
-                        .map(|skill| skill.instructions)
-                        .filter(|instructions| !instructions.trim().is_empty())
-                        .collect();
-                    let context = worldbase_protocol::types::ChatRunContext {
-                        active_skill_contents,
-                        // Electron treats an empty saved selection as the
-                        // unrestricted default; a non-empty list narrows it.
-                        allowed_mcp_server_ids: Some(entry.selected_mcp_server_ids.clone()),
-                        ..Default::default()
-                    };
+                    let context = hub.scheduled_task_context(&entry);
                     crate::agent::run_scheduled_task_with_context(
                         hub,
                         &entry.id,
                         &entry.name,
                         &entry.task,
+                        entry.provider_id.clone(),
+                        entry.model_id.clone(),
                         context,
                     )
                     .await

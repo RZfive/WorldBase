@@ -35,6 +35,7 @@ class ChatTab extends ConsumerStatefulWidget {
 class _ChatTabState extends ConsumerState<ChatTab> {
   final _inputCtrl = TextEditingController();
   final _inputFocus = FocusNode();
+  final _budgetCtrl = TextEditingController();
   final List<ChatAttachment> _pendingAttachments = [];
   bool _advancedExpanded = false;
   bool _isImportingAttachments = false;
@@ -51,6 +52,8 @@ class _ChatTabState extends ConsumerState<ChatTab> {
   @override
   void initState() {
     super.initState();
+    final budget = ref.read(chatSwitchesProvider).budgetLimit;
+    if (budget != null) _budgetCtrl.text = budget.toString();
     Future.microtask(() async {
       final conversations = ref.read(conversationsProvider).value;
       final current = ref.read(currentConversationProvider);
@@ -67,6 +70,7 @@ class _ChatTabState extends ConsumerState<ChatTab> {
   void dispose() {
     _inputCtrl.dispose();
     _inputFocus.dispose();
+    _budgetCtrl.dispose();
     super.dispose();
   }
 
@@ -313,7 +317,7 @@ class _ChatTabState extends ConsumerState<ChatTab> {
         0,
         topPad,
         0,
-        (_advancedExpanded ? 294 : 112) + attachmentDockHeight + feedbackHeight,
+        (_advancedExpanded ? 382 : 112) + attachmentDockHeight + feedbackHeight,
       ),
       itemCount: messages.length,
       itemBuilder: (ctx, i) {
@@ -439,6 +443,66 @@ class _ChatTabState extends ConsumerState<ChatTab> {
                               _reasoningLevels[value.round().clamp(0, 3)],
                             ),
                       ),
+                    SizedBox(
+                      height: 44,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '计划模式',
+                              style: TextStyle(fontSize: 13, color: p.ink),
+                            ),
+                          ),
+                          CupertinoSwitch(
+                            activeTrackColor: p.indigo,
+                            value: switches.planMode,
+                            onChanged: ref
+                                .read(chatSwitchesProvider.notifier)
+                                .setPlanMode,
+                          ),
+                        ],
+                      ),
+                    ),
+                    SizedBox(
+                      height: 44,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '预算上限（美元，留空不限）',
+                              style: TextStyle(fontSize: 13, color: p.ink),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 92,
+                            child: CupertinoTextField(
+                              controller: _budgetCtrl,
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                    decimal: true,
+                                  ),
+                              textAlign: TextAlign.end,
+                              placeholder: '不限',
+                              placeholderStyle: TextStyle(
+                                fontSize: 13,
+                                color: p.ink3,
+                              ),
+                              style: TextStyle(fontSize: 13, color: p.ink),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 6,
+                              ),
+                              onChanged: (value) {
+                                final parsed = double.tryParse(value.trim());
+                                ref
+                                    .read(chatSwitchesProvider.notifier)
+                                    .setBudgetLimit(parsed);
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                     _AdvancedSliderRow(
                       label:
                           '模型温度 (${effectiveTemperature.toStringAsFixed(1)})',
