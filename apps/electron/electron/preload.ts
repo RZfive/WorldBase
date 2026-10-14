@@ -977,8 +977,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('project:openInShell', handler)
     return () => { ipcRenderer.removeListener('project:openInShell', handler) }
   },
-  onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, event: { url: string }) => callback(event)
+  onBrowserOpenUrlInDock: (callback: (event: { url: string; webContentsId?: number }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: { url: string; webContentsId?: number }) => callback(event)
     ipcRenderer.on('browser:openUrlInDock', handler)
     return () => { ipcRenderer.removeListener('browser:openUrlInDock', handler) }
   },

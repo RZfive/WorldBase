@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import QRCode from 'qrcode'
 import { computerUsePermissions } from './renderer/utils/computer-use-permissions'
@@ -17,6 +17,7 @@ import ScheduledTaskReportDialog from './renderer/components/settings/ScheduledT
 import type { ChatSurfaceStatusSummary, WorkspacePageSurfaceSummary, WorkspaceTerminalSurfaceSummary } from './renderer/components/chat/panel/types'
 import { sharedChatPanelState } from './renderer/components/chat/panel/shared-state'
 import { addWebQuote } from './renderer/components/chat/panel/web-quote-state'
+import { workspaceBrowserSurfaces } from './renderer/components/workspace/workspace-store'
 import type { ActiveTerminalContext } from './shared/terminal-types'
 import type {
   ActivePageAutomationContext,
@@ -273,14 +274,19 @@ const shouldMountChatShell = computed(() => {
 })
 
 const activePageAutomationContext = computed<ActivePageAutomationContext | null>(() => {
-  if (currentView.value === 'app' && activeBrowserPageSurface.value) {
+  // Mirrors getActiveBrowserAutomationHandle: the launchpad page is only the
+  // AI's page while explicitly requested (or with no workspace tab at all);
+  // otherwise the workspace browser tab is the pinned context.
+  if (currentView.value === 'app' && (launchpadPageChatActive.value || !workspacePageSurface.value)) {
     const browserSurface = activeBrowserPageSurface.value
-    return {
-      appId: browserSurface.appId,
-      kind: 'browser',
-      title: browserSurface.title,
-      url: browserSurface.url,
-      origin: browserSurface.origin || browserSurface.url || null
+    if (browserSurface) {
+      return {
+        appId: browserSurface.appId,
+        kind: 'browser',
+        title: browserSurface.title,
+        url: browserSurface.url,
+        origin: browserSurface.origin || browserSurface.url || null
+      }
     }
   }
   // No embedded app page: the active workspace browser tab becomes the page
@@ -377,20 +383,46 @@ function setBrowserAutomationHandle (appId: string, instance: unknown) {
   browserAutomationHandles.delete(appId)
 }
 
+/**
+ * Whether the docked (launchpad) page should own AI page automation. Only the
+ * user's explicit "AI operate" request on that page sets this; otherwise the
+ * workspace browser tab stays the pinned automation target so AI operations
+ * never silently jump into the launchpad (docs/web-capability-router-design.md §3).
+ */
+const launchpadPageChatActive = ref(false)
+
+// Leaving the app view ends any launchpad-page automation intent; the pinned
+// workspace tab (if any) becomes the AI's page again.
+watch(currentView, (view) => {
+  if (view !== 'app') launchpadPageChatActive.value = false
+})
+
+function resolveEmbeddedBrowserHandle (): BrowserAutomationViewHandle | null {
+  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value) return null
+  const appState = embeddedApps.value.get(activeEmbeddedProjectId.value)
+  if (!appState || appState.kind !== 'browser') return null
+  return browserAutomationHandles.get(activeEmbeddedProjectId.value) || null
+}
+
 function getActiveBrowserAutomationHandle (): BrowserAutomationViewHandle | null {
-  // Keep in sync with activePageAutomationContext: the embedded app page only
-  // owns the automation target while its view is actually on screen. In every
-  // other state the visible workspace browser tab is the page the tools hit.
-  if (currentView.value === 'app' && activeEmbeddedProjectId.value) {
-    const appState = embeddedApps.value.get(activeEmbeddedProjectId.value)
-    if (appState && appState.kind === 'browser') {
-      const embeddedHandle = browserAutomationHandles.get(activeEmbeddedProjectId.value)
-      if (embeddedHandle) return embeddedHandle
-    }
+  // The launchpad page only wins while the user explicitly asked the AI about
+  // it, or when there is no workspace browser tab at all. In every other state
+  // the workspace browser tab is the page the tools hit.
+  if (currentView.value === 'app' && (launchpadPageChatActive.value || !workspacePageSurface.value)) {
+    const embeddedHandle = resolveEmbeddedBrowserHandle()
+    if (embeddedHandle) return embeddedHandle
   }
 
   const workspaceHandle = workspacePageSurface.value?.handle
   if (workspaceHandle) return workspaceHandle as unknown as BrowserAutomationViewHandle
+  return null
+}
+
+/** Finds the workspace browser tab whose embedded page owns the given guest webContents. */
+function findWorkspaceTabIdByWebContentsId (webContentsId: number): string | null {
+  for (const [tabId, surface] of workspaceBrowserSurfaces) {
+    if (surface.handle?.getWebContentsId?.() === webContentsId) return tabId
+  }
   return null
 }
 
@@ -624,6 +656,8 @@ function optimizeProjectInChat (project: Record<string, unknown>) {
 
 function openPageChatOverlay () {
   if (currentView.value !== 'app' || !activeEmbeddedProjectId.value || !activeBrowserPageSurface.value) return
+  // Explicit user intent: AI requests should target this launchpad page.
+  launchpadPageChatActive.value = true
   appChatPresentation.value = 'overlay'
   hideDockCtx()
 }
@@ -1338,7 +1372,16 @@ onMounted(async () => {
   }
 
   if (window.electronAPI?.onBrowserOpenUrlInDock) {
-    browserOpenInDockCleanup = window.electronAPI.onBrowserOpenUrlInDock(({ url }) => {
+    browserOpenInDockCleanup = window.electronAPI.onBrowserOpenUrlInDock(({ url, webContentsId }) => {
+      // Popups from a workspace browser tab stay in the workspace panel as a
+      // new browser tab; only docked launchpad apps bounce to the app view.
+      if (webContentsId && findWorkspaceTabIdByWebContentsId(webContentsId)) {
+        launchpadPageChatActive.value = false
+        if (currentView.value !== 'chat') openChat()
+        workspaceTabRequestSeq += 1
+        workspaceTabRequest.value = { kind: 'browser', payload: { url }, seq: workspaceTabRequestSeq }
+        return
+      }
       openWebLinkInApp(url)
     })
   }
@@ -1346,6 +1389,9 @@ onMounted(async () => {
   if (window.electronAPI?.onWorkspaceOpenTab) {
     workspaceOpenTabCleanup = window.electronAPI.onWorkspaceOpenTab(({ kind, payload }) => {
       if (currentView.value !== 'chat') openChat()
+      // A workspace tab request is an explicit new automation target; the
+      // launchpad page loses the "AI operate" pin.
+      launchpadPageChatActive.value = false
       workspaceTabRequestSeq += 1
       workspaceTabRequest.value = { kind, payload, seq: workspaceTabRequestSeq }
     })

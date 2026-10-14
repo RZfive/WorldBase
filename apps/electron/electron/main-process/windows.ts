@@ -81,7 +81,7 @@ export function installWebviewDownloadHandler (targetSession: Session): void {
   })
 }
 
-export function openWebviewPopupInDock (url: string): void {
+export function openWebviewPopupInDock (url: string, sourceWebContentsId?: number): void {
   let parsedUrl: URL
 
   try {
@@ -96,7 +96,12 @@ export function openWebviewPopupInDock (url: string): void {
   }
 
   if (mainState.mainWindow && !mainState.mainWindow.isDestroyed()) {
-    mainState.mainWindow.webContents.send('browser:openUrlInDock', { url: parsedUrl.toString() })
+    // The source id lets the renderer keep workspace-tab popups inside the
+    // workspace panel instead of bouncing the whole UI to the docked app view.
+    mainState.mainWindow.webContents.send('browser:openUrlInDock', {
+      url: parsedUrl.toString(),
+      ...(typeof sourceWebContentsId === 'number' ? { webContentsId: sourceWebContentsId } : {})
+    })
   }
 }
 
@@ -105,7 +110,7 @@ export function attachMainWindowWebviewHandlers (win: BrowserWindow): void {
     installWebviewDownloadHandler(guestContents.session)
 
     guestContents.setWindowOpenHandler(({ url }) => {
-      openWebviewPopupInDock(url)
+      openWebviewPopupInDock(url, guestContents.id)
       return { action: 'deny' }
     })
 

@@ -1224,7 +1224,7 @@ interface ElectronAPI {
   focusProjectWindow: (projectId: string) => Promise<{ success: boolean }>
   onProjectWindowClosed: (callback: (event: { projectId: string }) => void) => () => void
   onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => () => void
-  onBrowserOpenUrlInDock: (callback: (event: { url: string }) => void) => () => void
+  onBrowserOpenUrlInDock: (callback: (event: { url: string; webContentsId?: number }) => void) => () => void
   onWorkspaceOpenTab: (callback: (event: WorkspaceOpenTabEvent) => void) => () => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
   getComputerUsePermissions: () => Promise<import('./shared/computer-use-permissions').ComputerUsePermissionStatus>

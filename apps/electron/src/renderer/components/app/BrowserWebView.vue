@@ -929,8 +929,20 @@ defineExpose({
   captureAutomationSnapshot,
   captureArticleSnapshot,
   runAutomationAction,
+  getWebContentsId,
   reload: reloadPage,
 });
+
+/** Guest webContents id of the embedded page, or null before it attaches. */
+function getWebContentsId(): number | null {
+  const webview = webviewRef.value;
+  if (!webview || typeof webview.getWebContentsId !== "function") return null;
+  try {
+    return webview.getWebContentsId();
+  } catch {
+    return null;
+  }
+}
 
 function emitStateChange() {
   emit("stateChange", {
