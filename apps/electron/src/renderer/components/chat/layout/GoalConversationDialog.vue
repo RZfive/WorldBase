@@ -301,7 +301,6 @@ function buildAttachmentPrompt (): string {
   display: flex;
   min-height: 0;
   overflow: hidden;
-  --chat-header-height: 0px;
   --chat-message-gutter: 18px;
 }
 

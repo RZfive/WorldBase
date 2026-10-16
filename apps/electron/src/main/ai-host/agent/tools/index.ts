@@ -1,5 +1,6 @@
 import { toolOpenProjectApp } from './tool-open-project-app.js'
 import { toolOpenWorkspaceTab } from './tool-open-workspace-tab.js'
+import { toolManageWorkspaceTabs } from './tool-manage-workspace-tabs.js'
 import { toolInteractCurrentPage, toolReadCurrentPage, toolFillCurrentPageForm, toolSaveCurrentPageAsDocument } from './tool-active-page.js'
 import { toolAskUser } from './tool-ask-user.js'
 import type { AgentCore, SessionState } from '../agent-core.js'
@@ -9,6 +10,7 @@ import type { ScheduledTaskService } from '../../../scheduler/scheduled-task-ser
 import type { BrowserWindow } from 'electron'
 
 import type { BrowserAutomationAction, BrowserAutomationArticle, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../../../shared/page-automation-types.js'
+import type { WorkspaceTabControlRequest, WorkspaceTabControlResult } from '../../../../shared/workspace-control-types.js'
 
 export interface ToolServices {
   dataAccess: ProjectDataAccess
@@ -16,8 +18,16 @@ export interface ToolServices {
   persistDocumentArtifact?: (artifact: Record<string, unknown> & { id: string }) => void
   settingsStore?: SettingsStore
   getMainWindow?: () => BrowserWindow | null
+  /**
+   * Chat conversation this run belongs to; UI-targeting tools forward it so
+   * the renderer routes workspace tabs to the right conversation's workspace
+   * instead of whichever conversation is currently displayed.
+   */
+  conversationId?: string
   readActivePage?: (mode?: 'interactive' | 'article') => Promise<BrowserAutomationSnapshot | BrowserAutomationArticle>
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
+  /** Round-trip to the renderer workspace store for AI tab list/activate/close. */
+  requestWorkspaceTabControl?: (request: WorkspaceTabControlRequest) => Promise<WorkspaceTabControlResult>
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
   scheduledTaskService?: ScheduledTaskService
@@ -40,6 +50,7 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
   const tools = [
     toolOpenProjectApp(services),
     toolOpenWorkspaceTab(services),
+    toolManageWorkspaceTabs(services),
     toolAskUser({
       getMainWindow: services.getMainWindow,
       getSessionState,

@@ -11,6 +11,8 @@ import type {
   BrowserAutomationActionResult,
   BrowserAutomationSnapshot
 } from '../../../shared/page-automation-types.js'
+import type { ActiveCodeViewContext } from '../../../shared/folder-workspace-types.js'
+import type { WorkspaceTabSummary, WorkspaceTabControlResult } from '../../../shared/workspace-control-types.js'
 
 export const DEFAULT_DOCUMENT_WORKSPACE_WIDTH = 900
 export const DEFAULT_FOLDER_WORKSPACE_WIDTH = 980
@@ -49,7 +51,11 @@ export const workspaceStore = {
   // Conversation-bound folder (code) workspace state; owned by the folder tab.
   folderRootPath: ref<string | null>(null),
   folderRootName: ref<string | null>(null),
-  folderActiveFilePath: ref<string | null>(null)
+  folderActiveFilePath: ref<string | null>(null),
+  /** Viewer meta of the active file (written by the folder tab). */
+  folderActiveFileMeta: ref<{ lineCount: number; truncated: boolean } | null>(null),
+  /** Line range currently checked/selected in the folder viewer. */
+  folderActiveSelection: ref<{ start: number; end: number } | null>(null)
 }
 
 /** Live automation surfaces of mounted browser tabs, keyed by tab id. */
@@ -166,6 +172,16 @@ export function applyFolderWorkspaceState (state?: ConversationFolderWorkspaceSt
   workspaceStore.folderRootPath.value = rootPath
   workspaceStore.folderRootName.value = getFolderWorkspaceName(rootPath, state?.rootName)
   workspaceStore.folderActiveFilePath.value = normalizeFolderWorkspacePathKey(state?.activeFilePath) || null
+  syncFolderTabTitle()
+}
+
+/** 代码 tab 标题跟随内容：优先当前打开的文件名，无文件时显示项目/文件夹名。 */
+function syncFolderTabTitle (): void {
+  const tab = getWorkspaceTabByKind('folder')
+  if (!tab) return
+  const filePath = workspaceStore.folderActiveFilePath.value
+  const fileName = filePath ? filePath.split(/[\\/]/).pop() || '' : ''
+  tab.title = fileName || workspaceStore.folderRootName.value || undefined
 }
 
 export function buildCurrentFolderWorkspaceState (): ConversationFolderWorkspaceState | undefined {
@@ -183,6 +199,26 @@ export function resetFolderWorkspaceState (): void {
   workspaceStore.folderRootPath.value = null
   workspaceStore.folderRootName.value = null
   workspaceStore.folderActiveFilePath.value = null
+  workspaceStore.folderActiveFileMeta.value = null
+  workspaceStore.folderActiveSelection.value = null
+  syncFolderTabTitle()
+}
+
+/** Snapshot of what the user is viewing in the code viewer, for AI context. */
+export function buildActiveCodeViewContext (): ActiveCodeViewContext | null {
+  const rootPath = workspaceStore.folderRootPath.value
+  const filePath = workspaceStore.folderActiveFilePath.value
+  if (!rootPath || !filePath) return null
+  const meta = workspaceStore.folderActiveFileMeta.value
+  const selection = workspaceStore.folderActiveSelection.value
+  return {
+    rootPath,
+    rootName: workspaceStore.folderRootName.value || getFolderWorkspaceName(rootPath),
+    filePath,
+    lineCount: meta?.lineCount ?? 0,
+    truncated: meta?.truncated ?? false,
+    ...(selection ? { selection: { ...selection } } : {})
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +299,295 @@ export function removeWorkspaceTab (tabId: string): WorkspaceTabInstance | null 
 export function activateWorkspaceTab (tabId: string): void {
   if (!workspaceStore.tabs.value.some(tab => tab.id === tabId)) return
   workspaceStore.activeTabId.value = tabId
+}
+
+// ---------------------------------------------------------------------------
+// AI tab management (manage_workspace_tabs): lookup + serializable summaries
+// ---------------------------------------------------------------------------
+
+/**
+ * Finds existing tabs by kind and optional kind-specific match payload
+ * ({ url } for browser, { cwd } for terminal, { filePath } for document).
+ * Matching reuses the same per-kind `matches` rule as open dedupe; without a
+ * payload every tab of the kind matches. Find-only — never creates.
+ */
+export function findWorkspaceTabs (kind?: string, match?: Record<string, unknown>): WorkspaceTabInstance[] {
+  const definition = kind ? getWorkspaceTabDefinition(kind) : null
+  if (kind && !definition) return []
+  return workspaceStore.tabs.value.filter(tab => {
+    if (kind && tab.kind !== kind) return false
+    if (!definition?.matches || !match) return true
+    return definition.matches(tab, match)
+  })
+}
+
+/** One tab as the AI sees it: identity, live title, and its key binding. */
+export function buildWorkspaceTabSummary (tab: WorkspaceTabInstance): WorkspaceTabSummary {
+  const summary: WorkspaceTabSummary = {
+    id: tab.id,
+    kind: tab.kind,
+    title: (typeof tab.title === 'string' && tab.title.trim()) || tab.kind,
+    active: tab.id === workspaceStore.activeTabId.value
+  }
+  const state = (tab.state || {}) as Record<string, unknown>
+  if (typeof state.url === 'string' && state.url) summary.url = state.url
+  if (typeof state.cwd === 'string' && state.cwd) summary.cwd = state.cwd
+  if (typeof state.filePath === 'string' && state.filePath) summary.filePath = state.filePath
+  if (typeof state.projectId === 'string' && state.projectId) summary.projectId = state.projectId
+  if (typeof state.rootPath === 'string' && state.rootPath) summary.rootPath = state.rootPath
+  // Folder tab keeps its live state in the dedicated refs, not tab.state.
+  if (tab.kind === 'folder') {
+    if (workspaceStore.folderRootPath.value) summary.rootPath = workspaceStore.folderRootPath.value
+    if (workspaceStore.folderActiveFilePath.value) summary.filePath = workspaceStore.folderActiveFilePath.value
+  }
+  return summary
+}
+
+/** The whole tab strip in strip order. */
+export function buildWorkspaceTabSummaries (): WorkspaceTabSummary[] {
+  return workspaceStore.tabs.value.map(buildWorkspaceTabSummary)
+}
+
+// ---------------------------------------------------------------------------
+// Background conversation snapshots: AI workspace requests that arrive while
+// another conversation is displayed must never touch the live panel. These
+// pure ops apply open/activate/close to a conversation's stored snapshot so
+// the tab is there when the user returns to that conversation. They mirror
+// the live paths (ensureWorkspaceTab / applyWorkspaceTabControl) against the
+// persisted ConversationWorkspaceState shape.
+// ---------------------------------------------------------------------------
+
+function snapshotEntryMatches (
+  entry: ConversationWorkspaceTabState,
+  kind?: string,
+  match?: Record<string, unknown>
+): boolean {
+  if (kind && entry.kind !== kind) return false
+  if (!match) return true
+  const definition = getWorkspaceTabDefinition(entry.kind)
+  if (!definition?.matches) return true
+  return definition.matches(
+    { id: entry.id || entry.kind, kind: entry.kind, state: entry.state } as WorkspaceTabInstance,
+    match
+  )
+}
+
+/** Folder entries save without an id; assign one so tab_id targeting works. */
+function ensureSnapshotTabIds (state: ConversationWorkspaceState): ConversationWorkspaceTabState[] {
+  if (!Array.isArray(state.tabs)) state.tabs = []
+  for (const entry of state.tabs) {
+    if (!entry.id) entry.id = createWorkspaceTabId(entry.kind)
+  }
+  return state.tabs
+}
+
+function buildSnapshotTabSummary (
+  entry: ConversationWorkspaceTabState,
+  activeTabId?: string | null
+): WorkspaceTabSummary {
+  const state = (entry.state || {}) as Record<string, unknown>
+  const summary: WorkspaceTabSummary = {
+    id: entry.id || entry.kind,
+    kind: entry.kind,
+    title: (typeof entry.title === 'string' && entry.title.trim()) || entry.kind,
+    active: Boolean(entry.id) && entry.id === activeTabId
+  }
+  if (typeof state.url === 'string' && state.url) summary.url = state.url
+  if (typeof state.cwd === 'string' && state.cwd) summary.cwd = state.cwd
+  if (typeof state.filePath === 'string' && state.filePath) summary.filePath = state.filePath
+  if (typeof state.projectId === 'string' && state.projectId) summary.projectId = state.projectId
+  if (typeof state.rootPath === 'string' && state.rootPath) summary.rootPath = state.rootPath
+  // Folder binding rides the entry state in snapshots (the live store keeps
+  // dedicated refs; the tab title mirrors syncFolderTabTitle).
+  if (entry.kind === 'folder') {
+    const activeFilePath = typeof state.activeFilePath === 'string' ? state.activeFilePath : ''
+    const fileName = activeFilePath ? activeFilePath.split(/[\\/]/).pop() || '' : ''
+    summary.title = fileName || (typeof state.rootName === 'string' && state.rootName) || entry.kind
+    if (activeFilePath) summary.filePath = activeFilePath
+  }
+  return summary
+}
+
+/**
+ * Seeds tabs from the legacy folder/document mirrors, mirroring the
+ * applyWorkspaceState fallback, so a first tab added remotely cannot drop a
+ * folder workspace that only the legacy fields still remember.
+ */
+export function hydrateWorkspaceSnapshot (
+  state: ConversationWorkspaceState | undefined,
+  legacy?: {
+    folderWorkspace?: ConversationFolderWorkspaceState | null
+    documentWorkspace?: ConversationDocumentWorkspaceState | null
+  }
+): ConversationWorkspaceState {
+  if (state && Array.isArray(state.tabs) && state.tabs.length > 0) return state
+
+  const next: ConversationWorkspaceState = state && typeof state === 'object' ? state : {}
+  const tabs: ConversationWorkspaceTabState[] = []
+  if (legacy?.folderWorkspace?.rootPath) {
+    tabs.push({
+      id: createWorkspaceTabId('folder'),
+      kind: 'folder',
+      state: {
+        rootPath: legacy.folderWorkspace.rootPath,
+        rootName: getFolderWorkspaceName(legacy.folderWorkspace.rootPath, legacy.folderWorkspace.rootName),
+        ...(legacy.folderWorkspace.activeFilePath ? { activeFilePath: legacy.folderWorkspace.activeFilePath } : {})
+      }
+    })
+  }
+  const legacyActiveKey = normalizeDocumentFileKey(legacy?.documentWorkspace?.activeFilePath)
+  for (const documentRef of legacy?.documentWorkspace?.documents || []) {
+    const entry: ConversationWorkspaceTabState = {
+      id: createWorkspaceTabId('document'),
+      kind: 'document',
+      title: documentRef.fileName,
+      state: { filePath: documentRef.filePath, ...(documentRef.fileName ? { fileName: documentRef.fileName } : {}) }
+    }
+    if (legacyActiveKey && normalizeDocumentFileKey(documentRef.filePath) === legacyActiveKey) {
+      next.activeTabId = entry.id
+    }
+    tabs.push(entry)
+  }
+  if (tabs.length === 0) return next
+  next.tabs = tabs
+  if (!next.activeTabId || !tabs.some(tab => tab.id === next.activeTabId)) {
+    next.activeTabId = tabs[0].id!
+  }
+  return next
+}
+
+/**
+ * Snapshot counterpart of the live open path (openWorkspaceTab + ensureWorkspaceTab):
+ * dedupes by the kind's rule, merges payload state, and activates the tab.
+ */
+export function openWorkspaceTabInSnapshot (
+  state: ConversationWorkspaceState,
+  kind: string,
+  payload?: Record<string, unknown>
+): void {
+  const definition = getWorkspaceTabDefinition(kind)
+  if (!definition) return
+  const tabs = ensureSnapshotTabIds(state)
+
+  if (kind === 'folder') {
+    // Live folder opens merge the binding into the store refs; snapshots keep
+    // it on the entry state. Without a rootPath there is nothing to bind.
+    const rootPath = typeof payload?.rootPath === 'string' ? payload.rootPath.trim() : ''
+    let entry = tabs.find(tab => tab.kind === 'folder')
+    if (!entry) {
+      entry = { id: createWorkspaceTabId('folder'), kind: 'folder' }
+      tabs.push(entry)
+    }
+    if (rootPath) {
+      const activeFilePath = typeof payload?.activeFilePath === 'string' && payload.activeFilePath.trim()
+        ? payload.activeFilePath.trim()
+        : undefined
+      entry.state = {
+        ...(entry.state || {}),
+        rootPath,
+        rootName: typeof payload?.rootName === 'string' && payload.rootName.trim()
+          ? payload.rootName.trim()
+          : getFolderWorkspaceName(rootPath),
+        activeFilePath
+      }
+    }
+    state.activeTabId = entry.id
+    return
+  }
+
+  const existing = tabs.find(tab => {
+    if (tab.kind !== kind) return false
+    if (definition.singleton) return true
+    if (!payload || !definition.matches) return false
+    return definition.matches(
+      { id: tab.id || kind, kind: tab.kind, state: tab.state } as WorkspaceTabInstance,
+      payload
+    )
+  })
+  if (existing) {
+    if (payload) existing.state = { ...(existing.state || {}), ...payload }
+    state.activeTabId = existing.id!
+    return
+  }
+
+  const entry: ConversationWorkspaceTabState = {
+    id: createWorkspaceTabId(kind),
+    kind,
+    ...(payload ? { state: { ...payload } } : {})
+  }
+  if (kind === 'document') {
+    const filePath = typeof payload?.filePath === 'string' ? payload.filePath : ''
+    entry.title = (typeof payload?.fileName === 'string' && payload.fileName.trim()) || getDocumentFileName(filePath)
+  } else if (kind === 'project' && typeof payload?.name === 'string' && payload.name.trim()) {
+    entry.title = payload.name.trim()
+  }
+  tabs.push(entry)
+  state.activeTabId = entry.id!
+}
+
+/**
+ * Snapshot counterpart of applyWorkspaceTabControl (list/activate/close).
+ * Mutates `state` in place; an emptied strip resolves to `undefined` so the
+ * caller can drop the workspace field entirely. Throws for a missing target
+ * like the live path so the AI sees the same actionable error.
+ */
+export function applyWorkspaceControlToSnapshot (
+  state: ConversationWorkspaceState | undefined,
+  request: WorkspaceTabControlRequest
+): { state: ConversationWorkspaceState | undefined; result: WorkspaceTabControlResult } {
+  if (!state || !Array.isArray(state.tabs) || state.tabs.length === 0) {
+    if (request.action === 'list') {
+      return { state, result: { ok: true, action: 'list', tabs: [] } }
+    }
+    throw new Error(
+      `No matching workspace tab for action "${request.action}". Open tabs: none` +
+        ' — call action "list" first, or open_workspace_tab to create one.'
+    )
+  }
+
+  const tabs = ensureSnapshotTabIds(state)
+  const summaries = () => tabs.map(entry => buildSnapshotTabSummary(entry, state.activeTabId))
+
+  if (request.action === 'list') {
+    return { state, result: { ok: true, action: 'list', tabs: summaries() } }
+  }
+
+  let target: ConversationWorkspaceTabState | undefined
+  if (request.tabId) {
+    target = tabs.find(tab => tab.id === request.tabId)
+  } else {
+    const match: Record<string, unknown> = {}
+    if (request.url) match.url = request.url
+    if (request.cwd) match.cwd = request.cwd
+    if (request.filePath) match.filePath = request.filePath
+    target = tabs.find(entry => snapshotEntryMatches(entry, request.kind, Object.keys(match).length > 0 ? match : undefined))
+  }
+  if (!target?.id) {
+    const available = summaries().map(tab => `${tab.kind} id=${tab.id}${tab.title ? ` "${tab.title}"` : ''}`).join('; ')
+    throw new Error(
+      `No matching workspace tab for action "${request.action}". Open tabs: ${available || 'none'}` +
+        ' — call action "list" first, or open_workspace_tab to create one.'
+    )
+  }
+
+  if (request.action === 'activate') {
+    state.activeTabId = target.id
+  } else {
+    const index = tabs.indexOf(target)
+    if (index >= 0) tabs.splice(index, 1)
+    if (state.activeTabId === target.id) {
+      state.activeTabId = tabs[tabs.length - 1]?.id ?? null
+    }
+  }
+
+  const emptied = tabs.length === 0
+  const result: WorkspaceTabControlResult = {
+    ok: true,
+    action: request.action,
+    tab: emptied ? undefined : buildSnapshotTabSummary(target, state.activeTabId),
+    tabs: emptied ? [] : summaries()
+  }
+  return { state: emptied ? undefined : state, result }
 }
 
 // ---------------------------------------------------------------------------

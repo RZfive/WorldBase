@@ -47,7 +47,7 @@ if (new Set(names).size !== names.length) {
 // enter_plan_mode, exit_plan_mode, generate_image, edit_image, the eight
 // folder-workspace tools, the six project-file tools plus project glob/grep search, and the command runners with project database access. Electron never registers handlers for them, so they
 // are absent from the host contract.
-const EXPECTED_TOOL_COUNT = 7
+const EXPECTED_TOOL_COUNT = 8
 if (tools.length !== EXPECTED_TOOL_COUNT) {
   throw new Error(`Electron tool registry produced ${tools.length} public tools; expected exactly ${EXPECTED_TOOL_COUNT}`)
 }

@@ -3,6 +3,8 @@ import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 
 interface ToolServices {
   getMainWindow?: () => BrowserWindow | null
+  /** Chat conversation this run belongs to (see ToolServices in tools/index.ts). */
+  conversationId?: string
 }
 
 interface OpenWorkspaceTabArgs {
@@ -90,7 +92,8 @@ export function toolOpenWorkspaceTab (services: ToolServices): Tool {
       onProgress?.('Opening workspace panel...', `${kind}`)
       mainWindow.webContents.send('workspace:openTab', {
         kind,
-        ...(Object.keys(payload).length > 0 ? { payload } : {})
+        ...(Object.keys(payload).length > 0 ? { payload } : {}),
+        ...(services.conversationId ? { conversationId: services.conversationId } : {})
       })
 
       return {

@@ -324,7 +324,7 @@ export function useConversationSidebarFolders (
     // Both conversations and folders can be pinned and are ordered by pinnedIds.
     const pinnedOrder = pinnedIds.value
     const entryPinId = (entry: ConversationSidebarEntry) =>
-      entry.kind === 'conversation' ? entry.item.id : entry.folder.id
+      entry.kind === 'conversation' ? entry.item.id : entry.kind === 'folder' ? entry.folder.id : entry.groupId
     pinnedEntries.sort((a, b) => pinnedOrder.indexOf(entryPinId(a)) - pinnedOrder.indexOf(entryPinId(b)))
     entries.push(...pinnedEntries, ...unpinnedEntries)
 
@@ -409,6 +409,20 @@ export function useConversationSidebarFolders (
     renamingFolderId.value = id
     renameInput.value = name
     finalizeConversationLayout()
+  }
+
+  /** Find a folder by name (case-insensitive) or create it — no rename mode. */
+  function ensureFolder (name: string): ConversationFolderLayout | null {
+    const trimmed = name.trim()
+    if (!trimmed) return null
+    const existing = conversationFolders.value.find(folder => folder.name.trim().toLowerCase() === trimmed.toLowerCase())
+    if (existing) return existing
+    const id = `${FOLDER_ID_PREFIX}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`
+    const folder: ConversationFolderLayout = { id, name: trimmed, conversationIds: [], collapsed: false }
+    conversationFolders.value = [...conversationFolders.value, folder]
+    conversationTopLevelOrder.value = [...conversationTopLevelOrder.value, folderKey(id)]
+    finalizeConversationLayout()
+    return folder
   }
 
   function startRenameFolder (folder: ConversationFolderLayout) {
@@ -783,12 +797,16 @@ export function useConversationSidebarFolders (
 
   return {
     conversationEntries,
+    conversationFolders,
     filteredConversationCount,
     isSearching,
     renamingFolderId,
     renameInput,
     dragItem,
+    pinnedIds,
     createEmptyFolder,
+    ensureFolder,
+    appendConversationToFolderEnd,
     startRenameFolder,
     commitRenameFolder,
     cancelRenameFolder,

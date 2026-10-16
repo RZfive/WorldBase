@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { renderMarkdown } from '../markdown'
 import { getContentParts, hasRenderableContent, collapseWhitespace } from '../message-utils'
@@ -558,6 +558,146 @@ function removeActiveAnnotation (): void {
   emit('removeAnnotation', annotationId)
 }
 
+// ---------------------------------------------------------------------------
+// Written-file links: path mentions of files the AI actually wrote during this
+// conversation become clickable. The candidate set arrives from the message
+// list (the persisted file_preview blocks), so arbitrary paths in text are
+// never linkified — only real written documents. Mirrors the annotation pass:
+// re-applied after every v-html re-render.
+// ---------------------------------------------------------------------------
+
+const writtenFilePaths = inject<Ref<string[]>>('chatWrittenFilePaths', ref([]))
+const writtenFileRevision = computed(() => writtenFilePaths.value.join('\n'))
+
+interface WrittenFileMatch {
+  needle: string
+  absolutePath: string
+}
+
+function getFileNameOfPath (filePath: string): string {
+  const segments = filePath.split(/[\\/]/)
+  return segments[segments.length - 1] || filePath
+}
+
+function buildWrittenFileMatches (paths: string[]): WrittenFileMatch[] {
+  const basenameCounts = new Map<string, number>()
+  for (const path of paths) {
+    const name = getFileNameOfPath(path).toLowerCase()
+    basenameCounts.set(name, (basenameCounts.get(name) || 0) + 1)
+  }
+  const matches: WrittenFileMatch[] = []
+  for (const path of paths) {
+    const normalized = path.replace(/\\/g, '/')
+    matches.push({ needle: normalized, absolutePath: path })
+    const segments = normalized.split('/')
+    // Relative forms the model typically echoes back: the trailing path
+    // fragments (≥2 segments) and, when unique, the bare file name.
+    for (let start = Math.max(1, segments.length - 2); start < segments.length - 1; start++) {
+      matches.push({ needle: segments.slice(start).join('/'), absolutePath: path })
+    }
+    const basename = getFileNameOfPath(normalized)
+    if (basename && basenameCounts.get(basename.toLowerCase()) === 1) {
+      matches.push({ needle: basename, absolutePath: path })
+    }
+  }
+  // Longest needles win: a full-path mention must link as one anchor, not as
+  // a basename match nested inside it. Overlaps are dropped at scan time.
+  return matches.sort((left, right) => right.needle.length - left.needle.length)
+}
+
+const writtenFileMatches = computed(() => buildWrittenFileMatches(writtenFilePaths.value))
+
+/** Word-ish boundaries: `my-report.md` must not match `report.md`, and `report.md.bak` must not match `report.md`. */
+function isWrittenFileMatchBoundary (text: string, start: number, end: number): boolean {
+  const before = start > 0 ? text[start - 1] : ''
+  const after = end < text.length ? text[end] : ''
+  const beforeOk = before === '' ||
+    /[\s([{'"`<>*_~]/.test(before) ||
+    (before === '.' && start >= 2 && text[start - 2] === '/')
+  const afterOk = after === '' || !/[A-Za-z0-9._\-/]/.test(after)
+  return beforeOk && afterOk
+}
+
+function findWrittenFileMatchesInText (text: string, matches: WrittenFileMatch[]): Array<{ start: number; end: number; absolutePath: string }> {
+  const lower = text.toLowerCase()
+  const found: Array<{ start: number; end: number; absolutePath: string }> = []
+  for (const match of matches) {
+    const needle = match.needle.toLowerCase()
+    if (!needle) continue
+    let from = 0
+    while (from <= lower.length - needle.length) {
+      const at = lower.indexOf(needle, from)
+      if (at < 0) break
+      if (isWrittenFileMatchBoundary(text, at, at + needle.length)) {
+        found.push({ start: at, end: at + needle.length, absolutePath: match.absolutePath })
+      }
+      from = at + 1
+    }
+  }
+  found.sort((left, right) => left.start - right.start || (right.end - right.start) - (left.end - left.start))
+  const accepted: Array<{ start: number; end: number; absolutePath: string }> = []
+  let lastEnd = -1
+  for (const candidate of found) {
+    if (candidate.start >= lastEnd) {
+      accepted.push(candidate)
+      lastEnd = candidate.end
+    }
+  }
+  return accepted
+}
+
+function linkifyWrittenFilePathsInNode (node: Text, matches: WrittenFileMatch[]): void {
+  const accepted = findWrittenFileMatchesInText(node.data, matches)
+  // Wrap right-to-left so earlier offsets stay valid while ranges are cut out.
+  for (let index = accepted.length - 1; index >= 0; index--) {
+    const { start, end, absolutePath } = accepted[index]
+    const anchor = document.createElement('a')
+    anchor.className = 'chat-file-link'
+    anchor.dataset.filePath = absolutePath
+    const range = document.createRange()
+    try {
+      range.setStart(node, start)
+      range.setEnd(node, end)
+      anchor.appendChild(range.extractContents())
+      range.insertNode(anchor)
+    } catch { /* stale node after an earlier wrap — skip this match */ }
+  }
+}
+
+function unwrapChatFileLinks (root: HTMLElement): void {
+  for (const anchor of Array.from(root.querySelectorAll('a.chat-file-link'))) {
+    const parent = anchor.parentNode
+    if (!parent) continue
+    while (anchor.firstChild) parent.insertBefore(anchor.firstChild, anchor)
+    parent.removeChild(anchor)
+    parent.normalize()
+  }
+}
+
+function applyWrittenFileLinks (): void {
+  const root = exportCaptureRef.value
+  if (!root) return
+  unwrapChatFileLinks(root)
+  if (props.isStreamingBlock) return
+  const matches = writtenFileMatches.value
+  if (matches.length === 0) return
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const nodes: Text[] = []
+  let current = walker.nextNode() as Text | null
+  while (current) {
+    const parent = current.parentElement
+    const inside = parent?.closest('a, pre, .chat-annotation-mark, [data-file-path], script, style')
+    if (!inside) nodes.push(current)
+    current = walker.nextNode() as Text | null
+  }
+  for (const node of nodes) linkifyWrittenFilePathsInNode(node, matches)
+}
+
+function applyContentDecorations (): void {
+  applyAnnotationMarks()
+  applyWrittenFileLinks()
+}
+
 // Content revision instead of array identity: fires on new arrays AND on
 // in-place mutations, whichever way the annotation store writes.
 const annotationsRevision = computed(() => {
@@ -569,14 +709,14 @@ const annotationsRevision = computed(() => {
 })
 
 watch(
-  [annotationsRevision, () => props.isStreamingBlock, () => props.block.content],
+  [annotationsRevision, () => props.isStreamingBlock, () => props.block.content, writtenFileRevision],
   () => {
-    nextTick(applyAnnotationMarks)
+    nextTick(applyContentDecorations)
   }
 )
 
 onMounted(() => {
-  nextTick(applyAnnotationMarks)
+  nextTick(applyContentDecorations)
 })
 
 onBeforeUnmount(() => {
@@ -1056,6 +1196,22 @@ onBeforeUnmount(() => {
 .message-output :deep(.chat-annotation-mark-active) {
   background: color-mix(in srgb, var(--app-accent) 22%, transparent);
   border-bottom-color: color-mix(in srgb, var(--app-accent) 65%, transparent);
+}
+
+/* Written-file link: a path mention of a file written in this conversation.
+   Hand-wrapped <a> without href — clicks are delegated by the message list. */
+.message-output :deep(a.chat-file-link) {
+  color: var(--app-accent-strong, var(--app-accent));
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: color-mix(in srgb, var(--app-accent) 55%, transparent);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.message-output :deep(a.chat-file-link:hover) {
+  text-decoration-style: solid;
+  text-decoration-color: var(--app-accent);
 }
 
 .chat-annotation-bubble {

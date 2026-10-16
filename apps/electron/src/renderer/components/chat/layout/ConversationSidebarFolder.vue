@@ -42,6 +42,7 @@ const emit = defineEmits<{
   (e: 'dropBody'): void
   (e: 'selectConversation', id: string): void
   (e: 'deleteConversation', id: string): void
+  (e: 'addConversation'): void
   (e: 'dragstartConversation', payload: { event: DragEvent; conversationId: string }): void
   (e: 'dragoverConversation', payload: { event: DragEvent; conversationId: string }): void
   (e: 'dropConversation', payload: { event: DragEvent; conversationId: string }): void
@@ -93,25 +94,35 @@ const emit = defineEmits<{
                   :title="$t('chatUi.doubleClickRenameFolder')"
                   @dblclick.stop="emit('startRename')"
                 >{{ entry.folder.name }}</span>
-                <span class="conv-folder-meta">{{ $t('chatUi.conversationCount', { count: entry.items.length }) }}</span>
               </div>
             </div>
           </div>
         </div>
       </button>
-      <button
-        class="conv-folder-pin-btn"
-        :class="{ active: entry.isPinned }"
-        type="button"
-        :title="entry.isPinned ? $t('chatUi.unpin') : $t('chatUi.pinFolder')"
-        :aria-label="entry.isPinned ? $t('chatUi.unpin') : $t('chatUi.pinFolder')"
-        @click.stop="emit('togglePin')"
-      >
-        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <path d="M9.5 2.5L13.5 6.5L10.5 7.5L8.5 11.5L7 10L4.5 12.5L6 8.5L4.5 7L8.5 5L9.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
-        </svg>
-      </button>
-      <div class="conv-folder-actions">
+      <div :class="['conv-folder-actions', { 'is-pinned': entry.isPinned }]">
+        <button
+          class="conv-folder-pin-btn"
+          :class="{ active: entry.isPinned }"
+          type="button"
+          :title="entry.isPinned ? $t('chatUi.unpin') : $t('chatUi.pinFolder')"
+          :aria-label="entry.isPinned ? $t('chatUi.unpin') : $t('chatUi.pinFolder')"
+          @click.stop="emit('togglePin')"
+        >
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M9.5 2.5L13.5 6.5L10.5 7.5L8.5 11.5L7 10L4.5 12.5L6 8.5L4.5 7L8.5 5L9.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
+          </svg>
+        </button>
+        <button
+          class="conv-folder-action-btn conv-folder-add-conv-btn"
+          type="button"
+          :title="$t('chatUi.newConversationInFolder')"
+          :aria-label="$t('chatUi.newConversationInFolder')"
+          @click.stop="emit('addConversation')"
+        >
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M8 3.2v9.6M3.2 8h9.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+          </svg>
+        </button>
         <button class="conv-folder-action-btn" type="button" :title="$t('chatUi.ungroupFolderKeepConversations')" @click.stop="emit('ungroup')">
           <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M3 4h10M5 4V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1M6.5 7v4M9.5 7v4M4 4l.7 8.4a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9L12 4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" />
@@ -344,13 +355,6 @@ const emit = defineEmits<{
   max-width: 100%;
 }
 
-.conv-folder-meta {
-  margin-left: auto;
-  color: var(--app-text-faint);
-  font-size: 0.64rem;
-  flex-shrink: 0;
-}
-
 .conv-folder-caret-shell {
   width: 22px;
   height: 22px;
@@ -371,20 +375,53 @@ const emit = defineEmits<{
   transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* Hover tools overlay the title tail instead of squeezing it — the folder
+   name keeps the full row width up to the caret, so long names stay readable.
+   Pinned rows keep their marker visible via an explicit bound class (:has()
+   proved unreliable here and once rendered the scrim without the buttons). */
 .conv-folder-actions {
+  position: absolute;
+  top: 50%;
+  right: 34px;
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-right: 2px;
+  z-index: 2;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.18s ease;
 }
 
-.conv-folder-shell:hover .conv-folder-actions {
+.conv-folder-actions::before {
+  content: '';
+  position: absolute;
+  inset: -2px -1px;
+  border-radius: 999px;
+  background: var(--app-chat-list-raised);
+  opacity: 0;
+  transform: scale(0.9);
+  transform-origin: right center;
+  pointer-events: none;
+}
+
+.conv-folder-shell:hover .conv-folder-actions,
+.conv-folder-actions.is-pinned {
   opacity: 1;
+  pointer-events: auto;
+}
+
+/* The wide scrim only exists under a fully hovered toolbar; an idle pinned
+   marker shows just its own solid-circle icon, never an empty pill. */
+.conv-folder-shell:hover .conv-folder-actions::before {
+  opacity: 1;
+  transform: scale(1);
 }
 
 .conv-folder-action-btn {
+  /* Above the absolutely-positioned scrim: positioned boxes paint over
+     in-flow content in the same stacking context. */
+  position: relative;
   width: 20px;
   height: 20px;
   padding: 0;
@@ -409,12 +446,18 @@ const emit = defineEmits<{
   color: var(--app-danger);
 }
 
-/* Pin toggle: hidden until hover, but stays visible (accented) while pinned. */
+/* "New conversation in folder" — same slot as the folder actions but accent-tinted. */
+.conv-folder-add-conv-btn:hover {
+  background: color-mix(in srgb, var(--app-accent-soft) 36%, transparent);
+  color: var(--app-accent);
+}
+
+/* Pin toggle: inside the overlay; stays visible (accented) while pinned. */
 .conv-folder-pin-btn {
+  position: relative;
   flex-shrink: 0;
   width: 20px;
   height: 20px;
-  margin-right: 2px;
   padding: 0;
   border-radius: 6px;
   border: none;
@@ -424,19 +467,12 @@ const emit = defineEmits<{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  opacity: 0;
-  transform: translateY(1px) scale(0.94);
-  transition: opacity 0.18s ease, transform 0.18s ease, color 0.16s ease, background 0.16s ease;
+  transition: color 0.16s ease, background 0.16s ease;
 }
 
 .conv-folder-pin-btn svg {
   width: 13px;
   height: 13px;
-}
-
-.conv-folder-shell:hover .conv-folder-pin-btn {
-  opacity: 1;
-  transform: none;
 }
 
 .conv-folder-pin-btn:hover {
@@ -445,9 +481,10 @@ const emit = defineEmits<{
 }
 
 .conv-folder-pin-btn.active {
-  opacity: 1;
-  transform: none;
   color: var(--app-accent);
+  /* Persistent marker without the hover scrim: solid circle so the title
+     underneath never bleeds through the icon. */
+  background: var(--app-chat-list-raised);
 }
 
 .conv-folder-pin-btn.active svg path {
@@ -535,11 +572,7 @@ const emit = defineEmits<{
 @media (max-width: 880px) {
   .conv-folder-actions {
     opacity: 1;
-  }
-
-  .conv-folder-pin-btn {
-    opacity: 1;
-    transform: none;
+    pointer-events: auto;
   }
 }
 </style>

@@ -163,6 +163,8 @@ function isFixedLocalTimeSchedule (kind: ScheduledTaskDefinition['schedule']['ki
 }
 
 export class ScheduledTaskService {
+  /** 显式字段而非构造器参数属性：node --experimental-strip-types 不支持后者。 */
+  private readonly options: ScheduledTaskServiceOptions
   private tasks: ScheduledTaskDefinition[] = []
   /**
    * Tasks created by the AI tool live in the Rust scheduler store (SQLite)
@@ -177,7 +179,9 @@ export class ScheduledTaskService {
   private readonly runningTaskIds = new Set<string>()
   private readonly deferredTaskSaves = new Map<string, ScheduledTaskDefinition>()
 
-  constructor (private readonly options: ScheduledTaskServiceOptions) {}
+  constructor (options: ScheduledTaskServiceOptions) {
+    this.options = options
+  }
 
   private async getAiEngine (): Promise<AIExecutionEngine> {
     return await this.options.resolveAiEngine?.() || this.options.aiEngine
@@ -591,12 +595,14 @@ export class ScheduledTaskService {
     taskName: string
     conversationId?: string
     resultText?: string
+    outputText?: string
     error?: string
     trigger?: ScheduledTaskTrigger
   }): void {
     const task = this.findTask(payload.scheduleId)
     const now = new Date().toISOString()
     const resultText = String(payload.resultText || '')
+    const outputText = String(payload.outputText || '')
     const errorText = String(payload.error || '')
     const status: ScheduledTaskRunStatus = errorText ? 'failed' : 'completed'
     const summary = buildSummary(errorText || resultText, t('mainDialog.scheduledTaskCompletedSummary'))
@@ -613,7 +619,11 @@ export class ScheduledTaskService {
         current.finishedAt = now
         current.summary = summary
         current.resultText = resultText
+        current.outputText = outputText || undefined
         current.error = errorText || undefined
+        // 进度桥创建的 running 报告在任务不在 overlay 里时 prompt 为空，
+        // 而 store 的 normalizeReport 会丢弃空 prompt 的报告，落盘前补齐。
+        if (!current.prompt) current.prompt = task?.prompt || payload.taskName
       })
     } else {
       report = {
@@ -629,6 +639,7 @@ export class ScheduledTaskService {
         prompt: task?.prompt || payload.taskName,
         summary,
         resultText,
+        outputText: outputText || undefined,
         error: errorText || undefined,
         progress: [],
         providerId: task?.providerId || null,

@@ -436,7 +436,9 @@ watch(
   pointer-events: auto;
   transform: translateX(0);
   color: var(--app-accent);
-  background: color-mix(in srgb, var(--app-chat-list-raised) 34%, transparent);
+  /* Solid circle: this marker stays visible without the hover scrim, so a
+     translucent fill would let the truncated title bleed through it. */
+  background: var(--app-chat-list-raised);
 }
 
 .conv-delete {
@@ -471,8 +473,7 @@ watch(
   transition: max-width 0.24s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease, transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), color 0.16s ease, background 0.16s ease;
 }
 
-.conv-item:hover .conv-delete,
-.conv-item.active .conv-delete {
+.conv-item:hover .conv-delete {
   opacity: 1;
   transform: translateY(0) scale(1);
 }
@@ -501,7 +502,9 @@ watch(
 .conversation-item-compact .conv-actions::before {
   content: '';
   position: absolute;
-  inset: -3px;
+  /* Hug the two buttons tightly: a wide pill (old -3px all around) showed a
+     raised strip past the buttons' right edge against the row background. */
+  inset: -2px -1px;
   border-radius: 999px;
   background: var(--app-chat-list-raised);
   opacity: 0;
@@ -511,8 +514,12 @@ watch(
   pointer-events: none;
 }
 
+/* Row actions are hover/focus-only: the active state just highlights the row
+   (wash + gradient bar) and never parks buttons on it. That also keeps the
+   scrim pill exactly as wide as the two visible buttons — showing it while
+   only the pin is expanded used to leak a raised strip past the collapsed
+   delete slot. */
 .conversation-item-compact:hover .conv-actions::before,
-.conversation-item-compact.active .conv-actions::before,
 .conversation-item-compact:focus-within .conv-actions::before {
   opacity: 1;
   transform: scale(1);
@@ -520,8 +527,6 @@ watch(
 
 .conversation-item-compact:hover .conv-pin,
 .conversation-item-compact:hover .conv-delete,
-.conversation-item-compact.active .conv-pin,
-.conversation-item-compact.active .conv-delete,
 .conversation-item-compact:focus-within .conv-pin,
 .conversation-item-compact:focus-within .conv-delete {
   opacity: 1;
@@ -530,7 +535,6 @@ watch(
 }
 
 .conversation-item-compact:hover .conv-delete,
-.conversation-item-compact.active .conv-delete,
 .conversation-item-compact:focus-within .conv-delete {
   max-width: 20px;
   transition-delay: 0.04s;

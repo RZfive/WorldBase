@@ -22,7 +22,7 @@ export type StreamEvent =
   | { type: 'token'; content: string }
   | { type: 'thinking'; content: string }
   | { type: 'tool_start'; name: string }
-  | { type: 'tool_end'; name: string }
+  | { type: 'tool_end'; name: string; error?: string }
   | ProgressEvent
   | { type: 'reset' }
   | { type: 'plan_mode'; active: boolean; plan?: { goal: string; summary: string; steps: Array<{ description: string; files?: string[] }>; createdAt: number } }

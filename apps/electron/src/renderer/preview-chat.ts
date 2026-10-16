@@ -100,16 +100,6 @@ const App = defineComponent({
 })
 const app=createApp(App); app.use(i18n); app.mount('#app')
 
-// Track the input card height like ChatPanelContainer does, so the
-// attention zone keeps floating 6px above the card as it grows/shrinks.
-const surface = document.querySelector<HTMLElement>('.preview-chat')
-const inputCard = surface?.querySelector<HTMLElement>('.input-container')
-if (surface && inputCard && typeof ResizeObserver !== 'undefined') {
-  const sync = () => surface.style.setProperty('--chat-input-card-height', `${inputCard.offsetHeight}px`)
-  new ResizeObserver(sync).observe(inputCard)
-  sync()
-}
-
 const style=document.createElement('style'); style.textContent=`
-html,body,#app{height:100%;overflow:hidden}.preview-shell{display:flex;height:100%;background:var(--app-main-surface)}.preview-shell>.conv-sidebar{width:224px;flex:0 0 224px}.preview-chat{--chat-message-gutter:clamp(24px,4vw,64px);--chat-message-track-max:980px;--chat-user-message-max:680px;--chat-user-bubble-max:540px;--chat-event-card-max:100%;--chat-input-overlap:72px;--chat-input-gutter:16px;--chat-input-card-height:132px;position:relative;display:flex;flex:1;min-width:640px;min-height:0;flex-direction:column;overflow:hidden;background:var(--app-chat-canvas)}.preview-attention{position:absolute;left:16px;right:16px;bottom:calc(var(--chat-input-card-height,132px) + 24px);z-index:8;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:none}.preview-attention>*{flex:0 0 auto;width:100%}
+html,body,#app{height:100%;overflow:hidden}.preview-shell{display:flex;height:100%;background:var(--app-main-surface)}.preview-shell>.conv-sidebar{width:224px;flex:0 0 224px}.preview-chat{--chat-message-gutter:clamp(24px,4vw,64px);--chat-message-track-max:980px;--chat-user-message-max:680px;--chat-user-bubble-max:540px;--chat-event-card-max:100%;--chat-input-gutter:16px;position:relative;display:flex;flex:1;min-width:640px;min-height:0;flex-direction:column;overflow:hidden;background:var(--app-chat-canvas)}.preview-attention{flex:0 0 auto;width:calc(100% - 32px);margin:0 auto;padding:0 0 6px;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:auto}.preview-attention>*{flex:0 0 auto;width:100%}
 `; document.head.appendChild(style)

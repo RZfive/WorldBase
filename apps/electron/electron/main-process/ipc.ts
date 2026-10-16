@@ -19,6 +19,7 @@ import { isAllowedExternalUrl } from '../../src/shared/provider-templates.js'
 import type { AIExecutionAuthMode, AIExecutionPreferences, AIProvidersConfig, ChatFontPreferences, LanguagePreference, LaunchpadLayout, PinnedDockApp, PortableSettingsConfig, WebAppShortcut } from '../../src/main/settings/settings-store.js'
 import { setMainLocale, t } from '../../src/main/i18n/main-i18n.js'
 import type { Conversation } from '../../src/main/settings/chat-history.js'
+import { restoreLostHarnessMessages } from '../../src/main/settings/chat-history-reconcile.js'
 import { buildStudioImageUrl } from '../../src/main/settings/image-library-store.js'
 import type { ImageLibraryData, ImageLibraryEntry, ImageLibraryFolderCard, ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery } from '../../src/main/settings/image-library-store.js'
 import type { ImageStudioGenerateRequest, ImageStudioGenerateResponse, ImageStudioTask } from '../../src/shared/image-studio-types.js'
@@ -29,14 +30,15 @@ import type { LongTermGoalSaveInput, LongTermGoalStreamEvent } from '../../src/s
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateWebsiteKind } from '../../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, PageAutomationResponseEnvelope } from '../../src/shared/page-automation-types.js'
+import type { WorkspaceTabControlResponseEnvelope } from '../../src/shared/workspace-control-types.js'
 import type { ActiveTerminalContext } from '../../src/shared/terminal-types.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, ChannelEvent, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
-import type { FolderWorkspacePickResult } from '../../src/shared/folder-workspace-types.js'
+import type { ActiveCodeViewContext, FolderWorkspacePickResult } from '../../src/shared/folder-workspace-types.js'
 import type { DocumentEditExportRequest } from '../../src/shared/document-edit-types.js'
 import { assertFolderWorkspaceRoot, getFolderWorkspaceRootName, listFolderWorkspaceFiles, readFolderWorkspaceFile } from '../../src/main/folder-workspace/folder-workspace-fs.js'
 import { calculateDocumentSha256, exportDocumentCopy, readDocumentEditImage } from '../../src/main/document-edit/document-edit-service.js'
 import { LAN_SERVER_PORT } from '../../src/main/constants.js'
-import { mainState, activeChatSessions, pendingPageAutomationRequests, projectWindows, type EnsureWindowWidthOptions } from './state.js'
+import { mainState, activeChatSessions, pendingPageAutomationRequests, pendingWorkspaceTabControlRequests, projectWindows, type EnsureWindowWidthOptions } from './state.js'
 import { MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES, MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES, MAX_UPLOADED_OFFICE_CONTENT_LENGTH } from './constants.js'
 import { readUploadedAttachmentFromBuffer, readUploadedAttachmentFromPath, type UploadedAttachmentBufferPayload } from './media/attachments.js'
 import { ensureDocumentRenderPreview } from './media/document-preview.js'
@@ -56,7 +58,7 @@ import {
   mirrorDocumentArtifact,
   refreshRustScheduledTasks
 } from './services.js'
-import { attachProjectRuntimeLogForwarding, broadcastToAppWindows, buildActivePagePromptSection, buildActiveTerminalPromptSection, buildRendererWindowUrl, buildWebCapabilityPolicySection, createProjectPackageDefaultName, ensureWindowHasMinimumWidth, getPreferredLanIpv4Addresses, getProjectsDir, getSenderWindow, guessImageExtension, resolveImageBuffer, runWithAiRequestWindow, setWindowMinimumWidth } from './windows.js'
+import { attachProjectRuntimeLogForwarding, broadcastToAppWindows, buildActiveCodeViewPromptSection, buildActivePagePromptSection, buildActiveTerminalPromptSection, buildRendererWindowUrl, buildWebCapabilityPolicySection, createProjectPackageDefaultName, ensureWindowHasMinimumWidth, getPreferredLanIpv4Addresses, getProjectsDir, getSenderWindow, guessImageExtension, resolveImageBuffer, runWithAiRequestWindow, setWindowMinimumWidth } from './windows.js'
 import { generateImGatewayReply } from './ai/im-replies.js'
 
 /** 打开中的文档页文件监听（引用计数共享；变化广播给所有应用窗口）。 */
@@ -312,6 +314,26 @@ export function setupIPC (): void {
     pending.resolve(payload.result)
   })
 
+  ipcMain.on('workspace:tabControlResult', (_event, payload: WorkspaceTabControlResponseEnvelope) => {
+    const pending = pendingWorkspaceTabControlRequests.get(payload.requestId)
+    if (!pending) return
+
+    pendingWorkspaceTabControlRequests.delete(payload.requestId)
+    clearTimeout(pending.timeout)
+
+    if (!payload.ok) {
+      pending.reject(new Error(payload.error || 'Workspace tab control failed in the renderer'))
+      return
+    }
+
+    if (!payload.result) {
+      pending.reject(new Error('Workspace tab control returned no result'))
+      return
+    }
+
+    pending.resolve(payload.result)
+  })
+
   // AI chat (non-streaming, kept for backward compat)
   ipcMain.handle('ai:chat', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string, activeTerminalContext?: ActiveTerminalContext) => {
     const resolvedFolderWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(folderWorkspaceRoot)
@@ -420,7 +442,7 @@ export function setupIPC (): void {
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext) => {
     const sender = event.sender
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const channel = `ai:stream-event:${sessionId}`
@@ -471,6 +493,7 @@ export function setupIPC (): void {
       : null
     const activePagePromptSection = buildActivePagePromptSection(activePageContext)
     const activeTerminalPromptSection = buildActiveTerminalPromptSection(activeTerminalContext)
+    const activeCodeViewPromptSection = buildActiveCodeViewPromptSection(activeCodeContext)
     const webCapabilityPromptSection = buildWebCapabilityPolicySection()
     const rustHarness = await startSelectedRustHarness()
     const conversationTitle = getConversationTitleFromMessages(messages)
@@ -690,6 +713,7 @@ export function setupIPC (): void {
                     ...(folderWorkspacePromptSection ? [folderWorkspacePromptSection] : []),
                     ...(activePagePromptSection ? [activePagePromptSection] : []),
                     ...(activeTerminalPromptSection ? [activeTerminalPromptSection] : []),
+                    ...(activeCodeViewPromptSection ? [activeCodeViewPromptSection] : []),
                     webCapabilityPromptSection
                   ],
                   activeSkillContents: runtimeContext.activeSkillContents,
@@ -858,12 +882,37 @@ export function setupIPC (): void {
   })
 
   // Conversation history
+  /**
+   * Repair passes for history lost to an abnormal stream end: the harness
+   * SQLite store keeps rows the renderer JSON never persisted. Runs only when
+   * the harness process is already up - opening a conversation must not boot
+   * the Rust side by itself.
+   */
+  const reconcileConversationWithHarness = async (conversation: Conversation): Promise<Conversation> => {
+    try {
+      const harness = mainState.rustHarness
+      if (!harness) return conversation
+      const rows = await harness.listConversationMessages(conversation.id)
+      const { conversation: merged, restoredCount } = restoreLostHarnessMessages(conversation, rows)
+      if (restoredCount > 0) {
+        console.info(`[conversations:get] restored ${restoredCount} lost message(s) from harness store for ${conversation.id}`)
+        await chatHistory.save(merged)
+      }
+      return merged
+    } catch (error) {
+      console.warn('[conversations:get] harness history reconcile failed:', error)
+      return conversation
+    }
+  }
+
   ipcMain.handle('conversations:list', async () => {
     return chatHistory!.list()
   })
 
   ipcMain.handle('conversations:get', async (_event: IpcMainInvokeEvent, id: string) => {
-    return chatHistory!.get(id)
+    const conversation = await chatHistory!.get(id)
+    if (!conversation) return null
+    return await reconcileConversationWithHarness(conversation)
   })
 
   ipcMain.handle('conversations:save', async (_event: IpcMainInvokeEvent, conversation: Conversation) => {
@@ -1917,6 +1966,21 @@ export function setupIPC (): void {
     const rustClient = await selectedRustProjectClient()
     if (rustClient) return await rustClient.call<Record<string, unknown>>('workspace.read', { rootPath, filePath })
     return readFolderWorkspaceFile(rootPath, filePath)
+  })
+
+  // Sidebar project folders (user-registered directories, non-Launchpad).
+  // Picking reuses the folder-workspace dialog (same openDirectory flow).
+  ipcMain.handle('sidebarProjects:listCustom', () => {
+    return mainState.customProjectStore?.list() ?? []
+  })
+
+  ipcMain.handle('sidebarProjects:addCustom', (_event: IpcMainInvokeEvent, rootPath: string, name?: string) => {
+    if (!mainState.customProjectStore) return null
+    return mainState.customProjectStore.add(String(rootPath || ''), typeof name === 'string' ? name : undefined)
+  })
+
+  ipcMain.handle('sidebarProjects:removeCustom', (_event: IpcMainInvokeEvent, id: string) => {
+    return mainState.customProjectStore?.remove(String(id || '')) ?? false
   })
 
   // Project management

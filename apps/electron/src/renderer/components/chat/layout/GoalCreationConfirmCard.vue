@@ -61,10 +61,6 @@ const objective = computed(() => props.proposal.objective || '')
 </template>
 
 <style scoped>
-.goal-create-confirm-shell {
-  --chat-input-overlap: 0px;
-}
-
 .goal-create-confirm-float {
   position: static;
   transform: none;

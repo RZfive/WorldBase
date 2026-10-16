@@ -151,10 +151,9 @@ const showContextDetail = computed(() => Boolean(
    * --app-shell-bg is bluer than the canvas and caused a visible tint seam).
    */
   --chat-header-solid: var(--app-chat-canvas);
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
+  position: relative;
+  flex: 0 0 49px;
+  width: 100%;
   z-index: 12;
   height: 49px;
   min-height: 49px;
@@ -170,6 +169,13 @@ const showContextDetail = computed(() => Boolean(
    * toward the bottom edge, with a hairline seam (design v1.7 chat head).
    */
   background: var(--chat-header-solid);
+  /*
+   * Own compositing layer. The Electron window paints a translucent shell over
+   * a blurred backdrop, so GPU layer rebuilds (streaming repaints, sidebar
+   * churn) could momentarily drop this panel behind the message list and let
+   * scrolled-under text bleed through the header zone.
+   */
+  transform: translateZ(0);
 }
 
 .chat-header::after {

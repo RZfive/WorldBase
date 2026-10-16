@@ -16,7 +16,12 @@ const { t, locale } = useI18n()
 const visible = computed(() => Boolean(props.report))
 const resultContent = computed(() => {
   if (!props.report) return ''
-  return props.report.resultText?.trim() || props.report.error?.trim() || ''
+  // outputText 是 Rust 调度运行回传的完整 assistant 输出（正文交付物 +
+  // finish_task 小结）；旧报告或 Node 执行的报告回退到 resultText。
+  return props.report.outputText?.trim()
+    || props.report.resultText?.trim()
+    || props.report.error?.trim()
+    || ''
 })
 
 function closeDialog () {

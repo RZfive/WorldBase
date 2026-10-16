@@ -9,7 +9,9 @@ import type {
 
 const MAX_TREE_ENTRIES = 5000
 const MAX_TREE_DEPTH = 12
-const MAX_PREVIEW_BYTES = 1024 * 1024
+// 预览读取上限：配合前端虚拟滚动，尽量把整个文件给到查看器（超大日志类
+// 文件仍截断，避免 IPC 与渲染内存爆炸）。
+const MAX_PREVIEW_BYTES = 8 * 1024 * 1024
 
 const IGNORED_DIRS = new Set([
   '.git',

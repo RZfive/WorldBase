@@ -49,3 +49,15 @@ export interface FolderWorkspaceChangeEvent {
   rootPath: string
   filePath: string
 }
+
+/** The code file the user is currently viewing in the folder workspace viewer. */
+export interface ActiveCodeViewContext {
+  rootPath: string
+  rootName: string
+  /** Workspace-relative path of the file open in the viewer. */
+  filePath: string
+  lineCount: number
+  truncated: boolean
+  /** Line range currently checked/selected in the viewer (1-based, inclusive). */
+  selection?: { start: number; end: number }
+}

@@ -1,7 +1,7 @@
 {
   "name": "the-world",
   "productName": "WorldBase",
-  "version": "1.6.9",
+  "version": "1.7.0",
   "description": "AI-powered project generator and manager",
   "license": "Apache-2.0",
   "repository": {
@@ -32,6 +32,8 @@
     "postinstall": "electron-builder install-app-deps",
     "test:memory-recall": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/memory-index-state.test.mjs tests/memory-card-content.test.mjs tests/rust-harness-host-callbacks.test.mjs",
     "test:web-quote": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/web-quote-state.test.mjs",
+    "test:workspace-tab-control": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/workspace-tab-control.test.mjs",
+    "test:conversation-grouping": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/conversation-grouping.test.mjs",
     "test:terminal-snapshot": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/terminal-snapshot.test.mjs",
     "test:group-rust-routing": "node --test tests/group-rust-routing.test.mjs",
     "test:hot-bootstrap": "node scripts/build-main.mjs && node --test tests/hot-bootstrap.test.mjs",

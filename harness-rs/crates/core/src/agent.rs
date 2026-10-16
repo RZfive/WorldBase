@@ -1863,13 +1863,22 @@ fn format_memory_prompt_sections(
     sections
 }
 
+/// The assembled system prompt for one run. `full` is the exact text sent to
+/// the provider; `dynamic_tail` carries the per-run memory-recall sections
+/// that end `full`, so cache-aware providers can keep them outside the cached
+/// prompt prefix while the stable head stays cacheable.
+struct SystemPromptBuild {
+    full: String,
+    dynamic_tail: Option<String>,
+}
+
 async fn system_prompt(
     hub: &Hub,
     agent: Option<&worldbase_protocol::types::AgentDefinition>,
     context: &ChatRunContext,
     llm_tools: &[LlmTool],
     memory_query: Option<&MemoryQueryVector>,
-) -> String {
+) -> SystemPromptBuild {
     let mut sections = Vec::new();
     if let Some(agent) = agent.filter(|agent| !agent.system_prompt.trim().is_empty()) {
         sections.push(format!(
@@ -1939,9 +1948,19 @@ async fn system_prompt(
     }
 
     // Rust owns scoped memory retrieval on the Rust-selected path. Keeping it
-    // in this dynamic tail avoids opening the TypeScript memory store.
-    sections.extend(memory_prompt_sections(hub, context, memory_query).await);
-    sections.join("\n\n")
+    // in this dynamic tail avoids opening the TypeScript memory store, and
+    // keeps the per-run recalled text out of the provider's cached prefix.
+    let memory_sections = memory_prompt_sections(hub, context, memory_query).await;
+    let dynamic_tail = if memory_sections.is_empty() {
+        None
+    } else {
+        sections.extend(memory_sections.iter().cloned());
+        Some(memory_sections.join("\n\n"))
+    };
+    SystemPromptBuild {
+        full: sections.join("\n\n"),
+        dynamic_tail,
+    }
 }
 
 #[cfg(test)]
@@ -1949,6 +1968,72 @@ mod tests {
     use super::*;
     use worldbase_protocol::types::{ToolCallRecord, ToolResultRecord};
     use worldbase_providers::{ChunkStream, Provider, TokenUsage};
+
+    #[tokio::test]
+    async fn collect_scheduled_output_joins_assistant_messages_after_seq() {
+        let channel = StreamChannel::new();
+        channel
+            .publish(
+                "s",
+                EventKind::AssistantMessage {
+                    content: "earlier run output".into(),
+                    parts: vec![],
+                },
+            )
+            .await;
+        let baseline = channel.latest_seq().await;
+
+        channel
+            .publish("s", EventKind::Notice { text: "定时任务触发".into() })
+            .await;
+        channel
+            .publish(
+                "s",
+                EventKind::AssistantMessage {
+                    content: "  日报正文  ".into(),
+                    parts: vec![],
+                },
+            )
+            .await;
+        channel
+            .publish(
+                "s",
+                EventKind::ToolResult {
+                    call_id: "c1".into(),
+                    name: "local_run_command".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                },
+            )
+            .await;
+        channel
+            .publish(
+                "s",
+                EventKind::AssistantMessage {
+                    content: "   ".into(),
+                    parts: vec![],
+                },
+            )
+            .await;
+        channel
+            .publish(
+                "s",
+                EventKind::AssistantMessage {
+                    content: "## 任务小结\n\n已完成。".into(),
+                    parts: vec![],
+                },
+            )
+            .await;
+
+        let output = collect_scheduled_output(&channel, baseline).await;
+        assert_eq!(output, "日报正文\n\n## 任务小结\n\n已完成。");
+
+        let quiet = StreamChannel::new();
+        quiet
+            .publish("s", EventKind::Notice { text: "no assistant".into() })
+            .await;
+        assert_eq!(collect_scheduled_output(&quiet, -1).await, "");
+    }
 
     #[derive(Clone)]
     struct ProtocolRequest {
@@ -4045,6 +4130,32 @@ async fn prepare_scheduled_run(
     })
 }
 
+/// 上限保护：定时任务报告附带的完整 assistant 输出（截尾保留，尾部是
+/// finish_task 小结与最终交付，比开头更重要）。
+const SCHEDULED_OUTPUT_MAX_CHARS: usize = 20_000;
+
+/// Replayed assistant output of a finished scheduled run: every
+/// `AssistantMessage` the run published after `after_seq`, joined and
+/// tail-truncated. The deliverable (e.g. a generated daily report) usually
+/// lives in a regular assistant message before the closing `finish_task`
+/// summary, so the report needs both to show the real output.
+async fn collect_scheduled_output(channel: &StreamChannel, after_seq: i64) -> String {
+    let frames = channel.replay(after_seq).await;
+    let mut texts: Vec<String> = Vec::new();
+    for frame in frames {
+        if let EventKind::AssistantMessage { content, .. } = frame.kind {
+            let content = content.trim();
+            if !content.is_empty() {
+                texts.push(content.to_string());
+            }
+        }
+    }
+    if texts.is_empty() {
+        return String::new();
+    }
+    take_last_chars(&texts.join("\n\n"), SCHEDULED_OUTPUT_MAX_CHARS)
+}
+
 /// Run the prepared scheduled task and stream tool-level progress plus the
 /// final outcome to the desktop host over the host bridge. The scheduler loop
 /// runs outside any chat session, so without this bridge the UI would show no
@@ -4122,15 +4233,19 @@ async fn execute_scheduled_run(
         }
     });
 
+    // Snapshot the seq before the run so the report can replay exactly the
+    // frames this run published (buffer replay, no broadcast race).
+    let output_after_seq = channel.latest_seq().await;
     let run_result = run_chat_inner(
         hub.clone(),
         stream_id.clone(),
         conversation_id.clone(),
-        channel,
+        channel.clone(),
         abort,
     )
     .await;
     progress_task.abort();
+    let assistant_output = collect_scheduled_output(&channel, output_after_seq).await;
 
     // Report the outcome to the desktop host over the host bridge. The
     // scheduler loop runs outside any chat stream, so it publishes on a
@@ -4144,6 +4259,7 @@ async fn execute_scheduled_run(
         "taskName": name,
         "conversationId": conversation_id,
         "resultText": result_text,
+        "outputText": assistant_output,
         "error": error_text,
         "trigger": trigger,
     });
@@ -4566,7 +4682,7 @@ async fn run_chat_inner(
     tools_meta.retain(|tool| tool.name != FINISH_TASK_TOOL_NAME);
     tools_meta.push(finish_task_tool_definition());
     let memory_query_vector = resolve_memory_query_vector(&hub, &context).await;
-    let system = system_prompt(
+    let system_build = system_prompt(
         &hub,
         agent.as_ref(),
         &context,
@@ -4574,6 +4690,8 @@ async fn run_chat_inner(
         memory_query_vector.as_ref(),
     )
     .await;
+    let system = system_build.full;
+    let dynamic_system_suffix = system_build.dynamic_tail;
     let selected_model = model_override
         .as_deref()
         .unwrap_or_else(|| provider.model());
@@ -4816,6 +4934,7 @@ async fn run_chat_inner(
                                 .unwrap_or(false)
                         }),
                         reasoning_effort: context.reasoning_effort.clone(),
+                        dynamic_system_suffix: dynamic_system_suffix.clone(),
                     },
                 ) => Some(result),
             };

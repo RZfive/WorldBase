@@ -35,6 +35,8 @@ export interface AIEngineServices {
   getMainWindow?: () => BrowserWindow | null
   readActivePage?: (mode?: 'interactive' | 'article') => Promise<BrowserAutomationSnapshot | BrowserAutomationArticle>
   interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
+  /** Round-trip to the renderer workspace store for AI tab list/activate/close. */
+  requestWorkspaceTabControl?: (request: import('../../shared/workspace-control-types.js').WorkspaceTabControlRequest) => Promise<import('../../shared/workspace-control-types.js').WorkspaceTabControlResult>
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
   notifyAgentWorkspaceChanged?: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void
   notifyFolderWorkspaceChanged?: (event: FolderWorkspaceChangeEvent) => void

@@ -19,6 +19,7 @@ import { sharedChatPanelState } from './renderer/components/chat/panel/shared-st
 import { addWebQuote } from './renderer/components/chat/panel/web-quote-state'
 import { workspaceBrowserSurfaces } from './renderer/components/workspace/workspace-store'
 import type { ActiveTerminalContext } from './shared/terminal-types'
+import type { WorkspaceTabControlRequestEnvelope, WorkspaceTabControlResponseEnvelope } from './shared/workspace-control-types'
 import type {
   ActivePageAutomationContext,
   BrowserAutomationAction,
@@ -331,12 +332,18 @@ let windowClosedCleanup: (() => void) | null = null
 let projectOpenInShellCleanup: (() => void) | null = null
 let browserOpenInDockCleanup: (() => void) | null = null
 let workspaceOpenTabCleanup: (() => void) | null = null
+let workspaceTabControlCleanup: (() => void) | null = null
 let workspaceDocumentDraftCleanup: (() => void) | null = null
 let schedulerReportRequestedCleanup: (() => void) | null = null
 let pageAutomationRequestCleanup: (() => void) | null = null
 /** Bumped on every AI-originated workspace tab request; consumed by the chat shell once. */
 let workspaceTabRequestSeq = 0
-const workspaceTabRequest = ref<{ kind: string; payload?: Record<string, unknown>; seq: number } | null>(null)
+const workspaceTabRequest = ref<{ kind: string; payload?: Record<string, unknown>; conversationId?: string; seq: number } | null>(null)
+/** Bumped on every AI workspace tab list/activate/close request; resolved through the chat shell. */
+let workspaceTabControlSeq = 0
+const workspaceTabControlRequest = ref<{ seq: number; envelope: WorkspaceTabControlRequestEnvelope } | null>(null)
+/** Conversation the chat shell currently displays; scopes AI workspace requests. */
+const chatCurrentConversationId = ref<string | null>(null)
 /** Bumped on every AI-staged document draft; consumed by the chat shell once. */
 let workspaceDraftRequestSeq = 0
 const workspaceDraftRequest = ref<{ payload: DocumentDraftPayloadDTO; seq: number } | null>(null)
@@ -460,6 +467,15 @@ async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelo
   }
 
   respond(response)
+}
+
+/** Chat shell answered an AI tab control request; ship it back to the main process. */
+function handleWorkspaceTabControlResult (response: WorkspaceTabControlResponseEnvelope) {
+  window.electronAPI?.resolveWorkspaceTabControl(response)
+  // The result doubles as the consumed signal for the seq-bumped request.
+  if (workspaceTabControlRequest.value?.envelope.requestId === response.requestId) {
+    workspaceTabControlRequest.value = null
+  }
 }
 
 async function fetchProjectMeta (projectId: string) {
@@ -1387,13 +1403,33 @@ onMounted(async () => {
   }
 
   if (window.electronAPI?.onWorkspaceOpenTab) {
-    workspaceOpenTabCleanup = window.electronAPI.onWorkspaceOpenTab(({ kind, payload }) => {
-      if (currentView.value !== 'chat') openChat()
-      // A workspace tab request is an explicit new automation target; the
-      // launchpad page loses the "AI operate" pin.
-      launchpadPageChatActive.value = false
+    workspaceOpenTabCleanup = window.electronAPI.onWorkspaceOpenTab(({ kind, payload, conversationId }) => {
+      // Only a request for the displayed conversation may yank the user into
+      // the chat view; background conversations get their tab stashed into
+      // their own workspace instead (handled by the chat shell).
+      if (!conversationId || conversationId === chatCurrentConversationId.value) {
+        if (currentView.value !== 'chat') openChat()
+        // A workspace tab request is an explicit new automation target; the
+        // launchpad page loses the "AI operate" pin.
+        launchpadPageChatActive.value = false
+      }
       workspaceTabRequestSeq += 1
-      workspaceTabRequest.value = { kind, payload, seq: workspaceTabRequestSeq }
+      workspaceTabRequest.value = { kind, payload, conversationId, seq: workspaceTabRequestSeq }
+    })
+  }
+
+  if (window.electronAPI?.onWorkspaceTabControl) {
+    workspaceTabControlCleanup = window.electronAPI.onWorkspaceTabControl((envelope) => {
+      // Switching/closing is user-visible like opening; a plain list must not
+      // yank the user out of the current view. Background-conversation
+      // requests neither switch views nor steal focus.
+      const conversationId = envelope.request.conversationId
+      if (envelope.request.action !== 'list' && (!conversationId || conversationId === chatCurrentConversationId.value)) {
+        if (currentView.value !== 'chat') openChat()
+        launchpadPageChatActive.value = false
+      }
+      workspaceTabControlSeq += 1
+      workspaceTabControlRequest.value = { envelope, seq: workspaceTabControlSeq }
     })
   }
 
@@ -1433,8 +1469,9 @@ onUnmounted(() => {
   windowClosedCleanup?.()
   projectOpenInShellCleanup?.()
   browserOpenInDockCleanup?.()
-  workspaceOpenTabCleanup?.()
-  workspaceDocumentDraftCleanup?.()
+    workspaceOpenTabCleanup?.()
+    workspaceTabControlCleanup?.()
+    workspaceDocumentDraftCleanup?.()
   schedulerReportRequestedCleanup?.()
   pageAutomationRequestCleanup?.()
 })
@@ -1525,9 +1562,12 @@ onUnmounted(() => {
                   :active-page-context="activePageAutomationContext"
                   :active-terminal-context="activeTerminalContext"
                   :workspace-tab-request="workspaceTabRequest"
+                  :workspace-tab-control-request="workspaceTabControlRequest"
                   :workspace-draft-request="workspaceDraftRequest"
                   @contextConsumed="chatProjectContext = null"
+                  @current-conversation-change="chatCurrentConversationId = $event"
                   @workspace-tab-request-consumed="workspaceTabRequest = null"
+                  @workspace-tab-control-result="handleWorkspaceTabControlResult"
                   @workspace-draft-request-consumed="workspaceDraftRequest = null"
                   @page-surface-change="workspacePageSurface = $event"
                   @terminal-surface-change="workspaceTerminalSurface = $event"

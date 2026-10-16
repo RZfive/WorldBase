@@ -6,12 +6,14 @@ import ConversationSidebarItemCard from './ConversationSidebarItemCard.vue'
 import SidebarIcon from './SidebarIcon.vue'
 import {
   type AgentSidebarItem,
+  type ConversationGroupingMode,
   type ConversationSidebarSectionKey,
   type ConversationSidebarItem,
   type GroupSidebarItem,
   type LongTermGoalSidebarItem
 } from './ConversationSidebar.types'
 import { useConversationSidebarFolders } from './useConversationSidebarFolders'
+import { useConversationSidebarGrouping, type SidebarProjectInfo } from './useConversationSidebarGrouping'
 
 const props = defineProps<{
   agentItems: AgentSidebarItem[]
@@ -19,6 +21,8 @@ const props = defineProps<{
   longTermGoalItems: LongTermGoalSidebarItem[]
   conversationItems: ConversationSidebarItem[]
   conversationListLoaded: boolean
+  projectItems?: SidebarProjectInfo[]
+  groupingMode?: ConversationGroupingMode
 }>()
 
 const emit = defineEmits<{
@@ -33,9 +37,17 @@ const emit = defineEmits<{
   (e: 'deleteConversation', id: string): void
   (e: 'renameConversation', id: string, title: string): void
   (e: 'pinConversation', id: string): void
+  (e: 'update:groupingMode', mode: ConversationGroupingMode): void
+  (e: 'assignConversationProject', conversationId: string, projectId: string | null): void
+  (e: 'newConversationInProject', projectId: string, rootPath: string | null): void
+  (e: 'newConversationInWorkspace', rootPath: string, name: string): void
+  (e: 'addProjectFolder'): void
+  (e: 'openProject', projectId: string): void
+  (e: 'newConversationInFolder', folderId: string): void
+  (e: 'organizeConversations'): void
 }>()
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const searchQuery = ref('')
 const searchInputEl = ref<HTMLInputElement | null>(null)
 const renamingConversationId = ref<string | null>(null)
@@ -131,12 +143,15 @@ const filteredLongTermGoalItems = computed(() => filterItems(props.longTermGoalI
 
 const {
   conversationEntries,
-  filteredConversationCount,
+  conversationFolders,
   isSearching,
   renamingFolderId,
   renameInput,
   dragItem,
+  pinnedIds: pinnedIdsRef,
   createEmptyFolder,
+  ensureFolder,
+  appendConversationToFolderEnd,
   startRenameFolder,
   commitRenameFolder,
   cancelRenameFolder,
@@ -169,8 +184,151 @@ const {
   defaultFolderName
 )
 
+// ── Grouping modes (time / project / folders) ──────────────────────────────
+// The mode lives here but is mirrored to the parent (collapsed-capsule flyout
+// needs it too); the parent may also set it (Launchpad "view conversations").
+const groupingLabels = reactive({
+  today: t('chatUi.groupToday'),
+  yesterday: t('chatUi.groupYesterday'),
+  last7Days: t('chatUi.groupLast7Days'),
+  last30Days: t('chatUi.groupLast30Days'),
+  older: t('chatUi.groupOlder'),
+  ungrouped: t('chatUi.groupUngrouped'),
+  deletedProjects: t('chatUi.groupDeletedProjects')
+})
+watch(() => locale.value, () => {
+  Object.assign(groupingLabels, {
+    today: t('chatUi.groupToday'),
+    yesterday: t('chatUi.groupYesterday'),
+    last7Days: t('chatUi.groupLast7Days'),
+    last30Days: t('chatUi.groupLast30Days'),
+    older: t('chatUi.groupOlder'),
+    ungrouped: t('chatUi.groupUngrouped'),
+    deletedProjects: t('chatUi.groupDeletedProjects')
+  })
+})
+
+const {
+  groupingMode,
+  setGroupingMode: applyGroupingMode,
+  groupedEntries,
+  toggleGroupCollapsed
+} = useConversationSidebarGrouping({
+  conversationItems: computed(() => props.conversationItems),
+  searchQuery,
+  normalizeSearchValue,
+  conversationListLoaded: toRef(props, 'conversationListLoaded'),
+  folderEntries: conversationEntries,
+  pinnedIds: pinnedIdsRef,
+  projects: computed(() => props.projectItems || []),
+  labels: groupingLabels
+})
+
+watch(() => props.groupingMode, (mode) => {
+  if (mode && mode !== groupingMode.value) applyGroupingMode(mode)
+}, { immediate: true })
+
+function requestGroupingMode (mode: ConversationGroupingMode): void {
+  applyGroupingMode(mode)
+  emit('update:groupingMode', mode)
+}
+
+const groupingModes = computed(() => [
+  { key: 'time' as const, icon: 'clock', title: t('chatUi.groupingModeTime') },
+  { key: 'project' as const, icon: 'cube', title: t('chatUi.groupingModeProject') },
+  { key: 'folders' as const, icon: 'folder', title: t('chatUi.groupingModeFolders') }
+])
+
+function projectInitial (name: string): string {
+  const trimmed = (name || '').trim()
+  return trimmed ? Array.from(trimmed)[0].toUpperCase() : '?'
+}
+
+// ── Row context menu: pin / move-to-project / rename / delete ──────────────
+interface ContextMenuState {
+  conversationId: string | null
+  view: 'main' | 'projects'
+  x: number
+  y: number
+}
+const contextMenuState = ref<ContextMenuState | null>(null)
+
+function contextMenuItem (): ConversationSidebarItem | null {
+  const id = contextMenuState.value?.conversationId
+  if (!id) return null
+  return props.conversationItems.find(item => item.id === id) || null
+}
+
+function openConversationMenu (event: MouseEvent, item: ConversationSidebarItem): void {
+  contextMenuState.value = {
+    conversationId: item.id,
+    view: 'main',
+    x: event.clientX,
+    y: event.clientY
+  }
+}
+
+function closeConversationMenu (): void {
+  contextMenuState.value = null
+}
+
+const contextMenuStyle = computed(() => {
+  const state = contextMenuState.value
+  if (!state) return {}
+  const menuWidth = 176
+  const menuHeight = state.view === 'projects' ? 220 : 172
+  const x = Math.max(6, Math.min(state.x, window.innerWidth - menuWidth - 8))
+  const y = Math.max(6, Math.min(state.y, window.innerHeight - menuHeight - 8))
+  return { left: `${x}px`, top: `${y}px` }
+})
+
+function menuTogglePin (): void {
+  const item = contextMenuItem()
+  if (item) emit('pinConversation', item.id)
+  closeConversationMenu()
+}
+
+function startMenuRename (): void {
+  const item = contextMenuItem()
+  if (item) startRenameConversation(item)
+  closeConversationMenu()
+}
+
+function menuDelete (): void {
+  const item = contextMenuItem()
+  if (item) emit('deleteConversation', item.id)
+  closeConversationMenu()
+}
+
+function menuAssignProject (projectId: string | null): void {
+  const state = contextMenuState.value
+  if (state?.conversationId) emit('assignConversationProject', state.conversationId, projectId)
+  closeConversationMenu()
+}
+
+// ── Imperative helpers for the shell (folder-attached creation, AI organize) ──
+function addConversationToFolder (conversationId: string, folderId: string): void {
+  appendConversationToFolderEnd({ id: conversationId, type: 'conversation', source: 'top-level' }, folderId)
+}
+
+function getUnfiledConversations (): ConversationSidebarItem[] {
+  const filed = new Set(conversationFolders.value.flatMap(folder => folder.conversationIds))
+  return props.conversationItems.filter(item => !filed.has(item.id))
+}
+
+function getFolderNames (): Array<{ id: string; name: string }> {
+  return conversationFolders.value.map(folder => ({ id: folder.id, name: folder.name }))
+}
+
+defineExpose({
+  addConversationToFolder,
+  ensureFolder: (name: string) => ensureFolder(name)?.id ?? null,
+  getUnfiledConversations,
+  getFolderNames
+})
+
 const hasVisibleItems = computed(() => {
-  return filteredAgentItems.value.length > 0 || filteredGroupItems.value.length > 0 || filteredLongTermGoalItems.value.length > 0 || conversationEntries.value.length > 0
+  return filteredAgentItems.value.length > 0 || filteredGroupItems.value.length > 0 || filteredLongTermGoalItems.value.length > 0 || groupedEntries.value.length > 0
 })
 
 function toggleSection (key: ConversationSidebarSectionKey) {
@@ -385,28 +543,68 @@ function cancelRenameConversation () {
         </div>
       </section>
 
-      <section v-if="props.conversationItems.length > 0 || conversationEntries.length > 0" class="conv-section">
+      <section v-if="props.conversationItems.length > 0 || groupedEntries.length > 0" class="conv-section">
         <div class="conv-section-toggle-shell">
           <button
             class="conv-section-toggle conv-section-toggle-embedded"
-            :class="{ collapsed: !isSectionExpanded('conversations', conversationEntries.length) }"
+            :class="{ collapsed: !isSectionExpanded('conversations', groupedEntries.length) }"
             type="button"
             @click="toggleSection('conversations')"
           >
             <span class="conv-section-toggle-copy">
               <span class="conv-section-title">{{ $t('appShell.chat') }}</span>
             </span>
-            <span class="conv-section-meta">{{ filteredConversationCount }}/{{ props.conversationItems.length }}</span>
           </button>
-          <button class="conv-folder-add-btn" type="button" :title="$t('chatUi.newEmptyFolder')" @click.stop="createEmptyFolder">
+          <button
+            v-if="groupingMode === 'folders'"
+            class="conv-folder-add-btn"
+            type="button"
+            :data-tip="$t('chatUi.newEmptyFolder')"
+            @click.stop="createEmptyFolder"
+          >
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M2.25 4.75A1.5 1.5 0 0 1 3.75 3.25H6.2a1 1 0 0 1 .77.36l.57.7a1 1 0 0 0 .77.36h3.94a1.5 1.5 0 0 1 1.5 1.5v4.08a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
               <path d="M8 6.15v3.7M6.15 8h3.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
             </svg>
           </button>
           <button
+            v-if="groupingMode === 'folders'"
+            class="conv-folder-add-btn"
+            type="button"
+            :data-tip="$t('chatUi.organizeConversations')"
+            :aria-label="$t('chatUi.organizeConversations')"
+            @click.stop="emit('organizeConversations')"
+          >
+            <SidebarIcon name="wand" :size="14" />
+          </button>
+          <button
+            v-if="groupingMode === 'project'"
+            class="conv-folder-add-btn"
+            type="button"
+            :data-tip="$t('chatUi.addProjectFolder')"
+            :aria-label="$t('chatUi.addProjectFolder')"
+            @click.stop="emit('addProjectFolder')"
+          >
+            <SidebarIcon name="folderPlus" :size="14" />
+          </button>
+          <div class="conv-mode-switch" role="group" :aria-label="$t('chatUi.groupingModeTime')">
+            <button
+              v-for="mode in groupingModes"
+              :key="mode.key"
+              class="conv-mode-btn"
+              :class="{ active: groupingMode === mode.key }"
+              type="button"
+              :data-tip="mode.title"
+              :aria-label="mode.title"
+              :aria-pressed="groupingMode === mode.key"
+              @click.stop="requestGroupingMode(mode.key)"
+            >
+              <SidebarIcon :name="mode.icon" :size="13" />
+            </button>
+          </div>
+          <button
             class="conv-section-caret-btn"
-            :class="{ collapsed: !isSectionExpanded('conversations', conversationEntries.length) }"
+            :class="{ collapsed: !isSectionExpanded('conversations', groupedEntries.length) }"
             type="button"
             aria-hidden="true"
             @click="toggleSection('conversations')"
@@ -420,7 +618,7 @@ function cancelRenameConversation () {
         </div>
         <div
           class="conv-section-body"
-          :class="{ collapsed: !isSectionExpanded('conversations', conversationEntries.length) }"
+          :class="{ collapsed: !isSectionExpanded('conversations', groupedEntries.length) }"
         >
           <div
             :class="['conv-section-body-inner', 'conv-section-body-conversations', conversationSectionDropClass()]"
@@ -428,7 +626,7 @@ function cancelRenameConversation () {
             @dragleave.self="onDragLeave"
             @drop.self="onConversationSectionDrop"
           >
-            <template v-for="entry in conversationEntries" :key="entry.kind === 'folder' ? `folder-${entry.folder.id}` : entry.item.id">
+            <template v-for="entry in groupedEntries" :key="entry.kind === 'group' ? `group-${entry.groupId}` : entry.kind === 'folder' ? `folder-${entry.folder.id}` : entry.item.id">
               <ConversationSidebarItemCard
                 v-if="entry.kind === 'conversation'"
                 :item="entry.item"
@@ -443,7 +641,7 @@ function cancelRenameConversation () {
                 show-pin
                 :delete-title="$t('common.delete')"
                 @click="emit('selectConversation', entry.item.id)"
-                @contextmenu.prevent="startRenameConversation(entry.item)"
+                @contextmenu.prevent="openConversationMenu($event, entry.item)"
                 @update:rename-input="conversationRenameInput = $event"
                 @commit-rename="commitRenameConversation(entry.item.id)"
                 @cancel-rename="cancelRenameConversation"
@@ -457,7 +655,7 @@ function cancelRenameConversation () {
               />
 
               <ConversationSidebarFolder
-                v-else
+                v-else-if="entry.kind === 'folder'"
                 :entry="entry"
                 :is-expanded="isFolderExpanded(entry.folder, entry.visibleItems.length)"
                 :is-searching="isSearching"
@@ -488,12 +686,84 @@ function cancelRenameConversation () {
                 @drop-body="onFolderBodyDrop(entry.folder.id)"
                 @select-conversation="emit('selectConversation', $event)"
                 @delete-conversation="emit('deleteConversation', $event)"
+                @add-conversation="emit('newConversationInFolder', entry.folder.id)"
                 @ungroup="ungroupFolder(entry.folder.id)"
                 @delete-folder="deleteFolder(entry.folder.id)"
                 @dragstart-conversation="onConversationDragStart($event.event, $event.conversationId, 'folder', entry.folder.id)"
                 @dragover-conversation="onFolderConversationDragOver($event.event, $event.conversationId, entry.folder.id)"
                 @drop-conversation="onFolderConversationDrop($event.event, $event.conversationId, entry.folder.id)"
               />
+
+              <div v-else class="conv-group" :class="{ collapsed: entry.collapsed }">
+                <div
+                  class="conv-group-head"
+                  :class="{ 'conv-group-head-project': entry.groupKind === 'project' }"
+                  role="button"
+                  tabindex="0"
+                  :aria-expanded="!entry.collapsed"
+                  @click="toggleGroupCollapsed(entry.groupId)"
+                  @keydown.enter.prevent="toggleGroupCollapsed(entry.groupId)"
+                  @keydown.space.prevent="toggleGroupCollapsed(entry.groupId)"
+                >
+                  <span class="conv-group-caret" aria-hidden="true"><SidebarIcon name="chevron" :size="12" /></span>
+                  <span
+                    v-if="entry.project || entry.groupKind === 'workspace'"
+                    class="conv-group-avatar"
+                    :class="{ 'conv-group-avatar-ws': !entry.project }"
+                    aria-hidden="true"
+                  >{{ projectInitial(entry.label) }}</span>
+                  <span class="conv-group-name" :title="entry.label">{{ entry.label }}</span>
+                  <span class="conv-group-count">{{ entry.items.length }}</span>
+                  <template v-if="entry.groupKind === 'project' && entry.project">
+                    <button
+                      class="conv-group-btn"
+                      type="button"
+                      :data-tip="$t('chatUi.newConversationInProject')"
+                      :aria-label="$t('chatUi.newConversationInProject')"
+                      @click.stop="emit('newConversationInProject', entry.project.id, entry.project.rootPath || null)"
+                    >
+                      <SidebarIcon name="plus" :size="11" />
+                    </button>
+                    <button
+                      v-if="!entry.project.rootPath"
+                      class="conv-group-btn"
+                      type="button"
+                      :data-tip="$t('chatUi.openProject')"
+                      :aria-label="$t('chatUi.openProject')"
+                      @click.stop="emit('openProject', entry.project.id)"
+                    >
+                      <SidebarIcon name="arrowUpRight" :size="11" />
+                    </button>
+                  </template>
+                  <button
+                    v-else-if="entry.groupKind === 'workspace' && entry.workspaceRoot"
+                    class="conv-group-btn"
+                    type="button"
+                    :data-tip="$t('chatUi.newConversationInWorkspace')"
+                    :aria-label="$t('chatUi.newConversationInWorkspace')"
+                    @click.stop="emit('newConversationInWorkspace', entry.workspaceRoot, entry.label)"
+                  >
+                    <SidebarIcon name="plus" :size="11" />
+                  </button>
+                </div>
+                <div v-if="!entry.collapsed" class="conv-group-body">
+                  <ConversationSidebarItemCard
+                    v-for="groupedItem in entry.items"
+                    :key="groupedItem.id"
+                    :item="groupedItem"
+                    variant="conversation"
+                    compact
+                    show-delete
+                    show-pin
+                    :delete-title="$t('common.delete')"
+                    @click="emit('selectConversation', groupedItem.id)"
+                    @contextmenu.prevent="openConversationMenu($event, groupedItem)"
+                    @delete="emit('deleteConversation', groupedItem.id)"
+                    @pin="togglePinConversation(groupedItem.id)"
+                  />
+                  <div v-if="entry.items.length === 0" class="conv-group-empty">{{ $t('chatUi.groupEmpty') }}</div>
+                </div>
+              </div>
             </template>
           </div>
         </div>
@@ -501,6 +771,62 @@ function cancelRenameConversation () {
 
       <div v-if="!hasVisibleItems" class="conv-empty">{{ isSearching ? $t('chatUi.noMatchingConversations') : $t('chatUi.noConversationRecords') }}</div>
     </div>
+
+    <teleport to="body">
+      <div
+        v-if="contextMenuState"
+        class="conv-ctx-overlay"
+        @click="closeConversationMenu"
+        @contextmenu.prevent="closeConversationMenu"
+      >
+        <div class="conv-ctx-menu" :style="contextMenuStyle" role="menu" @click.stop>
+          <template v-if="contextMenuState.view === 'main'">
+            <button class="conv-ctx-item" type="button" role="menuitem" @click="menuTogglePin">
+              <SidebarIcon name="pin" :size="12" />
+              {{ contextMenuItem()?.isPinned ? $t('chatUi.unpin') : $t('chatUi.pin') }}
+            </button>
+            <button class="conv-ctx-item" type="button" role="menuitem" @click="contextMenuState.view = 'projects'">
+              <SidebarIcon name="folder" :size="12" />
+              {{ $t('chatUi.moveToProject') }}
+            </button>
+            <button class="conv-ctx-item" type="button" role="menuitem" @click="startMenuRename">
+              <SidebarIcon name="pencil" :size="12" />
+              {{ $t('common.rename') }}
+            </button>
+            <div class="conv-ctx-sep" />
+            <button class="conv-ctx-item conv-ctx-danger" type="button" role="menuitem" @click="menuDelete">
+              <SidebarIcon name="close" :size="12" />
+              {{ $t('common.delete') }}
+            </button>
+          </template>
+          <template v-else>
+            <div class="conv-ctx-label">{{ $t('chatUi.moveToProject') }}</div>
+            <button
+              v-for="project in projectItems || []"
+              :key="project.id"
+              class="conv-ctx-item"
+              type="button"
+              role="menuitem"
+              @click="menuAssignProject(project.id)"
+            >
+              <span class="conv-ctx-avatar" aria-hidden="true">{{ projectInitial(project.name) }}</span>
+              <span class="conv-ctx-name">{{ project.name }}</span>
+              <span v-if="contextMenuItem()?.projectId === project.id" class="conv-ctx-check" aria-hidden="true">✓</span>
+            </button>
+            <div class="conv-ctx-sep" />
+            <button
+              class="conv-ctx-item"
+              type="button"
+              role="menuitem"
+              :disabled="!contextMenuItem()?.projectId"
+              @click="menuAssignProject(null)"
+            >
+              {{ $t('chatUi.removeFromProject') }}
+            </button>
+          </template>
+        </div>
+      </div>
+    </teleport>
   </div>
 </template>
 
@@ -660,6 +986,7 @@ function cancelRenameConversation () {
   overflow-x: hidden;
   padding: 8px 0;
   scrollbar-gutter: stable;
+  overflow-anchor: none;
 }
 
 /* Horizontal inset lives on the section (not the list) so the active row's
@@ -884,6 +1211,282 @@ function cancelRenameConversation () {
   background: color-mix(in srgb, var(--app-panel-muted) 42%, transparent);
 }
 
+/* ── Grouping-mode switcher (time / project / folders) ──
+   Compact by design: the header row must keep the same height in every mode
+   so switching modes never reflows the section header. */
+.conv-mode-switch {
+  flex-shrink: 0;
+  display: inline-flex;
+  gap: 1px;
+  padding: 2px;
+  border-radius: 7px;
+  border: 1px solid var(--app-border);
+  background: var(--app-input-bg);
+}
+
+.conv-mode-btn {
+  width: 22px;
+  height: 20px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  color: var(--app-text-faint);
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.conv-mode-btn:hover {
+  background: var(--app-panel-muted);
+  color: var(--app-text);
+}
+
+.conv-mode-btn.active {
+  background: var(--app-accent-soft);
+  color: var(--app-accent-strong);
+}
+
+/* ── Time / project groups ──
+   Group heads sit on the section's 2px row rhythm (no extra padding) so a
+   mode switch changes only which rows exist, not the spacing between them. */
+.conv-group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.conv-group-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-height: 22px;
+  padding: 1px 4px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--app-text-faint);
+  text-align: left;
+  transition: background 0.16s ease;
+}
+
+.conv-group-head:hover {
+  background: color-mix(in srgb, var(--app-panel-muted) 55%, transparent);
+}
+
+.conv-group-head:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--app-accent) 45%, transparent);
+}
+
+.conv-group-caret {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.conv-group-caret svg {
+  transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.conv-group.collapsed .conv-group-caret svg {
+  transform: rotate(-90deg);
+}
+
+.conv-group-avatar {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.55rem;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--app-accent) 20%, transparent);
+  color: var(--app-accent-strong);
+}
+
+.conv-group-avatar-ws {
+  background: color-mix(in srgb, var(--app-accent) 10%, var(--app-panel-muted));
+  color: var(--app-text-muted);
+}
+
+.conv-group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.conv-group-head-project .conv-group-name {
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  font-size: 0.72rem;
+  color: var(--app-text-soft);
+}
+
+.conv-group-count {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--app-text-faint);
+}
+
+.conv-group-btn {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--app-text-soft);
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.conv-group-head:hover .conv-group-btn {
+  display: inline-flex;
+}
+
+.conv-group-btn:hover {
+  background: color-mix(in srgb, var(--app-accent-soft) 36%, transparent);
+  color: var(--app-accent);
+}
+
+.conv-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 0 2px 8px;
+  /* Same indent rhythm as folder children so every grouping mode reads the
+     same hierarchy: head, then rows tucked under a hairline guide. */
+  margin-left: 13px;
+  border-left: 1px solid color-mix(in srgb, var(--app-border) 78%, transparent);
+}
+
+.conv-group.collapsed .conv-group-body {
+  display: none;
+}
+
+.conv-group-empty {
+  color: var(--app-text-faint);
+  font-size: 0.7rem;
+  padding: 6px 10px;
+}
+
+/* ── Row context menu (pin / move-to-project / rename / delete) ── */
+.conv-ctx-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+}
+
+.conv-ctx-menu {
+  position: fixed;
+  min-width: 168px;
+  max-width: 220px;
+  padding: 5px;
+  border-radius: 10px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-strong);
+  box-shadow: var(--shadow-2);
+}
+
+.conv-ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text-soft);
+  font-size: 0.74rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.conv-ctx-item:hover:not(:disabled) {
+  background: var(--app-panel-muted);
+  color: var(--app-text);
+}
+
+.conv-ctx-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.conv-ctx-item svg {
+  flex-shrink: 0;
+  color: var(--app-text-faint);
+}
+
+.conv-ctx-danger,
+.conv-ctx-danger svg {
+  color: var(--app-danger);
+}
+
+.conv-ctx-danger:hover {
+  background: var(--app-danger-soft);
+}
+
+.conv-ctx-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--app-text-faint);
+  padding: 5px 8px 3px;
+}
+
+.conv-ctx-avatar {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.55rem;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--app-accent) 20%, transparent);
+  color: var(--app-accent-strong);
+}
+
+.conv-ctx-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-ctx-check {
+  flex-shrink: 0;
+  color: var(--app-accent-strong);
+  font-size: 0.7rem;
+}
+
+.conv-ctx-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--app-border);
+}
+
 .conv-empty-action {
   width: 100%;
   min-height: 38px;
@@ -898,6 +1501,41 @@ function cancelRenameConversation () {
 .conv-empty-action:hover {
   border-style: solid;
   background: color-mix(in srgb, var(--app-accent-soft) 42%, transparent);
+}
+
+/* Instant hover tooltips for icon-only chrome (native title has a long
+   delay; users can't tell what each switcher glyph does). */
+[data-tip] {
+  position: relative;
+}
+
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 45;
+  white-space: nowrap;
+  padding: 4px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-strong);
+  color: var(--app-text);
+  font-size: 0.68rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  box-shadow: var(--shadow-1);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 0.14s ease 0.18s, transform 0.14s ease 0.18s;
+}
+
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 @media (max-width: 880px) {

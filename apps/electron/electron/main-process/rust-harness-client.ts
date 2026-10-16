@@ -30,6 +30,12 @@ export interface RustHostRequest {
   requestKind: string
   payload: Record<string, unknown>
   streamId: string
+  /**
+   * Chat conversation the owning run belongs to (when the session was started
+   * through `chatStream` with one). UI-targeting host requests forward it so
+   * the renderer can route the effect to the right conversation's workspace.
+   */
+  conversationId?: string
 }
 
 /** Conversation history representation accepted by `conversation.sync`. */
@@ -38,6 +44,14 @@ export interface RustSyncMessage {
   content: unknown
   tool_calls?: unknown
   tool_call_id?: unknown
+}
+
+/** A persisted message row from the harness SQLite store (`conversation.messages`). */
+export interface RustConversationMessageRow {
+  id?: number
+  role: string
+  content: string
+  created_at?: string | null
 }
 
 export interface RustToolDescriptor {
@@ -215,6 +229,8 @@ export class RustHarnessClient {
   private readonly stopRequested = new Set<string>()
   private readonly handlers = new Map<string, (frame: RustEventFrame) => void>()
   private readonly sessionAuthModes = new Map<string, 'strict' | 'auto'>()
+  /** Electron stream session -> chat conversation id, for UI host request routing. */
+  private readonly sessionToConversation = new Map<string, string>()
   private readonly backlog = new Map<string, RustEventFrame[]>()
   private readonly terminalWaiters = new Map<string, Set<() => void>>()
   private readonly sessionCustomTools = new Map<string, Map<string, RustCustomToolRegistration>>()
@@ -234,6 +250,11 @@ export class RustHarnessClient {
 
   constructor (options: RustHarnessClientOptions) {
     this.options = options
+  }
+
+  /** Harness workspace root (the app projects dir) the child process runs in. */
+  get workspaceDir (): string {
+    return this.options.workspace
   }
 
   /** Spawn and handshake once. Concurrent callers share the same startup. */
@@ -788,6 +809,7 @@ export class RustHarnessClient {
     }
     const handler = (frame: RustEventFrame) => onEvent ? onEvent(frame) : this.options.onEvent(sessionId, frame)
     this.handlers.set(sessionId, handler)
+    this.sessionToConversation.set(sessionId, conversationId)
     this.sessionCustomTools.set(sessionId, new Map(
       (options?.customTools || [])
         .filter(tool => Boolean(tool.definition?.name?.trim()))
@@ -1054,6 +1076,16 @@ export class RustHarnessClient {
     } finally {
       if (this.settingsSync === sync) this.settingsSync = null
     }
+  }
+
+  /**
+   * Provider-visible history persisted in the harness SQLite store. This is
+   * the complete run history (including rows the renderer JSON intentionally
+   * omits, like provider tool-result carriers).
+   */
+  async listConversationMessages (conversationId: string, limit = 10_000): Promise<RustConversationMessageRow[]> {
+    const result = await this.call<{ messages?: RustConversationMessageRow[] }>('conversation.messages', { id: conversationId, limit })
+    return Array.isArray(result?.messages) ? result.messages as RustConversationMessageRow[] : []
   }
 
   private async syncConversationHistory (conversationId: string, messages: RustSyncMessage[]): Promise<void> {
@@ -1462,6 +1494,8 @@ export class RustHarnessClient {
           ? memberStreamId
           : frame.streamId || sessionId
       }
+      const hostConversationId = this.sessionToConversation.get(sessionId)
+      if (hostConversationId) request.conversationId = hostConversationId
       const result = request.requestKind === 'tool.execute'
         ? await this.executeSessionCustomTool(sessionId, request)
         : await this.executeHostRequest(request)
@@ -1593,6 +1627,7 @@ export class RustHarnessClient {
     if (streamId) this.streamToSession.delete(streamId)
     this.handlers.delete(sessionId)
     this.sessionCustomTools.delete(sessionId)
+    this.sessionToConversation.delete(sessionId)
     this.releaseNativeGroupTools(sessionId)
     this.nativeGroups.delete(sessionId)
     this.sessionAuthModes.delete(sessionId)

@@ -61,6 +61,7 @@ interface ChatConversationNavigationOptions {
   loadConversations: () => Promise<void>
   saveConversation: (conversationId: string, messages: ChatMessage[], options?: SaveConversationOptions) => Promise<void>
   setConversationTarget: (conversationId: string, projectId: string | null | undefined) => void
+  setConversationProject: (conversationId: string, projectId: string | null | undefined) => void
   resetTransientStreamState: () => void
 }
 
@@ -100,6 +101,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     loadConversations,
     saveConversation,
     setConversationTarget,
+    setConversationProject,
     resetTransientStreamState
   } = options
 
@@ -236,12 +238,82 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     resetTransientStreamState()
     resetWorkspaceState()
     setConversationTarget(conversationId, projectId)
+    setConversationProject(conversationId, projectId)
 
     await saveConversation(conversationId, [], {
       titleOverride: t('chatUi.optimizationConversationTitle', { name }),
-      targetProjectId: projectId
+      targetProjectId: projectId,
+      projectId
     })
     conversationDetailState.value = 'ready'
+  }
+
+  /**
+   * New conversation pre-assigned to a project. `options.rootPath` (registered
+   * folder project or workspace group "＋") additionally attaches the folder
+   * workspace, which is what grants the AI read/write access to the directory.
+   */
+  async function startProjectConversation (
+    projectId: string | null,
+    projectName?: string,
+    options?: { rootPath?: string | null }
+  ): Promise<void> {
+    const conversationId = generateId()
+    navigationVersion++
+
+    stashCurrentConversationForNavigation()
+    currentConversationId.value = conversationId
+    selectedLongTermGoalId.value = null
+    if (longTermGoalWorkspaceActive) longTermGoalWorkspaceActive.value = false
+    messages.value = []
+    targetProjectId.value = null
+    currentAuthMode.value = 'strict'
+    reasoningStrength.value = DEFAULT_REASONING_STRENGTH
+    conversationTemperature.value = null
+    selectedAgentId.value = getDefaultAgentId()
+    selectedGroupId.value = ''
+    selectedChannelBindingId.value = ''
+    syncProviderSelectionForAgent(selectedAgentId.value)
+    inputText.value = projectId && projectName ? `[[project:${projectId}|${projectName}]] ` : ''
+    pendingImages.value = []
+    pendingFiles.value = []
+    uploadFeedback.value = ''
+    resetTransientStreamState()
+    resetWorkspaceState()
+    if (projectId) setConversationProject(conversationId, projectId)
+
+    await saveConversation(conversationId, [], { projectId, allowEmpty: true })
+    const rootPath = options?.rootPath?.trim()
+    if (rootPath) {
+      updateFolderWorkspaceState({
+        rootPath,
+        rootName: projectName || rootPath.split(/[\\/]/).filter(Boolean).pop() || rootPath
+      })
+    }
+    conversationDetailState.value = 'ready'
+  }
+
+  /**
+   * Fresh conversation with a persisted catalog row (so sidebar features can
+   * attach it to folders/projects immediately); resolves with its id.
+   */
+  async function startBlankConversation (): Promise<string> {
+    const conversationId = generateId()
+    navigationVersion++
+
+    stashCurrentConversationForNavigation()
+    currentConversationId.value = conversationId
+    selectedLongTermGoalId.value = null
+    if (longTermGoalWorkspaceActive) longTermGoalWorkspaceActive.value = false
+    resetConversationComposerState()
+    selectedAgentId.value = getDefaultAgentId()
+    selectedGroupId.value = ''
+    selectedChannelBindingId.value = ''
+    syncProviderSelectionForAgent(selectedAgentId.value)
+
+    await saveConversation(conversationId, [], { allowEmpty: true })
+    conversationDetailState.value = 'ready'
+    return conversationId
   }
 
   function newConversation (): void {
@@ -386,10 +458,12 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     deleteConversation,
     loadConversation,
     newConversation,
+    startBlankConversation,
     openAgentWorkspaceConversation,
     openGroupWorkspaceConversation,
     prepareLongTermGoalWorkspace,
     startOptimizationConversation,
+    startProjectConversation,
     updateFolderWorkspaceState,
     updateWorkspaceTabState
   }

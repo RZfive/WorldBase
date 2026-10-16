@@ -41,11 +41,12 @@ pub use compat_tools::{
     GenerateImageTool, GetProjectCommandStatusTool, GetProjectLogsTool, GetTaskStatusTool,
     GetWorkspaceCommandStatusTool, GlobSearchTool, GrepSearchTool, InstallMcpServerTool,
     InstallSkillTool, ListAgentWorkspaceCatalogTool, ListScheduledTasksTool, LocalCommandTool,
-    LocalReadFileTool, LocalWriteFileTool, ManageTodoListTool, OpenProjectAppTool,
-    OpenWorkspaceTabTool, QueryProjectDatabaseTool, RebuildProjectTool, RunProjectCommandTool,
-    SaveCurrentPageAsDocumentTool, SpawnSubagentsTool, StartAsyncTaskTool, WorkspaceCommandTool,
-    WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool, WorkspaceGrepTool,
-    WorkspaceListFilesTool, WorkspacePatchFileTool, WorkspaceReadFileTool, WorkspaceWriteFileTool,
+    LocalReadFileTool, LocalWriteFileTool, ManageTodoListTool, ManageWorkspaceTabsTool,
+    OpenProjectAppTool, OpenWorkspaceTabTool, QueryProjectDatabaseTool, RebuildProjectTool,
+    RunProjectCommandTool, SaveCurrentPageAsDocumentTool, SpawnSubagentsTool, StartAsyncTaskTool,
+    WorkspaceCommandTool, WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool,
+    WorkspaceGrepTool, WorkspaceListFilesTool, WorkspacePatchFileTool, WorkspaceReadFileTool,
+    WorkspaceWriteFileTool,
 };
 pub use computer_use::{ComputerActionTool, ComputerObserveTool};
 pub use document::{DocDraftTool, DocParseTool, DocWriteTool};
@@ -666,6 +667,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(GetProjectLogsTool),
         Arc::new(OpenProjectAppTool),
         Arc::new(OpenWorkspaceTabTool),
+        Arc::new(ManageWorkspaceTabsTool),
         Arc::new(EnterPlanModeTool),
         Arc::new(ExitPlanModeTool),
         Arc::new(ManageTodoListTool),
@@ -883,6 +885,7 @@ mod tests {
             "generate_image",
             "interact_current_page",
             "list_documents",
+            "manage_workspace_tabs",
             "open_project_app",
             "open_workspace_tab",
             "read_active_terminal",
@@ -911,7 +914,7 @@ mod tests {
 
         assert_eq!(
             contracts.len(),
-            7,
+            8,
             "expected the exact Electron tool catalog (only UI-anchored host tools remain)"
         );
         let mut actual_by_name = std::collections::HashMap::new();

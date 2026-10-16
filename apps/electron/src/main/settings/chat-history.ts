@@ -148,6 +148,8 @@ export interface Conversation {
   temperature?: number
   /** Existing project locked to this conversation for optimization/editing. */
   targetProjectId?: string
+  /** Launchpad 项目归属（按项目聚合侧栏）。存量数据回落到 targetProjectId。 */
+  projectId?: string
   /** Active custom agent bound to this conversation. */
   agentId?: string
   /** Active agent group bound to this conversation. */
@@ -175,6 +177,10 @@ export interface Conversation {
 export interface ConversationListEntry extends Omit<Conversation, 'messages'> {
   /** Short preview used by the conversation directory. Never contains messages. */
   previewText?: string
+  /** Code directory this conversation worked in (derived from the workspace snapshot). */
+  workspaceRootPath?: string
+  /** Display name for workspaceRootPath (folder name when not derivable). */
+  workspaceRootName?: string
 }
 
 /** All history JSON/IO/index work runs in one serialized worker, never the UI thread. */

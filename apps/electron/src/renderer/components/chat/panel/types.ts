@@ -9,6 +9,10 @@ import type {
 import type { ActivePageAutomationContext } from '../../../../shared/page-automation-types.js'
 import type { ActiveTerminalContext } from '../../../../shared/terminal-types.js'
 import type {
+  WorkspaceTabControlRequestEnvelope,
+  WorkspaceTabControlResponseEnvelope
+} from '../../../../shared/workspace-control-types.js'
+import type {
   BrowserAutomationAction,
   BrowserAutomationActionResult,
   BrowserAutomationSnapshot
@@ -59,12 +63,18 @@ export interface ConversationSummary {
   reasoningStrength?: ReasoningStrength
   temperature?: number
   targetProjectId?: string
+  /** Launchpad 项目归属（按项目聚合侧栏）。 */
+  projectId?: string
   agentId?: string
   groupId?: string
   channelBindingId?: string
   folderWorkspace?: ConversationFolderWorkspaceState
   /** Tabbed right-side workspace snapshot (folder/document migrate into it). */
   workspace?: ConversationWorkspaceState
+  /** 会话工作过的代码目录（由 workspace 快照派生，供按项目聚合）。 */
+  workspaceRootPath?: string
+  /** workspaceRootPath 的展示名。 */
+  workspaceRootName?: string
   /** 直接父会话 id（fork / 编辑分叉时写入） */
   forkedFromConversationId?: string
   /** 分叉锚点：父会话中被复制前缀的最后一条消息 id */
@@ -85,7 +95,9 @@ export interface ChatPanelProps {
   /** null until the first macOS permission query lands; false gates the toggle. */
   computerUsePermissionGranted?: boolean | null
   /** Latest AI-originated workspace tab open request; consumed on first watch. */
-  workspaceTabRequest?: { kind: string; payload?: Record<string, unknown>; seq: number } | null
+  workspaceTabRequest?: { kind: string; payload?: Record<string, unknown>; conversationId?: string; seq: number } | null
+  /** Latest AI workspace tab list/activate/close request; answered via workspaceTabControlResult. */
+  workspaceTabControlRequest?: { seq: number; envelope: WorkspaceTabControlRequestEnvelope } | null
   /** Latest AI-staged document draft; consumed on first watch. */
   workspaceDraftRequest?: { payload: DocumentDraftPayloadDTO; seq: number } | null
 }
@@ -93,7 +105,10 @@ export interface ChatPanelProps {
 export interface ChatPanelEmit {
   (e: 'contextConsumed'): void
   (e: 'workspaceTabRequestConsumed'): void
+  (e: 'workspaceTabControlResult', response: WorkspaceTabControlResponseEnvelope): void
   (e: 'workspaceDraftRequestConsumed'): void
+  /** Tracks the displayed conversation so the shell can scope AI workspace requests. */
+  (e: 'currentConversationChange', conversationId: string | null): void
   (e: 'pageSurfaceChange', surface: WorkspacePageSurfaceSummary | null): void
   (e: 'terminalSurfaceChange', surface: WorkspaceTerminalSurfaceSummary | null): void
   (e: 'openWebLink', url: string): void
@@ -176,6 +191,12 @@ export interface SidebarConversationItem {
   unreadCount: number
   isActive: boolean
   isFork?: boolean
+  /** Launchpad 项目归属（按项目聚合侧栏；时间/文件夹模式下渲染归属徽标）。 */
+  projectId?: string
+  updatedAt?: string
+  /** 会话工作过的代码目录（无 Launchpad 归属时代替分组）。 */
+  workspaceRootPath?: string
+  workspaceRootName?: string
 }
 
 export interface SidebarLongTermGoalItem {

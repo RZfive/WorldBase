@@ -2,6 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ConversationSidebar from '../layout/ConversationSidebar.vue'
+import ConversationOrganizeDialog from '../layout/ConversationOrganizeDialog.vue'
+import { loadConversationGroupingMode, resolveTimeBucket, type SidebarProjectInfo } from '../layout/useConversationSidebarGrouping'
+import type { ConversationGroupingMode } from '../layout/ConversationSidebar.types'
 import SidebarIcon from '../layout/SidebarIcon.vue'
 import MessageList from '../messages/MessageList.vue'
 import EmptyStateSuggestions from '../messages/EmptyStateSuggestions.vue'
@@ -31,15 +34,22 @@ import {
 import type { WorkSuggestion } from '../../../../shared/daily-suggestion-types.js'
 import { getRecommendedProviderTemplate } from '../../../../shared/provider-templates.js'
 import { resolveModelStrength } from '../../../../shared/reasoning-effort'
-import type { ChatPanelEmit, ChatPanelProps } from './types'
+import type { ChatPanelEmit, ChatPanelProps, SidebarConversationItem } from './types'
 import type { AnnotationAnchor, MessageAnnotationLocator, QuickAskMode, QuickAskPopoverState } from '../types'
 import {
   activateWorkspaceTab,
+  applyWorkspaceControlToSnapshot,
+  buildCurrentFolderWorkspaceState,
+  buildWorkspaceTabSummaries,
+  buildWorkspaceTabSummary,
   ensureWorkspaceTab,
+  findWorkspaceTabs,
   getActiveWorkspaceTab,
   getDocumentTabFilePath,
   getDocumentTabs,
   getWorkspaceDocumentDraft,
+  hydrateWorkspaceSnapshot,
+  openWorkspaceTabInSnapshot,
   removeWorkspaceTab,
   stageWorkspaceDocumentDraft,
   workspaceBrowserSurfaces,
@@ -47,6 +57,12 @@ import {
   workspaceTerminalSurfaces
 } from '../../workspace/workspace-store'
 import { getWorkspaceTabDefinition, type WorkspaceTabInstance } from '../../workspace/tab-registry'
+import type {
+  WorkspaceTabControlRequest,
+  WorkspaceTabControlRequestEnvelope,
+  WorkspaceTabControlResponseEnvelope,
+  WorkspaceTabControlResult
+} from '../../../../shared/workspace-control-types.js'
 
 const props = defineProps<ChatPanelProps>()
 const emit = defineEmits<ChatPanelEmit>()
@@ -175,6 +191,12 @@ const {
   clearSkills,
   updateFolderWorkspaceState,
   updateWorkspaceTabState,
+  getConversationProject,
+  assignConversationProject,
+  startProjectConversation,
+  startBlankConversation,
+  backgroundStreamMessages,
+  updateBackgroundConversationWorkspace,
   uploadFeedback,
   addAttachments
 } = useChatPanel(props, {
@@ -332,54 +354,17 @@ const isClosingWorkspace = ref(false)
 const chatWindowWidthBeforeWorkspace = ref<number | null>(null)
 const CONVERSATION_SIDEBAR_COLLAPSE_STORAGE_KEY = 'chat-conversation-sidebar-collapsed'
 
-// The ChatHeader floats as a frosted bar over the message list. Its height is
-// dynamic (provider/skill controls render conditionally), so we measure it and
-// expose it as a CSS token the MessageList uses for top padding — keeping the
-// first message clear of the overlay without a hard divider line.
-const chatHeaderRef = ref<{ $el?: HTMLElement } | null>(null)
-const chatHeaderHeight = ref(0)
-let headerResizeObserver: ResizeObserver | null = null
-
-function measureChatHeader (): void {
-  const el = chatHeaderRef.value?.$el
-  if (!el) return
-  chatHeaderHeight.value = el.offsetHeight
-}
-
-// The attention zone (design v1.7: auth / ask / todo) floats 6px above the
-// input card. The card's height follows the textarea, the runtime bar and
-// attachment previews, so measure it and expose it as a CSS token — same
-// approach as the floating header above.
+// The composer ref is also used by the shell to focus the textarea when a
+// workspace surface asks for input. Keep the ref at the component boundary;
+// layout sizing is intentionally handled by normal flex flow below.
 const chatInputRef = ref<{ $el?: HTMLElement } | null>(null)
-const chatInputCardHeight = ref(0)
-let inputCardResizeObserver: ResizeObserver | null = null
-let observedInputCard: HTMLElement | null = null
 let offPlanModeChanged: (() => void) | null = null
 
-function measureChatInputCard (): void {
-  const card = chatInputRef.value?.$el?.querySelector<HTMLElement>('.input-container')
-  if (!card) return
-  if (inputCardResizeObserver && card !== observedInputCard) {
-    inputCardResizeObserver.disconnect()
-    observedInputCard = card
-    inputCardResizeObserver.observe(card)
-  }
-  chatInputCardHeight.value = card.offsetHeight
-}
-
 onMounted(() => {
-  measureChatHeader()
-  const el = chatHeaderRef.value?.$el
-  if (el && typeof ResizeObserver !== 'undefined') {
-    headerResizeObserver = new ResizeObserver(() => measureChatHeader())
-    headerResizeObserver.observe(el)
-  }
-  if (typeof ResizeObserver !== 'undefined') {
-    inputCardResizeObserver = new ResizeObserver(() => {
-      if (observedInputCard) chatInputCardHeight.value = observedInputCard.offsetHeight
-    })
-  }
-  measureChatInputCard()
+  // Project index feeds the sidebar's project grouping and the "open project"
+  // actions; it must exist before the first mode switch, not only when the
+  // empty-state suggestions happen to render.
+  void refreshProjectIndex()
   window.addEventListener('keydown', onSidebarShortcut)
   // Plan mode can also end from the model side (native exit_plan_mode); keep
   // the toggle truthful so the next turn does not silently re-enter planning.
@@ -387,10 +372,6 @@ onMounted(() => {
     planModeActive.value = active
   }) ?? null
 })
-
-watch(chatInputRef, () => {
-  measureChatInputCard()
-}, { flush: 'post' })
 
 // Attention-zone accordion: instead of stacking every pending capsule
 // expanded — which pushed the pile arbitrarily far up the message list —
@@ -418,11 +399,6 @@ const { expandedPanel: expandedAttentionPanel, togglePanel: toggleAttentionPanel
   )
 
 onBeforeUnmount(() => {
-  headerResizeObserver?.disconnect()
-  headerResizeObserver = null
-  inputCardResizeObserver?.disconnect()
-  inputCardResizeObserver = null
-  observedInputCard = null
   window.removeEventListener('keydown', onSidebarShortcut)
   offPlanModeChanged?.()
   offPlanModeChanged = null
@@ -496,11 +472,67 @@ const capsuleFlyoutSections = computed<CapsuleFlyoutSection[]>(() => {
     })
   }
   if (conversationSidebarItems.value.length > 0) {
-    sections.push({
-      key: 'conversations',
-      label: t('appShell.chat'),
-      rows: conversationSidebarItems.value.map(item => ({ id: item.id, title: item.title, active: item.isActive, status: statusOf(item) }))
-    })
+    const mode = sidebarGroupingMode.value
+    const toRows = (items: SidebarConversationItem[]) => items.map(item => ({ id: item.id, title: item.title, active: item.isActive, status: statusOf(item) }))
+    if (mode === 'project') {
+      // One flyout section per project (Launchpad, registered folder, or bare
+      // workspace directory) + ungrouped/deleted, mirroring the expanded
+      // sidebar. Map insertion order keeps each bucket in recency order.
+      const known = new Map(projectIndex.value.map(project => [project.id, project]))
+      const rootToProject = new Map(
+        projectIndex.value.filter(project => project.rootPath).map(project => [project.rootPath as string, project])
+      )
+      const projectBuckets = new Map<string, { label: string; rows: CapsuleFlyoutRow[] }>()
+      const wsBuckets = new Map<string, { label: string; rows: CapsuleFlyoutRow[] }>()
+      const ungroupedRows: CapsuleFlyoutRow[] = []
+      const deletedRows: CapsuleFlyoutRow[] = []
+      for (const item of conversationSidebarItems.value) {
+        const row: CapsuleFlyoutRow = { id: item.id, title: item.title, active: item.isActive, status: statusOf(item) }
+        const rootProject = !item.projectId && item.workspaceRootPath
+          ? rootToProject.get(item.workspaceRootPath)
+          : undefined
+        if (item.projectId && known.has(item.projectId)) {
+          const project = known.get(item.projectId)!
+          if (!projectBuckets.has(project.id)) projectBuckets.set(project.id, { label: project.name, rows: [] })
+          projectBuckets.get(project.id)!.rows.push(row)
+        } else if (rootProject) {
+          if (!projectBuckets.has(rootProject.id)) projectBuckets.set(rootProject.id, { label: rootProject.name, rows: [] })
+          projectBuckets.get(rootProject.id)!.rows.push(row)
+        } else if (item.projectId) {
+          deletedRows.push(row)
+        } else if (item.workspaceRootPath) {
+          const path = item.workspaceRootPath
+          const label = item.workspaceRootName || path.split(/[\\/]/).filter(Boolean).pop() || path
+          if (!wsBuckets.has(path)) wsBuckets.set(path, { label, rows: [] })
+          wsBuckets.get(path)!.rows.push(row)
+        } else {
+          ungroupedRows.push(row)
+        }
+      }
+      for (const bucket of [...projectBuckets.values(), ...wsBuckets.values()]) {
+        if (bucket.rows.length > 0) sections.push({ key: 'conversations', label: bucket.label, rows: bucket.rows })
+      }
+      if (ungroupedRows.length > 0) sections.push({ key: 'conversations', label: t('chatUi.groupUngrouped'), rows: ungroupedRows })
+      if (deletedRows.length > 0) sections.push({ key: 'conversations', label: t('chatUi.groupDeletedProjects'), rows: deletedRows })
+    } else if (mode === 'time') {
+      const buckets: Array<{ key: 'today' | 'yesterday' | 'last7Days' | 'last30Days' | 'older'; label: string }> = [
+        { key: 'today', label: t('chatUi.groupToday') },
+        { key: 'yesterday', label: t('chatUi.groupYesterday') },
+        { key: 'last7Days', label: t('chatUi.groupLast7Days') },
+        { key: 'last30Days', label: t('chatUi.groupLast30Days') },
+        { key: 'older', label: t('chatUi.groupOlder') }
+      ]
+      for (const bucket of buckets) {
+        const rows = toRows(conversationSidebarItems.value.filter(item => resolveTimeBucket(item.updatedAt || '') === bucket.key))
+        if (rows.length > 0) sections.push({ key: 'conversations', label: bucket.label, rows })
+      }
+    } else {
+      sections.push({
+        key: 'conversations',
+        label: t('appShell.chat'),
+        rows: toRows(conversationSidebarItems.value)
+      })
+    }
   }
   return sections
 })
@@ -512,6 +544,235 @@ function openCapsuleFlyoutRow (key: CapsuleFlyoutSection['key'], id: string): vo
   else if (key === 'groups') void openGroupWorkspaceConversation(id)
   else if (key === 'goals') void openLongTermGoal(id)
   else void loadConversation(id)
+}
+
+// ── Sidebar grouping (time / project / folders) ────────────────────────────
+// The ConversationSidebar owns group rendering + collapse state; the shell
+// mirrors the mode for the collapsed-capsule flyout and project联动 events.
+const sidebarGroupingMode = ref<ConversationGroupingMode>(loadConversationGroupingMode())
+const projectIndex = ref<SidebarProjectInfo[]>([])
+
+function handleAssignConversationProject (conversationId: string, projectId: string | null): void {
+  void assignConversationProject(conversationId, projectId)
+}
+
+async function refreshProjectIndex (): Promise<void> {
+  const api = window.electronAPI
+  if (!api?.listProjects) return
+  try {
+    const [projects, custom] = await Promise.all([
+      api.listProjects(),
+      api.listCustomProjects?.() ?? Promise.resolve([])
+    ])
+    const index: SidebarProjectInfo[] = []
+    for (const project of projects) {
+      const id = typeof project.id === 'string' ? project.id : ''
+      if (!id) continue
+      const name = typeof project.name === 'string' && project.name.trim() ? project.name : id
+      // Web shortcuts are not code projects; exclude them from grouping (R3).
+      if (project.kind !== 'web') index.push({ id, name })
+    }
+    for (const entry of custom) {
+      if (!entry?.id || !entry.rootPath) continue
+      index.push({ id: entry.id, name: entry.name || entry.rootPath, rootPath: entry.rootPath })
+    }
+    projectIndex.value = index
+  } catch {
+    /* keep previous index */
+  }
+}
+
+async function handleNewConversationInProject (projectId: string, rootPath: string | null): Promise<void> {
+  const name = projectIndex.value.find(project => project.id === projectId)?.name
+  await startProjectConversation(projectId, name, { rootPath })
+}
+
+async function handleNewConversationInWorkspace (rootPath: string, name: string): Promise<void> {
+  await startProjectConversation(null, name, { rootPath })
+}
+
+async function handleAddProjectFolder (): Promise<void> {
+  const api = window.electronAPI
+  if (!api?.pickFolderWorkspace || !api.addCustomProject) return
+  try {
+    const picked = await api.pickFolderWorkspace()
+    if (picked.canceled || !picked.rootPath) return
+    await api.addCustomProject(picked.rootPath, picked.rootName)
+    await refreshProjectIndex()
+  } catch {
+    /* picker unavailable */
+  }
+}
+
+function handleOpenProject (projectId: string): void {
+  const name = projectIndex.value.find(project => project.id === projectId)?.name
+  void openWorkspaceTab('project', { projectId, ...(name ? { name } : {}) })
+}
+
+// ── Folder-mode housekeeping: attach creation + AI organize ────────────────
+const conversationSidebarRef = ref<InstanceType<typeof ConversationSidebar> | null>(null)
+
+async function handleNewConversationInFolder (folderId: string): Promise<void> {
+  const conversationId = await startBlankConversation()
+  if (!conversationId) return
+  await nextTick()
+  conversationSidebarRef.value?.addConversationToFolder(conversationId, folderId)
+}
+
+interface OrganizeGroup {
+  name: string
+  isNew: boolean
+  conversations: Array<{ id: string; title: string }>
+}
+
+const organizeState = reactive<{
+  open: boolean
+  loading: boolean
+  stage: string
+  progress: number | null
+  error: string
+  groups: OrganizeGroup[]
+}>({ open: false, loading: false, stage: '', progress: null, error: '', groups: [] })
+
+function handleOrganizeConversations (): void {
+  const sidebar = conversationSidebarRef.value
+  if (!sidebar || organizeState.loading) return
+  const unfiled = sidebar.getUnfiledConversations()
+  organizeState.groups = []
+  organizeState.error = ''
+  organizeState.stage = ''
+  organizeState.progress = null
+  organizeState.open = true
+  if (unfiled.length === 0) return
+  void runOrganizeConversations(unfiled)
+}
+
+const ORGANIZE_BATCH_SIZE = 300
+
+async function runOrganizeConversations (unfiled: SidebarConversationItem[]): Promise<void> {
+  const api = window.electronAPI
+  if (!api?.chat) {
+    organizeState.error = t('chatUi.organizeFailed')
+    return
+  }
+  organizeState.loading = true
+  const folders = conversationSidebarRef.value?.getFolderNames() ?? []
+  const existingNames = new Set(folders.map(folder => folder.name.trim().toLowerCase()))
+  const items = unfiled.map(item => ({ id: item.id, title: item.title, preview: item.subtitle }))
+  const batches: typeof items[] = []
+  for (let start = 0; start < items.length; start += ORGANIZE_BATCH_SIZE) {
+    batches.push(items.slice(start, start + ORGANIZE_BATCH_SIZE))
+  }
+  // Every id lands in exactly one group across the whole run; later batches
+  // reuse names already coined so the proposal doesn't fragment.
+  const seen = new Set<string>()
+  const accumulated: Array<{ name: string; ids: string[] }> = []
+  let failure: Error | null = null
+
+  for (let index = 0; index < batches.length; index++) {
+    if (batches.length > 1) {
+      organizeState.stage = t('chatUi.organizeStageBatch', { index: index + 1, total: batches.length })
+      organizeState.progress = index / batches.length
+    }
+    try {
+      const batchItems = batches[index]
+      const titleOf = new Map(batchItems.map(item => [item.id, item.title]))
+      const knownNames = [...folders.map(folder => folder.name), ...accumulated.map(group => group.name)]
+      const system = [
+        '你是对话整理助手。把每个会话分配到最合适的一个文件夹。',
+        '优先使用「现有文件夹」；只有确实不合适时才新建文件夹，新文件夹不超过 5 个，名称简洁（2-8 个字）。',
+        '「会话」列表中的每一个 id 都必须且只能出现在一个文件夹里。',
+        '只输出 JSON，不要输出任何解释或代码块标记。格式：',
+        '{"folders":[{"name":"文件夹名","ids":["会话id"]}]}'
+      ].join('\n')
+      const result = await api.chat([
+        { role: 'system', content: system },
+        { role: 'user', content: JSON.stringify({ folders: knownNames, conversations: batchItems }) }
+      ])
+      const text = typeof result?.content === 'string'
+        ? result.content
+        : Array.isArray(result?.content)
+          ? result.content.filter(part => part.type === 'text').map(part => part.text || '').join('')
+          : ''
+      for (const group of parseOrganizeResponse(text, titleOf)) {
+        const fresh = group.ids.filter(id => !seen.has(id))
+        if (fresh.length === 0) continue
+        fresh.forEach(id => seen.add(id))
+        const merged = accumulated.find(entry => entry.name === group.name)
+        if (merged) merged.ids.push(...fresh)
+        else accumulated.push({ name: group.name, ids: fresh })
+      }
+    } catch (error) {
+      // Keep the completed batches; the user can apply them or retry.
+      failure = error instanceof Error ? error : new Error(String(error))
+      break
+    }
+  }
+
+  organizeState.loading = false
+  organizeState.progress = null
+  if (accumulated.length === 0 && failure) {
+    organizeState.error = failure.message || t('chatUi.organizeFailed')
+    return
+  }
+  if (failure) organizeState.error = t('chatUi.organizePartialError')
+  if (accumulated.length === 0) return
+  organizeState.groups = accumulated.map(group => ({
+    name: group.name,
+    isNew: !existingNames.has(group.name.trim().toLowerCase()),
+    conversations: group.ids.map(id => ({ id, title: items.find(item => item.id === id)?.title || id }))
+  }))
+}
+
+/** Tolerant parse: fenced JSON, {folders:[{name,ids}]} or a name→ids map. */
+function parseOrganizeResponse (text: string, titleOf: Map<string, string>): Array<{ name: string; ids: string[] }> {
+  const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim()
+  const start = cleaned.indexOf('{')
+  const end = cleaned.lastIndexOf('}')
+  if (start < 0 || end <= start) throw new Error(t('chatUi.organizeFailed'))
+  const parsed = JSON.parse(cleaned.slice(start, end + 1)) as unknown
+  const rawGroups: Array<{ name?: unknown; ids?: unknown }> = []
+  if (parsed && typeof parsed === 'object' && Array.isArray((parsed as Record<string, unknown>).folders)) {
+    for (const entry of (parsed as Record<string, unknown>).folders as Array<unknown>) {
+      if (entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).name === 'string') {
+        rawGroups.push(entry as Record<string, unknown>)
+      }
+    }
+  } else if (parsed && typeof parsed === 'object') {
+    for (const [name, ids] of Object.entries(parsed as Record<string, unknown>)) {
+      rawGroups.push({ name, ids })
+    }
+  }
+
+  const seen = new Set<string>()
+  const groups: Array<{ name: string; ids: string[] }> = []
+  for (const group of rawGroups) {
+    const name = typeof group.name === 'string' ? group.name.trim() : ''
+    if (!name || !Array.isArray(group.ids)) continue
+    const ids = group.ids
+      .filter((id): id is string => typeof id === 'string' && titleOf.has(id))
+      .filter(id => !seen.has(id))
+    if (ids.length === 0) continue
+    ids.forEach(id => seen.add(id))
+    groups.push({ name, ids })
+  }
+  if (groups.length === 0) throw new Error(t('chatUi.organizeFailed'))
+  return groups
+}
+
+function applyOrganizeGroups (groups: Array<{ name: string; conversations: Array<{ id: string }> }>): void {
+  const sidebar = conversationSidebarRef.value
+  if (sidebar) {
+    for (const group of groups) {
+      const folderId = sidebar.ensureFolder(group.name)
+      if (!folderId) continue
+      for (const conversation of group.conversations) {
+        sidebar.addConversationToFolder(conversation.id, folderId)
+      }
+    }
+  }
+  organizeState.open = false
+  organizeState.groups = []
 }
 
 function toggleConversationSidebar (): void {
@@ -832,6 +1093,12 @@ async function openWorkspaceTab (kind: string, payload?: Record<string, unknown>
       const result = ensureWorkspaceTab('project', { projectId, ...(name ? { name } : {}) })
       if (result && name) result.tab.title = name
       await revealWorkspaceTab(result)
+      // Auto-ownership (R3b): an unassigned conversation that opens a project
+      // tab joins that project's sidebar group. Assigned ones stay put.
+      const activeId = currentConversationId.value
+      if (activeId && !getConversationProject(activeId)) {
+        void assignConversationProject(activeId, projectId)
+      }
       return
     }
     // No target project: let the user pick from the developed-app catalog.
@@ -840,6 +1107,62 @@ async function openWorkspaceTab (kind: string, payload?: Record<string, unknown>
   }
 
   await revealWorkspaceTab(ensureWorkspaceTab(kind, payload))
+}
+
+/** Extensions the document workbench renders as a rich document tab. */
+const DOCUMENT_TAB_EXTENSIONS = new Set(['.md', '.markdown', '.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt'])
+
+function getFileExtension (filePath: string): string {
+  const name = filePath.split(/[\\/]/).pop() || ''
+  const dot = name.lastIndexOf('.')
+  return dot >= 0 ? name.slice(dot).toLowerCase() : ''
+}
+
+function isAbsoluteFilePath (filePath: string): boolean {
+  return /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(filePath)
+}
+
+function joinFolderWorkspacePath (rootPath: string, relativePath: string): string {
+  const normalizedRelative = relativePath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\//, '')
+  const trimmedRoot = rootPath.replace(/[\\/]+$/, '')
+  if (!normalizedRelative || normalizedRelative === '.') return trimmedRoot
+  return `${trimmedRoot}/${normalizedRelative}`
+}
+
+function isPathInsideRoot (filePath: string, rootPath: string): boolean {
+  const normalizedFile = filePath.replace(/\\/g, '/')
+  const normalizedRoot = rootPath.replace(/\\/g, '/').replace(/[\\/]+$/, '')
+  return normalizedFile.startsWith(`${normalizedRoot}/`)
+}
+
+/**
+ * Opens a document written during the conversation in a workspace tab.
+ * Entry point for written-file cards and file references clicked in message
+ * text. Rich document types open a document tab; other files inside the
+ * conversation's folder workspace open the folder tab positioned at the file.
+ */
+async function openChatDocument (rawPath: string): Promise<void> {
+  const trimmed = rawPath.trim()
+  if (!trimmed) return
+  const folderState = buildCurrentFolderWorkspaceState()
+  const rootPath = folderState?.rootPath?.trim() || ''
+  const absolutePath = isAbsoluteFilePath(trimmed)
+    ? trimmed.replace(/\\/g, '/')
+    : rootPath ? joinFolderWorkspacePath(rootPath, trimmed) : ''
+  if (!absolutePath) return
+
+  if (DOCUMENT_TAB_EXTENSIONS.has(getFileExtension(absolutePath))) {
+    await openWorkspaceTab('document', { filePath: absolutePath })
+    return
+  }
+  const normalizedRoot = rootPath.replace(/[\\/]+$/, '')
+  if (normalizedRoot && isPathInsideRoot(absolutePath, normalizedRoot)) {
+    await openWorkspaceTab('folder', {
+      rootPath,
+      rootName: folderState?.rootName,
+      activeFilePath: absolutePath.slice(normalizedRoot.length + 1)
+    })
+  }
 }
 
 interface ProjectPickerEntry {
@@ -949,6 +1272,69 @@ watch(workspaceTerminalSurface, (surface) => {
   emit('terminalSurfaceChange', null)
 }, { immediate: true })
 
+// ── Per-conversation workspace isolation ────────────────────────────────────
+// AI runs keep streaming while the user reads another conversation, and their
+// workspace requests carry the owning conversation id. Only requests for the
+// displayed conversation reach the live panel; everything else is applied to
+// that conversation's stored snapshot (background stash + persistence
+// context) so the tab shows up when the user returns — and the displayed
+// conversation's workspace is never touched by another conversation's AI.
+
+/**
+ * Applies one AI workspace change to a background conversation's snapshot.
+ * Returns the normalized snapshot (undefined once the strip emptied), or null
+ * when the conversation has no renderer-side state left (the stream already
+ * finished, or the run has no desktop conversation, e.g. scheduler tasks).
+ */
+function applyBackgroundWorkspaceChange (
+  conversationId: string,
+  apply: (state: ConversationWorkspaceState) => ConversationWorkspaceState | undefined
+): ConversationWorkspaceState | undefined | null {
+  const backgroundState = backgroundStreamMessages.get(conversationId)
+  if (!backgroundState) return null
+
+  const hydrated = hydrateWorkspaceSnapshot(backgroundState.workspace, {
+    folderWorkspace: backgroundState.folderWorkspace,
+    documentWorkspace: backgroundState.documentWorkspace
+  })
+  const next = apply(hydrated)
+  const normalized = next && Array.isArray(next.tabs) && next.tabs.length > 0 ? next : undefined
+
+  backgroundState.workspace = normalized
+  // The legacy mirrors win over an empty workspace on restore; drop them when
+  // the strip emptied so a stale folder binding cannot resurrect.
+  if (!normalized) {
+    backgroundState.folderWorkspace = undefined
+    backgroundState.documentWorkspace = undefined
+  }
+  updateBackgroundConversationWorkspace(conversationId, normalized)
+  return normalized
+}
+
+function handleBackgroundWorkspaceTabRequest (conversationId: string, kind: string, payload?: Record<string, unknown>): void {
+  applyBackgroundWorkspaceChange(conversationId, state => {
+    openWorkspaceTabInSnapshot(state, kind, payload)
+    return state
+  })
+}
+
+function handleBackgroundWorkspaceControl (conversationId: string, request: WorkspaceTabControlRequest): WorkspaceTabControlResult {
+  let result: WorkspaceTabControlResult | null = null
+  const outcome = applyBackgroundWorkspaceChange(conversationId, state => {
+    const applied = applyWorkspaceControlToSnapshot(state, request)
+    result = applied.result
+    return applied.state
+  })
+  if (!result) {
+    throw new Error(
+      outcome === null
+        ? `This window no longer holds conversation ${conversationId}'s workspace, so the tab action cannot be applied.`
+        : `Workspace tab action "${request.action}" produced no result.`
+    )
+  }
+  return result
+}
+
 // AI-originated requests arrive as a prop (seq-bumped) from the app shell and
 // are consumed exactly once; `immediate` covers requests that landed while the
 // chat shell was unmounted.
@@ -956,11 +1342,97 @@ watch(
   () => props.workspaceTabRequest,
   (request) => {
     if (!request || typeof request.kind !== 'string') return
-    void openWorkspaceTab(request.kind, request.payload)
+    if (request.conversationId && request.conversationId !== currentConversationId.value) {
+      handleBackgroundWorkspaceTabRequest(request.conversationId, request.kind, request.payload)
+    } else {
+      void openWorkspaceTab(request.kind, request.payload)
+    }
     emit('workspaceTabRequestConsumed')
   },
   { immediate: true }
 )
+
+// AI tab management (manage_workspace_tabs): `list` is a pure store read;
+// activate/close reuse the same open/close paths as manual clicks so window
+// width animation and last-tab panel collapse stay identical.
+function resolveWorkspaceTabControlTarget (request: WorkspaceTabControlRequest): WorkspaceTabInstance | null {
+  if (request.tabId) {
+    return workspaceStore.tabs.value.find(tab => tab.id === request.tabId) || null
+  }
+  const match: Record<string, unknown> = {}
+  if (request.url) match.url = request.url
+  if (request.cwd) match.cwd = request.cwd
+  if (request.filePath) match.filePath = request.filePath
+  const matches = findWorkspaceTabs(request.kind, Object.keys(match).length > 0 ? match : undefined)
+  return matches[0] ?? null
+}
+
+async function applyWorkspaceTabControl (request: WorkspaceTabControlRequest) {
+  if (request.action === 'list') {
+    return { ok: true, action: request.action, tabs: buildWorkspaceTabSummaries() }
+  }
+
+  const target = resolveWorkspaceTabControlTarget(request)
+  if (!target) {
+    const available = buildWorkspaceTabSummaries()
+      .map(tab => `${tab.kind} id=${tab.id}${tab.title ? ` "${tab.title}"` : ''}`)
+      .join('; ')
+    throw new Error(
+      `No matching workspace tab for action "${request.action}". Open tabs: ${available || 'none'}` +
+      ' — call action "list" first, or open_workspace_tab to create one.'
+    )
+  }
+
+  if (request.action === 'activate') {
+    activateWorkspaceTab(target.id)
+    await openWorkspace()
+  } else {
+    removeWorkspaceTab(target.id)
+    if (workspaceStore.tabs.value.length === 0) await closeWorkspace()
+  }
+
+  return {
+    ok: true,
+    action: request.action,
+    tab: buildWorkspaceTabSummary(target),
+    tabs: buildWorkspaceTabSummaries()
+  }
+}
+
+watch(
+  () => props.workspaceTabControlRequest,
+  async (request) => {
+    if (!request?.envelope) return
+    const { requestId } = request.envelope
+    const control = request.envelope.request
+    const backgroundId = control.conversationId && control.conversationId !== currentConversationId.value
+      ? control.conversationId
+      : null
+    let response: WorkspaceTabControlResponseEnvelope
+    if (backgroundId) {
+      try {
+        response = { requestId, ok: true, result: handleBackgroundWorkspaceControl(backgroundId, control) }
+      } catch (error) {
+        response = { requestId, ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+    } else {
+      try {
+        response = { requestId, ok: true, result: await applyWorkspaceTabControl(request.envelope.request) }
+      } catch (error) {
+        response = { requestId, ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+    emit('workspaceTabControlResult', response)
+  },
+  { immediate: true }
+)
+
+// The app shell scopes AI workspace requests by the displayed conversation;
+// report every change so a request for a background conversation is not
+// mistaken for one targeting the live panel.
+watch(currentConversationId, (conversationId) => {
+  emit('currentConversationChange', conversationId)
+}, { immediate: true })
 
 // A staged draft opens (or focuses) its document tab, which switches the tab
 // into live draft preview via the workspace store mirror.
@@ -1038,11 +1510,14 @@ watch(
         <ConversationSidebar
           v-if="!conversationSidebarCollapsed"
           key="conv-list"
+          ref="conversationSidebarRef"
           :agent-items="agentSidebarItems"
           :group-items="groupSidebarItems"
           :long-term-goal-items="longTermGoalSidebarItems"
           :conversation-items="conversationSidebarItems"
           :conversation-list-loaded="conversationsLoaded"
+          :project-items="projectIndex"
+          :grouping-mode="sidebarGroupingMode"
           @new-conversation="newConversation"
           @new-long-term-goal="startLongTermGoalCreation"
           @toggle-collapse="toggleConversationSidebar"
@@ -1053,7 +1528,16 @@ watch(
           @delete-long-term-goal="deleteLongTermGoalById"
           @delete-conversation="deleteConversation"
           @rename-conversation="renameConversation"
+          @update:grouping-mode="sidebarGroupingMode = $event"
+          @assign-conversation-project="handleAssignConversationProject"
+          @new-conversation-in-project="handleNewConversationInProject"
+          @new-conversation-in-workspace="handleNewConversationInWorkspace"
+          @add-project-folder="handleAddProjectFolder"
+          @open-project="handleOpenProject"
+          @new-conversation-in-folder="handleNewConversationInFolder"
+          @organize-conversations="handleOrganizeConversations"
         />
+
 
         <div v-else key="conv-capsule" class="conversation-sidebar-capsule-wrap">
           <div class="conversation-sidebar-capsule">
@@ -1109,19 +1593,25 @@ watch(
         </div>
         </div>
       </Transition>
+
+
+        <ConversationOrganizeDialog
+          :open="organizeState.open"
+          :loading="organizeState.loading"
+          :stage="organizeState.stage"
+          :progress="organizeState.progress"
+          :error="organizeState.error"
+          :groups="organizeState.groups"
+          @close="organizeState.open = false"
+          @confirm="applyOrganizeGroups"
+        />
     </aside>
 
     <div
       :class="['chat-panel', { 'chat-panel-with-workspace': workspaceStore.visible.value }]"
       :style="{ '--chat-main-protected-min-width': `${MIN_CHAT_MAIN_WIDTH}px` }"
     >
-      <div
-        class="chat-main"
-        :style="{
-          '--chat-header-height': `${chatHeaderHeight}px`,
-          '--chat-input-card-height': chatInputCardHeight > 0 ? `${chatInputCardHeight}px` : undefined
-        }"
-      >
+      <div class="chat-main">
         <LongTermGoalPanel
           v-if="currentLongTermGoal || longTermGoalWorkspaceActive"
           :goal="currentLongTermGoal"
@@ -1162,7 +1652,6 @@ watch(
 
         <template v-else>
           <ChatHeader
-            ref="chatHeaderRef"
             :context-label="currentContextLabel"
             :context-detail="currentContextDetail"
             :available-channel-bindings="availableChannelBindings"
@@ -1207,6 +1696,7 @@ watch(
             @respond-auth="respondToAuthRequest"
             @respond-sudo-password="respondToSudoPasswordRequest"
             @open-link="(url) => emit('openWebLink', url)"
+            @open-file-path="openChatDocument"
             @request-edit-message="startEditUserMessage"
             @fork-message="forkFromMessage"
             @submit-edit="(payload) => editUserMessage(payload.messageId, payload.text, payload.mode)"
@@ -1372,7 +1862,17 @@ watch(
   flex: 0 0 224px;
   min-width: 0;
   display: flex;
+  isolation: isolate;
+  background: var(--app-chat-list-surface);
   transition: width 0.22s ease, flex-basis 0.22s ease;
+  /*
+   * Own compositing layer, same reason as .chat-header: while a conversation
+   * streams, the message list repaints every flush and those GPU layer
+   * rebuilds momentarily drop the unpromoted sidebar column behind the chat
+   * canvas, flashing the conversation list. Pinning the column to its own
+   * layer keeps its paint independent of the streaming repaints.
+   */
+  transform: translateZ(0);
 }
 
 .conversation-sidebar-shell.collapsed {
@@ -1731,7 +2231,6 @@ watch(
   --chat-user-message-max: 680px;
   --chat-user-bubble-max: 540px;
   --chat-event-card-max: 100%;
-  --chat-input-overlap: clamp(52px, 7vh, 88px);
   --chat-input-gutter: 16px;
   display: flex;
   flex-direction: row;
@@ -1744,28 +2243,22 @@ watch(
 
 
 .chat-attention-zone {
-  position: absolute;
-  left: 16px;
-  right: 16px;
   /*
-   * design v1.7: the capsules sit 6px above the input card. The card is
-   * wrapped by .chat-input's 18px bottom padding, so the offset from the
-   * panel bottom is measured-card-height + 24px — tracked via the
-   * ResizeObserver-fed token instead of the old overlap guess that let the
-   * capsules float inside the input box.
+   * Attention panels used to be absolutely positioned above the composer.
+   * That made their measured height and the scroll viewport disagree: a
+   * streaming reflow could put message text behind the panels or the input.
+   * Keep the zone in normal flow so an expanded request always consumes real
+   * vertical space.
    */
-  bottom: calc(var(--chat-input-card-height, 176px) + 24px);
-  z-index: 8;
+  flex: 0 0 auto;
+  width: calc(100% - (var(--chat-input-gutter, 16px) * 2));
+  margin: 0 auto;
+  padding: 0 0 6px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  /* Bottom-anchored on purpose: capping the height here would spill the
-   * overflow downward onto the input card (the expanded ask panel alone is
-   * taller than the old 460px cap). Stacked panels grow upward instead and
-   * each one scrolls internally; .chat-panel's overflow:hidden clips the top.
-   */
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .chat-attention-zone > * {
@@ -1811,6 +2304,8 @@ watch(
   min-width: 0;
   min-height: 0;
   position: relative;
+  background: var(--app-chat-canvas);
+  isolation: isolate;
 }
 
 .chat-main {
