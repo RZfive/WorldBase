@@ -6,12 +6,14 @@ export interface ConversationMetadataPatch {
   reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | null
   temperature?: number | null
   targetProjectId?: string | null
+  /** Launchpad 项目归属（按项目聚合侧栏）。null = 移出项目。 */
+  projectId?: string | null
   agentId?: string | null
   groupId?: string | null
   channelBindingId?: string | null
 }
 
-const STRING_FIELDS = new Set(['providerId', 'selectedModel', 'targetProjectId', 'agentId', 'groupId', 'channelBindingId'])
+const STRING_FIELDS = new Set(['providerId', 'selectedModel', 'targetProjectId', 'projectId', 'agentId', 'groupId', 'channelBindingId'])
 
 export function validateConversationMetadata (input: unknown): ConversationMetadataPatch {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid conversation metadata')

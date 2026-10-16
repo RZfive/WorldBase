@@ -7,6 +7,7 @@ import {
   extractProjectTagRefs
 } from './attachment-utils'
 import { extractDocfileTagRefs } from '../../../../shared/document-context-tag.js'
+import type { ActiveCodeViewContext } from '../../../../shared/folder-workspace-types.js'
 import {
   getSelectionQuoteText,
   pruneSelectionQuotes,
@@ -78,6 +79,8 @@ interface ChatMessageSenderOptions {
   t: ComposerTranslation
   getActivePageContext: () => ChatPanelProps['activePageContext']
   getActiveTerminalContext: () => ChatPanelProps['activeTerminalContext']
+  /** 当前代码查看上下文（文件 + 勾选行区间），随请求带给 AI。 */
+  getActiveCodeContext: () => ActiveCodeViewContext | null
   messages: Ref<ChatMessage[]>
   inputText: Ref<string>
   currentConversationId: Ref<string | null>
@@ -107,7 +110,7 @@ interface ChatMessageSenderOptions {
   unreadConversationIds: Set<string>
   setConversationTarget: (conversationId: string, projectId: string | null | undefined) => void
   resolveAssistantSpeakerName: (sourceText: string) => string
-  saveConversation: (conversationId: string, messages: ChatMessage[]) => Promise<void>
+  saveConversation: (conversationId: string, messages: ChatMessage[], options?: { refreshSidebar?: boolean }) => Promise<void>
   resetTransientStreamState: () => void
   /** Drops ask-user panels that can no longer be answered once a stream ends. */
   clearPendingAskUserRequests: (conversationId?: string | null) => void
@@ -161,6 +164,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     t,
     getActivePageContext,
     getActiveTerminalContext,
+    getActiveCodeContext,
     messages,
     inputText,
     currentConversationId,
@@ -365,6 +369,32 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     let pendingThinkingText = ''
     let pendingContentText = ''
     let streamFlushTimer: number | null = null
+    // Persist the assistant turn incrementally while streaming: the turn used
+    // to be saved only when the stream ended cleanly, so quitting or reloading
+    // mid-run discarded everything generated after the user message.
+    const STREAM_SAVE_INTERVAL_MS = 3000
+    let streamSaveTimer: number | null = null
+    let streamSaveDirty = false
+
+    const clearPendingStreamSave = () => {
+      if (streamSaveTimer != null) {
+        window.clearTimeout(streamSaveTimer)
+        streamSaveTimer = null
+      }
+      streamSaveDirty = false
+    }
+
+    const scheduleStreamingSave = () => {
+      streamSaveDirty = true
+      if (streamSaveTimer != null) return
+      streamSaveTimer = window.setTimeout(() => {
+        streamSaveTimer = null
+        if (!streamSaveDirty || !streamingConvIds.has(convId)) return
+        streamSaveDirty = false
+        flushPendingStreamText()
+        void doSaveConversation(convId, targetMessages, { refreshSidebar: false })
+      }, STREAM_SAVE_INTERVAL_MS)
+    }
 
     const syncAssistantToolRuns = () => {
       syncLegacyToolRuns(assistantMessage, toolRuns)
@@ -447,8 +477,10 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       if (window.electronAPI) {
         const cleanup = window.electronAPI.onStreamEvent(sessionId, (event) => {
           const isForeground = currentConversationId.value === convId
+          scheduleStreamingSave()
           const finishSession = (saveConversation = false) => {
             flushPendingStreamText()
+            clearPendingStreamSave()
             releaseStreamSession(convId, sessionId)
             // No pending panel of this conversation can be answered by the
             // model anymore; keep stale panels from stacking above the input.
@@ -482,7 +514,18 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
                 activeToolRun.progress.push({ stage: filePreviewStage, detail: event.filePath })
                 syncAssistantToolRuns()
               }
-              ensureBlocks(assistantMessage).push(createFilePreviewBlock(event.filePath))
+              const messageBlocks = ensureBlocks(assistantMessage)
+              const lastBlock = messageBlocks[messageBlocks.length - 1]
+              if (lastBlock && lastBlock.kind === 'file_preview' && lastBlock.filePath === event.filePath) {
+                // Consecutive writes to the same file update the card in place
+                // instead of stacking duplicate rows.
+                lastBlock.active = true
+                lastBlock.lineCount = 0
+                lastBlock.added = 0
+                lastBlock.removed = 0
+              } else {
+                messageBlocks.push(createFilePreviewBlock(event.filePath))
+              }
               if (isForeground) {
                 filePreview.value = {
                   active: true,
@@ -566,7 +609,12 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
               flushPendingStreamText()
               const activeToolRun = findLastRunningToolRun(toolRuns, event.name) || findLastRunningToolRun(toolRuns)
               if (activeToolRun) {
-                activeToolRun.status = 'completed'
+                if (event.error) {
+                  activeToolRun.status = 'failed'
+                  activeToolRun.progress.push({ stage: 'error', detail: event.error })
+                } else {
+                  activeToolRun.status = 'completed'
+                }
                 activeToolRun.endedAt = Date.now()
                 syncAssistantToolRuns()
               }
@@ -617,7 +665,10 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
                 finalizePendingAuthBlocks(assistantMessage)
                 setAssistantErrorState(assistantMessage, event.error || t('chatUi.streamFailedUnknown'), getMessageTextContent)
               } finally {
-                finishSession()
+                // Save the partially generated turn plus the error state:
+                // losing streamed content on a failed stream reads as data
+                // loss after a reload.
+                finishSession(true)
               }
             } else if (event.type === 'stopped') {
               try {
@@ -673,7 +724,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
           conversationTemperature.value ?? undefined,
           buildCurrentFolderWorkspaceState()?.rootPath,
           computerUseEnabled.value,
-          getActiveTerminalContext() ?? undefined
+          getActiveTerminalContext() ?? undefined,
+          getActiveCodeContext() ?? undefined
         )
 
         if (streamingConvIds.has(convId)) {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 /** 模型行 = 后端 UsageSummary.models 元素 + 前端补算的 cacheHitRate。 */
@@ -215,9 +215,18 @@ const cacheRateChartData = computed(() => {
     .sort((a, b) => b.cacheHitRate - a.cacheHitRate)
 })
 
-/** 多系列折线图：输入/输出/缓存三条线同图不同色。 */
-const LINE_CHART = { width: 720, height: 220, pad: { l: 44, r: 16, t: 16, b: 28 } }
-const lineChartInnerW = computed(() => LINE_CHART.width - LINE_CHART.pad.l - LINE_CHART.pad.r)
+/** 多系列折线图：输入/输出/缓存三条线同图不同色。高度固定，宽度自适应容器。 */
+const LINE_CHART = { height: 220, pad: { l: 44, r: 16, t: 16, b: 28 } }
+/** 图表最小宽度：容器更窄时保持 480，由 meet 缩放兜底，避免轴文字挤压。 */
+const CHART_MIN_WIDTH = 480
+
+// ResizeObserver 测量图表卡片的内容宽度，viewBox 与 CSS 像素 1:1 映射：
+// 窗口拉宽时只加宽绘图区，坐标轴/文字字号不变（不做等比例缩放）。
+const chartCardRef = ref<HTMLElement | null>(null)
+const chartWidth = ref(720)
+let chartResizeObserver: ResizeObserver | null = null
+const lineChartWidth = computed(() => Math.max(CHART_MIN_WIDTH, chartWidth.value))
+const lineChartInnerW = computed(() => lineChartWidth.value - LINE_CHART.pad.l - LINE_CHART.pad.r)
 const lineChartInnerH = computed(() => LINE_CHART.height - LINE_CHART.pad.t - LINE_CHART.pad.b)
 
 interface LineSeries {
@@ -281,12 +290,21 @@ const linePaths = computed(() => {
   }
   return map
 })
-/** X 轴标签：点数多时间隔显示，避免拥挤。 */
+/** X 轴标签：点数多时间隔显示，避免拥挤；上限随图表宽度增加。 */
 function shouldShowPointLabel (index: number): boolean {
   const n = dailyChartData.value.length
-  if (n <= 8) return true
-  const step = Math.ceil(n / 8)
-  return index % step === 0 || index === n - 1
+  const maxLabels = Math.max(8, Math.floor(lineChartInnerW.value / 80))
+  if (n <= maxLabels) return true
+  const step = Math.ceil(n / maxLabels)
+  if (index === n - 1) return true
+  return index % step === 0 && n - 1 - index >= step
+}
+/** X 轴标签 x 坐标：首/末点换锚点方向，避免文字溢出画布被裁剪。 */
+function xAxisLabelX (index: number): number {
+  const x = pointX(index)
+  if (index === 0) return Math.max(4, x - 8)
+  if (index === dailyChartData.value.length - 1) return Math.min(lineChartWidth.value - 4, x + 8)
+  return x
 }
 
 /** 悬浮十字准线 + 信息框：鼠标在图上移动时吸附到最近数据点，显示竖直虚线与各系列数值。 */
@@ -298,9 +316,10 @@ function onChartMouseMove (event: MouseEvent): void {
   if (rect.width === 0 || rect.height === 0) return
   const n = dailyChartData.value.length
   if (n === 0) { hoverIndex.value = null; return }
-  // preserveAspectRatio="xMidYMid meet"：等比缩放后居中，需扣除两侧留白再换算到 viewBox 坐标。
-  const scale = Math.min(rect.width / LINE_CHART.width, rect.height / LINE_CHART.height)
-  const offsetX = (rect.width - LINE_CHART.width * scale) / 2
+  // viewBox 宽度经 ResizeObserver 与元素 CSS 宽度保持 1:1；这里仍按 meet
+  // 缩放换算，兜底首帧/容器极窄时的瞬时不同步。
+  const scale = Math.min(rect.width / lineChartWidth.value, rect.height / LINE_CHART.height)
+  const offsetX = (rect.width - lineChartWidth.value * scale) / 2
   const viewBoxX = (event.clientX - rect.left - offsetX) / scale
   let idx: number
   if (n <= 1) idx = 0
@@ -336,23 +355,32 @@ const tooltipBox = computed(() => {
   const h = TOOLTIP.padV * 2 + TOOLTIP.headerH + (data.rows.length + 1) * TOOLTIP.rowH
   let x = data.x - TOOLTIP.w / 2
   const minX = LINE_CHART.pad.l + 2
-  const maxX = LINE_CHART.width - LINE_CHART.pad.r - TOOLTIP.w - 2
+  const maxX = lineChartWidth.value - LINE_CHART.pad.r - TOOLTIP.w - 2
   x = Math.max(minX, Math.min(maxX, x))
   // px = 真实数据点 x（十字准线/高亮点用），x = 信息框左上角（已夹紧防溢出）。
   return { x, y: LINE_CHART.pad.t + 4, w: TOOLTIP.w, h, px: data.x, label: data.label, rows: data.rows, cacheHitRate: data.cacheHitRate }
 })
 
-/** 缓存率横向条形图常量。 */
-const RATE_CHART = { width: 720, barH: 24, gap: 10, pad: { l: 130, r: 56, t: 8, b: 8 } }
+/** 缓存率横向条形图常量。宽度复用折线图的自适应宽度；轨道满格 = rateScaleMax。 */
+const RATE_CHART = { barH: 24, gap: 10, pad: { l: 130, r: 56, t: 8, b: 8 } }
+const rateChartWidth = lineChartWidth
+const rateChartInnerW = computed(() => rateChartWidth.value - RATE_CHART.pad.l - RATE_CHART.pad.r)
+// 命中率可能超过 100%（部分供应商 input 口径不含 cache read）：刻度上限自适应取
+// max(1, 最大命中率)，条形/轨道按该上限缩放，>100% 时叠加一条 100% 参考线。
+const rateScaleMax = computed(() => Math.max(1, ...cacheRateChartData.value.map(d => d.cacheHitRate)))
+const rateHasOverHundred = computed(() => rateScaleMax.value > 1.0001)
+// >100% 时顶部预留一行放 "100%" 参考标注。
+const ratePadTop = computed(() => (rateHasOverHundred.value ? RATE_CHART.pad.t + 14 : RATE_CHART.pad.t))
+const rateHundredX = computed(() => RATE_CHART.pad.l + rateChartInnerW.value / rateScaleMax.value)
 const rateChartHeight = computed(() =>
-  Math.max(RATE_CHART.pad.t + RATE_CHART.pad.b + 40,
-    RATE_CHART.pad.t + RATE_CHART.pad.b + cacheRateChartData.value.length * (RATE_CHART.barH + RATE_CHART.gap))
+  Math.max(ratePadTop.value + RATE_CHART.pad.b + 40,
+    ratePadTop.value + RATE_CHART.pad.b + cacheRateChartData.value.length * (RATE_CHART.barH + RATE_CHART.gap))
 )
 function rateBarY (index: number): number {
-  return RATE_CHART.pad.t + index * (RATE_CHART.barH + RATE_CHART.gap)
+  return ratePadTop.value + index * (RATE_CHART.barH + RATE_CHART.gap)
 }
 function rateBarW (rate: number): number {
-  return (RATE_CHART.width - RATE_CHART.pad.l - RATE_CHART.pad.r) * rate
+  return rateChartInnerW.value * (rate / rateScaleMax.value)
 }
 
 const providerFilterLabel = computed(() => {
@@ -376,8 +404,25 @@ watch(rangePreset, () => {
   void loadUsage()
 })
 
+// 图表卡片在 loading/empty 态会卸载重建，用 watch 挂回观察。
+watch(chartCardRef, (el) => {
+  if (!chartResizeObserver) return
+  chartResizeObserver.disconnect()
+  if (el) chartResizeObserver.observe(el)
+})
+
 onMounted(() => {
+  chartResizeObserver = new ResizeObserver((entries) => {
+    const width = entries[0]?.contentRect.width ?? 0
+    if (width > 0) chartWidth.value = Math.round(width)
+  })
+  if (chartCardRef.value) chartResizeObserver.observe(chartCardRef.value)
   void loadUsage()
+})
+
+onBeforeUnmount(() => {
+  chartResizeObserver?.disconnect()
+  chartResizeObserver = null
 })
 </script>
 
@@ -439,7 +484,7 @@ onMounted(() => {
         </div>
 
         <!-- Daily usage line chart (multi-series: input / output / cache) -->
-        <div class="chart-card">
+        <div ref="chartCardRef" class="chart-card">
           <div class="chart-card-head">
             <h4 class="chart-title">{{ $t('settings.usage.chartDaily') }}</h4>
             <!-- Legend doubles as series key — color swatch + label per series. -->
@@ -451,11 +496,11 @@ onMounted(() => {
             </div>
           </div>
           <div v-if="dailyChartData.length === 0" class="chart-empty">{{ $t('settings.usage.chartEmpty') }}</div>
-          <svg v-else class="line-chart" :viewBox="`0 0 ${LINE_CHART.width} ${LINE_CHART.height}`" preserveAspectRatio="xMidYMid meet" role="img" :aria-label="$t('settings.usage.chartDaily')" @mousemove="onChartMouseMove" @mouseleave="onChartMouseLeave">
+          <svg v-else class="line-chart" :viewBox="`0 0 ${lineChartWidth} ${LINE_CHART.height}`" preserveAspectRatio="xMidYMid meet" role="img" :aria-label="$t('settings.usage.chartDaily')" @mousemove="onChartMouseMove" @mouseleave="onChartMouseLeave">
             <!-- Y axis gridlines -->
-            <line v-for="i in 4" :key="`grid-${i}`" :x1="LINE_CHART.pad.l" :x2="LINE_CHART.width - LINE_CHART.pad.r" :y1="LINE_CHART.pad.t + (lineChartInnerH * i) / 4" :y2="LINE_CHART.pad.t + (lineChartInnerH * i) / 4" class="chart-grid" />
-            <!-- Y axis labels -->
-            <text v-for="i in 5" :key="`ylabel-${i}`" :x="LINE_CHART.pad.l - 6" :y="LINE_CHART.pad.t + (lineChartInnerH * (i - 1)) / 4 + 4" class="chart-axis-label" text-anchor="end">{{ fmtTokens(lineChartMax * (i - 1) / 4) }}</text>
+            <line v-for="i in 4" :key="`grid-${i}`" :x1="LINE_CHART.pad.l" :x2="lineChartWidth - LINE_CHART.pad.r" :y1="LINE_CHART.pad.t + (lineChartInnerH * i) / 4" :y2="LINE_CHART.pad.t + (lineChartInnerH * i) / 4" class="chart-grid" />
+            <!-- Y axis labels（顶部=最大值，与 pointY 的 1-value/max 映射一致） -->
+            <text v-for="i in 5" :key="`ylabel-${i}`" :x="LINE_CHART.pad.l - 6" :y="LINE_CHART.pad.t + (lineChartInnerH * (i - 1)) / 4 + 4" class="chart-axis-label" text-anchor="end">{{ fmtTokens(lineChartMax * (5 - i) / 4) }}</text>
             <!-- One smooth line per series, colored by series.color -->
             <path
               v-for="s in lineSeries"
@@ -502,9 +547,9 @@ onMounted(() => {
               </g>
             </template>
             <!-- X axis date labels (shared, derived from first series) -->
-            <text v-for="(d, i) in dailyChartData" :key="`xlabel-${d.date}-${d.hourBucket}`" v-show="shouldShowPointLabel(i)" :x="pointX(i)" :y="LINE_CHART.height - LINE_CHART.pad.b + 14" class="chart-axis-label" text-anchor="middle">{{ chartPointLabel(d) }}</text>
+            <text v-for="(d, i) in dailyChartData" :key="`xlabel-${d.date}-${d.hourBucket}`" v-show="shouldShowPointLabel(i)" :x="xAxisLabelX(i)" :y="LINE_CHART.height - LINE_CHART.pad.b + 14" class="chart-axis-label" :text-anchor="i === 0 ? 'start' : i === dailyChartData.length - 1 ? 'end' : 'middle'">{{ chartPointLabel(d) }}</text>
             <!-- Transparent overlay on top to catch mousemove across the whole chart area. -->
-            <rect x="0" y="0" :width="LINE_CHART.width" :height="LINE_CHART.height" class="chart-hit-overlay" />
+            <rect x="0" y="0" :width="lineChartWidth" :height="LINE_CHART.height" class="chart-hit-overlay" />
           </svg>
           <p class="chart-range-label">{{ rangeLabel }}</p>
         </div>
@@ -513,12 +558,17 @@ onMounted(() => {
         <div class="chart-card">
           <h4 class="chart-title">{{ $t('settings.usage.chartCacheRate') }}</h4>
           <div v-if="cacheRateChartData.length === 0" class="chart-empty">{{ $t('settings.usage.chartEmpty') }}</div>
-          <svg v-else class="rate-chart" :viewBox="`0 0 ${RATE_CHART.width} ${rateChartHeight}`" preserveAspectRatio="xMidYMid meet" role="img" :aria-label="$t('settings.usage.chartCacheRate')">
-            <!-- Track background -->
+          <svg v-else class="rate-chart" :viewBox="`0 0 ${rateChartWidth} ${rateChartHeight}`" preserveAspectRatio="xMidYMid meet" role="img" :aria-label="$t('settings.usage.chartCacheRate')">
+            <!-- 100% reference line when the adaptive scale exceeds 100%. -->
+            <template v-if="rateHasOverHundred">
+              <line :x1="rateHundredX" :x2="rateHundredX" :y1="ratePadTop - 4" :y2="rateChartHeight - RATE_CHART.pad.b" class="rate-hundred-line" />
+              <text :x="rateHundredX" :y="ratePadTop - 8" class="rate-hundred-label" text-anchor="middle">100%</text>
+            </template>
+            <!-- Track background (full track = adaptive scale max) -->
             <rect
               v-for="(d, i) in cacheRateChartData" :key="`track-${d.providerId}`"
               :x="RATE_CHART.pad.l" :y="rateBarY(i)"
-              :width="RATE_CHART.width - RATE_CHART.pad.l - RATE_CHART.pad.r" :height="RATE_CHART.barH"
+              :width="rateChartInnerW" :height="RATE_CHART.barH"
               class="rate-track" rx="4"
             />
             <!-- Rate bar -->
@@ -723,8 +773,10 @@ onMounted(() => {
 .legend-label { white-space: nowrap; }
 
 .line-chart, .rate-chart { width: 100%; height: auto; display: block; }
-.line-chart { max-height: 220px; }
-.rate-chart { max-height: 320px; }
+/* 高度不再封顶：max-height 会在内容超过上限时触发 meet 等比缩放（文字变小、
+   两侧留白），与"拉宽只加宽绘图区、字号不变"的目标冲突。折线图高度恒 220，
+   viewBox 宽度由 ResizeObserver 保持与元素等宽，坐标轴文字始终 1:1 渲染。 */
+.line-chart { height: 220px; }
 
 .chart-grid { stroke: var(--app-border); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.6; }
 .chart-axis-label { font-size: 9px; fill: var(--app-text-faint); }
@@ -750,6 +802,9 @@ onMounted(() => {
 .rate-label { font-size: 11px; fill: var(--app-text-soft); }
 .rate-pct { font-size: 11px; font-weight: 600; fill: var(--app-success, #2faa5e); }
 .rate-pct.pct-low { fill: var(--app-text-muted); }
+/* >100% 时的 100% 参考线（刻度自适应后 100% 落在轨道内部）。 */
+.rate-hundred-line { stroke: var(--app-border-strong); stroke-width: 1; stroke-dasharray: 4 3; }
+.rate-hundred-label { font-size: 9px; fill: var(--app-text-faint); }
 
 .chart-empty { padding: 28px 12px; text-align: center; color: var(--app-text-muted); font-size: 0.84em; }
 .chart-range-label, .chart-hint { margin: 6px 0 0; font-size: 0.76em; color: var(--app-text-faint); }
@@ -811,6 +866,6 @@ onMounted(() => {
   .usage-panel { padding: 14px 16px; }
   .usage-head { flex-direction: column; }
   .usage-row { grid-template-columns: minmax(0, 1.6fr) repeat(5, minmax(0, 1fr)); font-size: 0.76em; }
-  .line-chart { max-height: 180px; }
+  .line-chart { height: 180px; }
 }
 </style>

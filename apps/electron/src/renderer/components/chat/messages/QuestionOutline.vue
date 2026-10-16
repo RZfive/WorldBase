@@ -24,12 +24,16 @@ const listRef = ref<HTMLElement | null>(null)
 const tooltipRef = ref<HTMLElement | null>(null)
 const hoverPosition = ref<number | null>(null)
 const selectedKey = ref<string | null>(null)
+const canScrollUp = ref(false)
+const canScrollDown = ref(false)
 const tooltipPosition = ref({ left: 0, top: 0, width: TOOLTIP_WIDTH })
 const hoveredIndex = computed(() => hoverPosition.value == null ? null : Math.round(hoverPosition.value))
 const hoveredQuestion = computed(() => hoveredIndex.value == null ? null : props.questions[hoveredIndex.value] || null)
 let pointerY: number | null = null
 let hoverFrameId: number | null = null
 let disposed = false
+let listResizeObserver: ResizeObserver | null = null
+let observedList: HTMLElement | null = null
 
 function lineWidth (question: QuestionNavigationEntry): number {
   // 34 * 1.9 = 64.6px: even the longest enlarged mark fits inside the 72px rail.
@@ -114,7 +118,36 @@ function handleFocusOut (event: FocusEvent): void {
   clearHover()
 }
 
+// The rail hides its scrollbar, so edge gradients are the only cue that rows
+// extend beyond the visible dock.
+const SCROLL_FADE_EPSILON = 2
+
+function updateScrollFades (): void {
+  const list = listRef.value
+  if (!list || props.questions.length === 0) {
+    canScrollUp.value = false
+    canScrollDown.value = false
+    return
+  }
+  canScrollUp.value = list.scrollTop > SCROLL_FADE_EPSILON
+  canScrollDown.value = list.scrollTop + list.clientHeight < list.scrollHeight - SCROLL_FADE_EPSILON
+}
+
+// The v-if on the dock recreates the list element, so re-target the observer
+// whenever questions render.
+function syncScrollFadeObserver (): void {
+  const list = listRef.value
+  if (!listResizeObserver) listResizeObserver = new ResizeObserver(updateScrollFades)
+  if (list !== observedList) {
+    if (observedList) listResizeObserver.unobserve(observedList)
+    observedList = list
+    if (list) listResizeObserver.observe(list)
+  }
+  updateScrollFades()
+}
+
 function handleListScroll (): void {
+  updateScrollFades()
   if (pointerY != null) schedulePointerPosition()
   else updateTooltipPosition()
 }
@@ -139,9 +172,11 @@ watch(() => props.questions, () => {
   if (selectedKey.value && !props.questions.some(question => question.key === selectedKey.value)) selectedKey.value = null
   if (pointerY != null) nextTick(schedulePointerPosition)
   else clearHover()
+  nextTick(syncScrollFadeObserver)
 })
 
 onMounted(() => {
+  syncScrollFadeObserver()
   window.addEventListener('resize', clearHover)
   window.addEventListener('blur', clearHover)
   document.addEventListener('visibilitychange', clearHover)
@@ -150,6 +185,9 @@ onMounted(() => {
 onBeforeUnmount(() => {
   disposed = true
   clearHover()
+  listResizeObserver?.disconnect()
+  listResizeObserver = null
+  observedList = null
   window.removeEventListener('resize', clearHover)
   window.removeEventListener('blur', clearHover)
   document.removeEventListener('visibilitychange', clearHover)
@@ -160,6 +198,7 @@ onBeforeUnmount(() => {
   <aside
     v-if="props.questions.length > 0"
     class="question-outline"
+    :class="{ 'fade-top': canScrollUp, 'fade-bottom': canScrollDown }"
     :style="{ '--question-row-height': `${ROW_HEIGHT}px`, '--question-list-padding': `${LIST_PADDING}px` }"
     aria-label="Conversation questions"
     @pointerenter="handlePointerMove"
@@ -240,6 +279,38 @@ onBeforeUnmount(() => {
   background: transparent;
   /* The whole transparent Dock, including gaps, owns the hover interaction. */
   pointer-events: auto;
+  --question-fade-height: 64px;
+}
+
+/* Scroll hint: a fog cover dissolving clipped rows into the chat canvas, so
+   the edge reads as "more questions underneath" instead of vanishing marks.
+   The solid end is slightly translucent to let covered lines peek through;
+   pointer-events: none keeps covered rows hoverable and clickable. */
+.question-outline::before,
+.question-outline::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: var(--question-fade-height);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.question-outline::before {
+  top: 0;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--app-chat-canvas) 90%, transparent), transparent);
+}
+
+.question-outline::after {
+  bottom: 0;
+  background: linear-gradient(to top, color-mix(in srgb, var(--app-chat-canvas) 90%, transparent), transparent);
+}
+
+.question-outline.fade-top::before,
+.question-outline.fade-bottom::after {
+  opacity: 1;
 }
 
 .question-outline-list {
@@ -456,6 +527,8 @@ onBeforeUnmount(() => {
 .question-outline-tooltip-annotation.status-orphaned .question-outline-tooltip-dot { background: var(--app-text-faint); }
 
 @media (prefers-reduced-motion: reduce) {
+  .question-outline::before,
+  .question-outline::after { transition: none; }
   .question-outline-line { transition: none; }
   .question-outline-annotation { transition: none; }
   .question-outline-annotation.status-generating .question-outline-annotation-dot { animation: none; }

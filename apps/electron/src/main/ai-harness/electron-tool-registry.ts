@@ -148,7 +148,8 @@ export class ElectronToolRegistry {
     // child runs, nesting limits, and parent cancellation. No host shim.
     const toolServices: ToolServices = {
       ...this.services,
-      workspaceRoot: context.workspaceRoot ?? null
+      workspaceRoot: context.workspaceRoot ?? null,
+      conversationId: sessionState.conversationId || undefined
     }
 
     // `registerAllTools` is only a domain-tool registration function here.

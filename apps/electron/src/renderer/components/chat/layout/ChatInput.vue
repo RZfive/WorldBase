@@ -1214,9 +1214,13 @@ onUnmounted(() => {
 .chat-input {
   position: relative;
   z-index: 6;
-  margin-top: calc(-1 * var(--chat-input-overlap, 0px));
+  flex: 0 0 auto;
   padding: 10px var(--chat-input-gutter, 16px) 18px;
-  background: transparent;
+  /* This is a real footer now, not a negative-margin overlay. Keep its paint
+     surface opaque so a compositor repaint can never reveal message glyphs
+     through the composer while scrolling stops. */
+  background: var(--app-chat-canvas);
+  isolation: isolate;
 }
 
 .chat-input > * {

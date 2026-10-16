@@ -174,10 +174,12 @@ watch(
   async () => {
     showAddMenu.value = false
     showTabActions.value = false
+    tabContextMenu.value = null
     if (!props.visible) return
     await nextTick()
     const next = clampWidth(props.workspaceWidth)
     if (next !== props.workspaceWidth) emit('updateWidth', next)
+    void scrollActiveTabIntoView()
   }
 )
 
@@ -187,26 +189,37 @@ watch(
     if (!visible) {
       stopResize()
       showAddMenu.value = false
+      tabContextMenu.value = null
       layoutObserver?.disconnect()
       layoutObserver = null
+      unbindTabsScrollObserver()
       return
     }
     await nextTick()
     bindLayoutObserver()
+    bindTabsScrollObserver()
+    updateTabsScrollState()
+    void scrollActiveTabIntoView()
   },
   { immediate: true }
 )
 
 onMounted(() => {
   if (!props.visible) return
-  void nextTick(bindLayoutObserver)
+  void nextTick(() => {
+    bindLayoutObserver()
+    bindTabsScrollObserver()
+    updateTabsScrollState()
+  })
 })
 
 onBeforeUnmount(() => {
   stopResize()
   window.clearTimeout(tabActionsCloseTimer)
+  window.removeEventListener('keydown', onContextMenuKeydown)
   layoutObserver?.disconnect()
   layoutObserver = null
+  unbindTabsScrollObserver()
 })
 
 function handleAddTab (kind: string): void {
@@ -224,6 +237,135 @@ function runTabAction (actionId: string): void {
   hideTabActionsNow()
   void tabBodyRef.value?.[actionId]?.()
 }
+
+// --- Tab quick close: middle click + right-click context menu ---
+
+/** Middle-click closes the tab, matching the common browser/editor convention. */
+function onTabMouseDown (event: MouseEvent, tabId: string): void {
+  if (event.button !== 1) return
+  event.preventDefault()
+  emit('closeTab', tabId)
+}
+
+const tabContextMenu = ref<{ tab: WorkspaceTabInstance; x: number; y: number } | null>(null)
+
+const CONTEXT_MENU_MIN_WIDTH = 176
+const CONTEXT_MENU_EST_HEIGHT = 116
+
+function openTabContextMenu (tab: WorkspaceTabInstance, event: MouseEvent): void {
+  tabContextMenu.value = {
+    tab,
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - CONTEXT_MENU_MIN_WIDTH - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - CONTEXT_MENU_EST_HEIGHT - 8))
+  }
+}
+
+function closeTabContextMenu (): void {
+  tabContextMenu.value = null
+}
+
+function onContextMenuKeydown (event: KeyboardEvent): void {
+  if (event.key === 'Escape') closeTabContextMenu()
+}
+
+watch(tabContextMenu, (menu) => {
+  if (menu) window.addEventListener('keydown', onContextMenuKeydown)
+  else window.removeEventListener('keydown', onContextMenuKeydown)
+})
+
+const contextTabCountToRight = computed(() => {
+  const menu = tabContextMenu.value
+  if (!menu) return 0
+  const index = props.tabs.findIndex(tab => tab.id === menu.tab.id)
+  return index < 0 ? 0 : props.tabs.length - 1 - index
+})
+
+function handleContextCloseTab (): void {
+  const tab = tabContextMenu.value?.tab
+  closeTabContextMenu()
+  if (tab) emit('closeTab', tab.id)
+}
+
+/** Closes every other tab through the same closeTab pipeline; the anchor stays. */
+function handleContextCloseOtherTabs (): void {
+  const keepTabId = tabContextMenu.value?.tab.id
+  closeTabContextMenu()
+  if (!keepTabId) return
+  for (const tab of props.tabs) {
+    if (tab.id !== keepTabId) emit('closeTab', tab.id)
+  }
+}
+
+function handleContextCloseTabsToRight (): void {
+  const menu = tabContextMenu.value
+  closeTabContextMenu()
+  if (!menu) return
+  const index = props.tabs.findIndex(tab => tab.id === menu.tab.id)
+  if (index < 0) return
+  for (const tab of props.tabs.slice(index + 1)) emit('closeTab', tab.id)
+}
+
+// --- Tab strip overflow: edge fade hints + keep active tab in view ---
+
+const TABS_FADE_WIDTH = 24
+
+const tabsScrollRef = ref<HTMLElement | null>(null)
+const tabsCanScrollLeft = ref(false)
+const tabsCanScrollRight = ref(false)
+let tabsScrollObserver: ResizeObserver | null = null
+
+function updateTabsScrollState (): void {
+  const el = tabsScrollRef.value
+  if (!el) return
+  tabsCanScrollLeft.value = el.scrollLeft > 1
+  tabsCanScrollRight.value = el.scrollLeft + el.clientWidth < el.scrollWidth - 1
+}
+
+/** Mask vars drive the edge fade; a 0px stop renders as a hard (invisible) edge. */
+const tabsScrollStyle = computed(() => ({
+  '--tabs-fade-left': `${tabsCanScrollLeft.value ? TABS_FADE_WIDTH : 0}px`,
+  '--tabs-fade-right': `${tabsCanScrollRight.value ? TABS_FADE_WIDTH : 0}px`
+}))
+
+function bindTabsScrollObserver (): void {
+  if (typeof ResizeObserver === 'undefined') return
+  const el = tabsScrollRef.value
+  if (!el) return
+  tabsScrollObserver?.disconnect()
+  tabsScrollObserver = new ResizeObserver(() => updateTabsScrollState())
+  tabsScrollObserver.observe(el)
+}
+
+function unbindTabsScrollObserver (): void {
+  tabsScrollObserver?.disconnect()
+  tabsScrollObserver = null
+}
+
+/** Scrolls the activated tab into view when the strip overflows. */
+async function scrollActiveTabIntoView (): Promise<void> {
+  await nextTick()
+  const strip = tabsScrollRef.value
+  const activeEl = strip?.querySelector<HTMLElement>('.workspace-tab.active')
+  if (!strip || !activeEl) return
+  const stripRect = strip.getBoundingClientRect()
+  const rect = activeEl.getBoundingClientRect()
+  const start = rect.left - stripRect.left + strip.scrollLeft
+  const end = start + rect.width
+  if (start - 12 < strip.scrollLeft) {
+    strip.scrollTo({ left: Math.max(0, start - 12), behavior: 'smooth' })
+  } else if (end + 12 > strip.scrollLeft + strip.clientWidth) {
+    strip.scrollTo({ left: Math.min(strip.scrollWidth - strip.clientWidth, end - strip.clientWidth + 12), behavior: 'smooth' })
+  }
+}
+
+watch(
+  () => props.tabs,
+  async () => {
+    await nextTick()
+    updateTabsScrollState()
+  },
+  { deep: true }
+)
 </script>
 
 <template>
@@ -241,7 +383,12 @@ function runTabAction (actionId: string): void {
 
     <div class="workspace-panel-shell">
       <header class="workspace-tab-strip">
-        <div class="workspace-tabs-scroll">
+        <div
+          ref="tabsScrollRef"
+          class="workspace-tabs-scroll"
+          :style="tabsScrollStyle"
+          @scroll.passive="updateTabsScrollState"
+        >
           <div
             v-for="tab in tabs"
             :key="tab.id"
@@ -251,6 +398,8 @@ function runTabAction (actionId: string): void {
             :title="getTabLabel(tab)"
             @click="emit('activateTab', tab.id)"
             @keydown.enter.prevent="emit('activateTab', tab.id)"
+            @mousedown="onTabMouseDown($event, tab.id)"
+            @contextmenu.prevent="openTabContextMenu(tab, $event)"
           >
             <svg class="workspace-tab-icon" viewBox="0 0 24 24" aria-hidden="true" v-html="getTabDefinition(tab)?.icon || ''"></svg>
             <span class="workspace-tab-label">{{ getTabLabel(tab) }}</span>
@@ -356,6 +505,34 @@ function runTabAction (actionId: string): void {
         </div>
       </div>
     </div>
+
+    <template v-if="tabContextMenu">
+      <div
+        class="workspace-tab-context-backdrop"
+        @click="closeTabContextMenu"
+        @contextmenu.prevent="closeTabContextMenu"
+      ></div>
+      <div
+        class="workspace-tab-context-menu"
+        :style="{ left: `${tabContextMenu.x}px`, top: `${tabContextMenu.y}px` }"
+      >
+        <button class="workspace-tab-context-option" type="button" @click="handleContextCloseTab">
+          {{ t('chatUi.closeWorkspaceTab') }}
+        </button>
+        <button
+          class="workspace-tab-context-option"
+          type="button"
+          :disabled="tabs.length <= 1"
+          @click="handleContextCloseOtherTabs"
+        >{{ t('chatUi.closeOtherWorkspaceTabs') }}</button>
+        <button
+          class="workspace-tab-context-option"
+          type="button"
+          :disabled="contextTabCountToRight === 0"
+          @click="handleContextCloseTabsToRight"
+        >{{ t('chatUi.closeRightWorkspaceTabs') }}</button>
+      </div>
+    </template>
   </aside>
 </template>
 
@@ -447,6 +624,13 @@ function runTabAction (actionId: string): void {
   gap: 4px;
   overflow-x: auto;
   scrollbar-width: none;
+  /* Edge fade hints that more tabs lie beyond the visible strip; the custom
+     properties jump between 0px (hard edge) and the fade width as overflow
+     appears/disappears on each side. Masks paint only — hit targets stay whole. */
+  --tabs-fade-left: 0px;
+  --tabs-fade-right: 0px;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--tabs-fade-left), #000 calc(100% - var(--tabs-fade-right)), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 var(--tabs-fade-left), #000 calc(100% - var(--tabs-fade-right)), transparent);
 }
 
 .workspace-tabs-scroll::-webkit-scrollbar {
@@ -462,7 +646,7 @@ function runTabAction (actionId: string): void {
   height: 32px;
   padding: 0 6px 0 10px;
   border-radius: 9px;
-  border: 1px solid transparent;
+  border: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
   color: var(--app-text-muted);
   cursor: pointer;
   user-select: none;
@@ -474,7 +658,7 @@ function runTabAction (actionId: string): void {
 }
 
 .workspace-tab.active {
-  border-color: color-mix(in srgb, var(--app-accent) 34%, transparent);
+  border-color: color-mix(in srgb, var(--app-accent) 46%, transparent);
   background: color-mix(in srgb, var(--app-accent-soft) 46%, var(--app-panel));
   color: var(--app-text-strong);
 }
@@ -596,6 +780,48 @@ function runTabAction (actionId: string): void {
 
 .workspace-actions-option:hover {
   background: color-mix(in srgb, var(--app-accent-soft) 46%, transparent);
+}
+
+.workspace-tab-context-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.workspace-tab-context-menu {
+  position: fixed;
+  z-index: 41;
+  min-width: 176px;
+  padding: 5px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+  background: color-mix(in srgb, var(--app-panel) 97%, transparent);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.24);
+}
+
+.workspace-tab-context-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--app-text);
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.workspace-tab-context-option:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--app-accent-soft) 46%, transparent);
+}
+
+.workspace-tab-context-option:disabled {
+  cursor: default;
+  opacity: 0.4;
 }
 
 .workspace-add-btn {

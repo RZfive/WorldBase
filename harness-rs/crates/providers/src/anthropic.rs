@@ -191,11 +191,29 @@ impl AnthropicProvider {
             "messages": Self::to_wire_messages(messages),
         });
         if let Some(system) = system.filter(|value| !value.is_empty()) {
-            body["system"] = json!([{
+            // The cache breakpoint ends at the stable head. The per-run tail
+            // (memory recall) rides in `options.dynamic_system_suffix` and only
+            // splits into a second, unmarked block when `system` still ends
+            // with it verbatim; a rewritten system (context summary) falls
+            // back to the single-block form.
+            let split = options
+                .dynamic_system_suffix
+                .as_deref()
+                .filter(|tail| !tail.trim().is_empty())
+                .and_then(|tail| system.strip_suffix(tail).map(|head| (head, tail)));
+            let (head, tail) = match split {
+                Some((head, tail)) => (head.trim_end(), Some(tail)),
+                None => (system, None),
+            };
+            let mut blocks = vec![json!({
                 "type": "text",
-                "text": system,
+                "text": head,
                 "cache_control": { "type": "ephemeral" },
-            }]);
+            })];
+            if let Some(tail) = tail {
+                blocks.push(json!({ "type": "text", "text": tail }));
+            }
+            body["system"] = Value::Array(blocks);
         }
         if let Some(thinking) = thinking {
             body["thinking"] = thinking;
@@ -463,6 +481,25 @@ impl StreamState {
                 self.output_tokens = payload["usage"]["output_tokens"]
                     .as_u64()
                     .unwrap_or(self.output_tokens);
+                // Anthropic-compatible relays (e.g. Zhipu bigmodel) tokenize the
+                // prompt lazily: message_start reports zeros and the real input
+                // and cache token counts only arrive in the final message_delta.
+                // The >0 guard keeps a zero delta from clobbering message_start.
+                if let Some(input) = payload["usage"]["input_tokens"].as_u64().filter(|v| *v > 0) {
+                    self.input_tokens = input;
+                }
+                if let Some(cache_read) = payload["usage"]["cache_read_input_tokens"]
+                    .as_u64()
+                    .filter(|v| *v > 0)
+                {
+                    self.cache_read_tokens = cache_read;
+                }
+                if let Some(cache_creation) = payload["usage"]["cache_creation_input_tokens"]
+                    .as_u64()
+                    .filter(|v| *v > 0)
+                {
+                    self.cache_creation_tokens = cache_creation;
+                }
             }
             "message_stop" => {
                 self.finish();
@@ -677,6 +714,65 @@ mod tests {
         assert_eq!(normal["max_tokens"], DEFAULT_MAX_TOKENS);
         assert_eq!(normal["temperature"], json!(CODING_TEMPERATURE));
         assert!(normal.get("thinking").is_none());
+    }
+
+    #[test]
+    fn dynamic_system_suffix_splits_outside_the_cache_breakpoint() {
+        let provider = AnthropicProvider::new(
+            "key".into(),
+            "claude-sonnet-4-5".into(),
+            Some("https://api.anthropic.com/v1".into()),
+        )
+        .unwrap();
+        let system = "stable rules\n\nrecalled memory";
+        let body = provider.request_body(
+            Some(system),
+            &[LlmMessage::text(LlmRole::User, "hello")],
+            &[],
+            8192,
+            &ChatOptions {
+                dynamic_system_suffix: Some("recalled memory".into()),
+                ..ChatOptions::default()
+            },
+        );
+        let blocks = body["system"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["text"], "stable rules");
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(blocks[1]["text"], "recalled memory");
+        assert!(blocks[1].get("cache_control").is_none());
+
+        // A rewritten system that no longer ends with the tail (e.g. after a
+        // context summary was appended) must not split.
+        let rewritten = provider.request_body(
+            Some("stable rules\n\nrecalled memory\n\ncontext summary"),
+            &[LlmMessage::text(LlmRole::User, "hello")],
+            &[],
+            8192,
+            &ChatOptions {
+                dynamic_system_suffix: Some("recalled memory".into()),
+                ..ChatOptions::default()
+            },
+        );
+        let rewritten_blocks = rewritten["system"].as_array().unwrap();
+        assert_eq!(rewritten_blocks.len(), 1);
+        assert_eq!(
+            rewritten_blocks[0]["text"],
+            "stable rules\n\nrecalled memory\n\ncontext summary"
+        );
+        assert_eq!(rewritten_blocks[0]["cache_control"]["type"], "ephemeral");
+
+        // No tail at all keeps the single-block form.
+        let plain = provider.request_body(
+            Some("stable rules"),
+            &[LlmMessage::text(LlmRole::User, "hello")],
+            &[],
+            8192,
+            &ChatOptions::default(),
+        );
+        let plain_blocks = plain["system"].as_array().unwrap();
+        assert_eq!(plain_blocks.len(), 1);
+        assert_eq!(plain_blocks[0]["text"], "stable rules");
     }
 
     #[test]
@@ -905,6 +1001,60 @@ mod tests {
                 && name == "read_file"
                 && input == &json!({ "path": "README.md" })
         ));
+        assert!(stream.next().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn message_delta_usage_overrides_zero_message_start_tokens() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            write_sse_response(
+                &mut socket,
+                concat!(
+                    "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+                    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"working\"}}\n\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":13,\"output_tokens\":7,\"cache_read_input_tokens\":5,\"cache_creation_input_tokens\":2}}\n\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"input_tokens\":0,\"output_tokens\":9}}\n\n",
+                    "data: {\"type\":\"message_stop\"}\n\n"
+                ),
+            )
+            .await;
+        });
+
+        let provider = AnthropicProvider::new(
+            "test-key".into(),
+            "claude-sonnet-4-5".into(),
+            Some(format!("http://{address}/v1/messages")),
+        )
+        .unwrap();
+        let mut stream = provider
+            .chat_stream(
+                None,
+                vec![LlmMessage::text(LlmRole::User, "continue")],
+                vec![],
+                8192,
+                ChatOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            StreamChunk::TextDelta(ref text) if text == "working"
+        ));
+        let completed = stream.next().await.unwrap().unwrap();
+        let StreamChunk::Completed { usage, .. } = completed else {
+            panic!("expected completed response");
+        };
+        assert_eq!(usage.input_tokens, 13);
+        assert_eq!(usage.output_tokens, 9);
+        assert_eq!(usage.cache_read_tokens, 5);
+        assert_eq!(usage.cache_creation_tokens, 2);
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }

@@ -2,7 +2,9 @@
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
+import SidebarIcon from '../../chat/layout/SidebarIcon.vue'
 import { renderMarkdown } from '../../chat/markdown'
+import { workspaceStore } from '../workspace-store'
 import type { WorkspaceTabInstance } from '../tab-registry'
 
 type WorkspaceState = ConversationFolderWorkspaceState
@@ -16,6 +18,8 @@ interface FlatWorkspaceEntry extends WorkspaceEntry {
 interface CodeLine {
   number: number
   html: string
+  /** 虚拟滚动：行在滚动内容里的绝对纵坐标（px）。 */
+  top: number
 }
 
 interface TemplateHighlightState {
@@ -67,6 +71,16 @@ const isActiveTab = ref(false)
 
 const SIDEBAR_WIDTH = 280
 
+/**
+ * 目录树默认收起：代码查看默认只显示单文件预览。仅当用户导入代码区
+ * （选择文件夹）时自动展开；之后可随时用左上角按钮收起/再展开。
+ */
+const isTreeExpanded = ref(false)
+
+function toggleFileTree (): void {
+  isTreeExpanded.value = !isTreeExpanded.value
+}
+
 let workspaceShortcutsBound = false
 let toolbarPositionFrame: number | null = null
 let workspaceChangeCleanup: (() => void) | null = null
@@ -110,7 +124,6 @@ const flatFileTree = computed(() => flattenFileTree(fileTree.value))
 const allFileEntries = computed(() => flattenAllFileTree(fileTree.value))
 const selectedPath = computed(() => currentActiveFilePath.value || selectedFile.value?.filePath || null)
 const lineCount = computed(() => selectedFile.value?.lineCount || 0)
-const renderedMarkdown = computed(() => selectedFile.value?.isMarkdown ? renderMarkdown(selectedFile.value.content) : '')
 const normalizedFileSearchQuery = computed(() => fileSearchQuery.value.trim().toLowerCase())
 const searchResults = computed(() => {
   const query = normalizedFileSearchQuery.value
@@ -136,6 +149,21 @@ const normalizedCodeSelection = computed(() => {
     isComplete: end !== null
   }
 })
+
+// 选中区间写入全局 store：AI 请求会携带"当前正在查看的文件 + 勾选行范围"，
+// 让"帮我看看选中的部分"这类请求无需显式引用文件路径。
+watch(normalizedCodeSelection, (selection) => {
+  workspaceStore.folderActiveSelection.value = selection ? { start: selection.start, end: selection.end } : null
+})
+
+// 当前文件的元信息（行数/截断）也进 store，供 AI 上下文使用；换文件时重置
+// 虚拟滚动视图。
+watch(selectedFile, (file) => {
+  workspaceStore.folderActiveFileMeta.value = file
+    ? { lineCount: file.lineCount, truncated: file.truncated }
+    : null
+  resetCodeView()
+})
 const codeSelectionLabel = computed(() => {
   const selection = normalizedCodeSelection.value
   if (!selection || !selectedFile.value) return ''
@@ -144,20 +172,196 @@ const codeSelectionLabel = computed(() => {
     : `L${selection.start}-L${selection.end}`
   return `${selectedFile.value.filePath}#${linePart}`
 })
-const codeLines = computed<CodeLine[]>(() => {
-  const file = selectedFile.value
-  if (!file || file.isMarkdown) return []
-  if (file.content === '') return []
+// ── 大文件防卡死：虚拟滚动 + 懒高亮 ──
+// 代码行不换行（white-space: pre），行高恒定，因此只渲染可视区±过扫描的行，
+// 滚动容器用等高占位撑出真实滚动长度：全部内容都可通过滚动查看，不截断、
+// 不冻结。高亮按行懒计算并缓存；vue/svelte/astro 的嵌入式语言状态用检查点
+// 回放保证随机跳转时着色依然正确。超长行（压缩产物）跳过 token 着色只做
+// 转义——单行 hljs 数百 KB 会卡顿且着色无意义。
+const VIRTUAL_OVERSCAN = 12
+const STATE_CHECKPOINT_EVERY = 200
+const HLJS_MAX_LINE_CHARS = 50_000
+const HIGHLIGHT_CACHE_MAX = 20_000
+const MARKDOWN_CHUNK_CHARS = 80_000
+const DEFAULT_ROW_HEIGHT = 19
 
-  const state: TemplateHighlightState = {
-    embeddedLanguage: null,
-    inAstroFrontmatter: false
-  }
-  return file.content.split('\n').map((line, index) => ({
-    number: index + 1,
-    html: highlightCodeLine(line, file, state, index)
-  }))
+const renderedRows = ref<CodeLine[]>([])
+const virtualRowHeight = ref(DEFAULT_ROW_HEIGHT)
+const markdownChunks = ref<string[]>([])
+let sourceCodeLines: string[] = []
+let highlightCache = new Map<number, string>()
+let stateCheckpoints = new Map<number, TemplateHighlightState>()
+let virtualScrollFrame: number | null = null
+let markdownRenderToken = 0
+let markdownRenderTimer: number | null = null
+
+const virtualRowCount = computed(() => {
+  const file = selectedFile.value
+  return file && !file.isMarkdown ? sourceCodeLines.length : 0
 })
+const virtualScrollHeight = computed(() => Math.round(virtualRowCount.value * virtualRowHeight.value))
+
+function stopPreviewRenderLoops (): void {
+  markdownRenderToken += 1
+  if (markdownRenderTimer !== null) {
+    window.clearTimeout(markdownRenderTimer)
+    markdownRenderTimer = null
+  }
+  if (virtualScrollFrame !== null) {
+    window.cancelAnimationFrame(virtualScrollFrame)
+    virtualScrollFrame = null
+  }
+}
+
+function resetCodeView (): void {
+  stopPreviewRenderLoops()
+  sourceCodeLines = []
+  highlightCache = new Map()
+  stateCheckpoints = new Map()
+  renderedRows.value = []
+  markdownChunks.value = []
+  virtualRowHeight.value = DEFAULT_ROW_HEIGHT
+  const file = selectedFile.value
+  if (!file) return
+  if (file.isMarkdown) {
+    scheduleMarkdownRender()
+    return
+  }
+  sourceCodeLines = file.content.split('\n')
+  // 内容替换后回到文件顶部，并立即计算首屏窗口。
+  void nextTick(() => {
+    if (codePreviewRef.value) codePreviewRef.value.scrollTop = 0
+    updateVirtualWindow()
+  })
+}
+
+/** 嵌入式语言状态机（vue/svelte/astro）在 lineIndex 行之前的状态；非模板语言无状态。 */
+function highlightStateAt (lineIndex: number, file: WorkspaceReadResult): TemplateHighlightState {
+  const fileLanguage = file.language?.trim().toLowerCase() || null
+  if (!fileLanguage || !isSingleFileTemplateLanguage(fileLanguage)) {
+    return { embeddedLanguage: null, inAstroFrontmatter: false }
+  }
+  const checkpoint = Math.floor(lineIndex / STATE_CHECKPOINT_EVERY) * STATE_CHECKPOINT_EVERY
+  let state: TemplateHighlightState = { embeddedLanguage: null, inAstroFrontmatter: false }
+  let start = 0
+  if (checkpoint > 0) {
+    const saved = stateCheckpoints.get(checkpoint)
+    if (saved) {
+      state = { ...saved }
+      start = checkpoint
+    }
+  }
+  for (let index = start; index < lineIndex; index++) {
+    // 仅推进状态机（正则扫描），不做 token 高亮；沿途补存检查点。
+    getLineHighlightLanguage(sourceCodeLines[index], file, state, index)
+    if ((index + 1) % STATE_CHECKPOINT_EVERY === 0 && !stateCheckpoints.has(index + 1)) {
+      stateCheckpoints.set(index + 1, { ...state })
+    }
+  }
+  return state
+}
+
+/** 确保 [first, last) 区间的行高亮已缓存；返回后调用方直接取缓存。 */
+function ensureWindowHighlights (first: number, last: number, file: WorkspaceReadResult): void {
+  let index = first
+  while (index < last) {
+    if (highlightCache.has(index)) {
+      index += 1
+      continue
+    }
+    let runEnd = index
+    while (runEnd < last && !highlightCache.has(runEnd)) runEnd += 1
+    let state = highlightStateAt(index, file)
+    for (; index < runEnd; index++) {
+      const text = sourceCodeLines[index]
+      const html = text.length > HLJS_MAX_LINE_CHARS
+        ? escapeHtml(text)
+        : highlightLineWithLanguage(text, getLineHighlightLanguage(text, file, state, index))
+      if ((index + 1) % STATE_CHECKPOINT_EVERY === 0 && !stateCheckpoints.has(index + 1)) {
+        stateCheckpoints.set(index + 1, { ...state })
+      }
+      highlightCache.set(index, html)
+      if (highlightCache.size > HIGHLIGHT_CACHE_MAX) {
+        // 简易淘汰：重访时按检查点重算即可，正确性不受影响。
+        const oldest = highlightCache.keys().next().value
+        if (oldest === undefined) break
+        highlightCache.delete(oldest)
+      }
+    }
+  }
+}
+
+function updateVirtualWindow (): void {
+  const preview = codePreviewRef.value
+  const file = selectedFile.value
+  if (!preview || !file || file.isMarkdown || sourceCodeLines.length === 0) {
+    renderedRows.value = []
+    return
+  }
+  const rowHeight = virtualRowHeight.value
+  const first = Math.max(0, Math.floor(preview.scrollTop / rowHeight) - VIRTUAL_OVERSCAN)
+  const last = Math.min(sourceCodeLines.length, Math.ceil((preview.scrollTop + preview.clientHeight) / rowHeight) + VIRTUAL_OVERSCAN)
+  ensureWindowHighlights(first, last, file)
+  const rows: CodeLine[] = []
+  for (let index = first; index < last; index++) {
+    rows.push({
+      number: index + 1,
+      top: index * rowHeight,
+      html: highlightCache.get(index) ?? escapeHtml(sourceCodeLines[index])
+    })
+  }
+  renderedRows.value = rows
+  // 用真实渲染的行高校准（首帧后字体/行高可能略不同于默认值）；校正后
+  // 重算一次窗口，让已渲染行的 top 与占位高度用同一行高。
+  const measured = preview.querySelector<HTMLElement>('.code-line')?.offsetHeight
+  if (measured && Math.abs(measured - rowHeight) > 0.5) {
+    virtualRowHeight.value = measured
+    scheduleVirtualUpdate()
+  }
+}
+
+function scheduleVirtualUpdate (): void {
+  // 用 0ms 定时器而非 rAF：窗口被遮挡时 rAF 不触发，滚动后会看到空白；
+  // setTimeout 在任何可见性下都可靠，scroll 事件本身已按帧合并。
+  if (virtualScrollFrame !== null) return
+  virtualScrollFrame = window.setTimeout(() => {
+    virtualScrollFrame = null
+    updateVirtualWindow()
+  }, 0)
+}
+
+/** Markdown 按空行 + 代码围栏边界切块，逐块渲染直到完整——不截断也不冻结。 */
+function scheduleMarkdownRender (): void {
+  const file = selectedFile.value
+  if (!file?.isMarkdown) return
+  const content = file.content
+  const chunks: string[] = []
+  let current: string[] = []
+  let size = 0
+  let inFence = false
+  for (const line of content.split('\n')) {
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence
+    current.push(line)
+    size += line.length + 1
+    if (!inFence && size >= MARKDOWN_CHUNK_CHARS && line.trim() === '') {
+      chunks.push(current.join('\n'))
+      current = []
+      size = 0
+    }
+  }
+  if (current.length > 0) chunks.push(current.join('\n'))
+
+  const token = markdownRenderToken
+  let index = 0
+  const step = () => {
+    if (token !== markdownRenderToken) return
+    if (index >= chunks.length) return
+    markdownChunks.value.push(renderMarkdown(chunks[index]))
+    index += 1
+    markdownRenderTimer = window.setTimeout(step, 0)
+  }
+  step()
+}
 
 function highlightCodeLine (line: string, file: WorkspaceReadResult, state: TemplateHighlightState, index: number): string {
   const language = getLineHighlightLanguage(line, file, state, index)
@@ -423,7 +627,9 @@ function handleWorkspaceKeydown (event: KeyboardEvent): void {
   if (isTyping) return
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'p') {
     event.preventDefault()
-    focusFileSearch()
+    // 文件搜索框在目录树里：收起状态下先展开树再聚焦搜索。
+    if (!isTreeExpanded.value) isTreeExpanded.value = true
+    void nextTick(() => focusFileSearch())
   }
 }
 
@@ -620,6 +826,7 @@ function queueCodeSelectionToolbarPositionUpdate (): void {
 }
 
 function handleCodePreviewScroll (): void {
+  scheduleVirtualUpdate()
   updateCodeSelectionToolbarPosition()
 }
 
@@ -682,6 +889,8 @@ async function chooseFolder (): Promise<void> {
     currentActiveFilePath.value = null
     selectedFile.value = null
     expandedDirs.value = new Set()
+    // 用户导入代码区的瞬间展开目录树，便于确认导入内容；之后可手动收起。
+    isTreeExpanded.value = true
     emitWorkspaceState()
     await loadWorkspaceTree()
   } catch (error) {
@@ -818,6 +1027,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   handleTabDeactivated()
+  stopPreviewRenderLoops()
   if (workspaceRefreshTimer !== null) {
     window.clearTimeout(workspaceRefreshTimer)
     workspaceRefreshTimer = null
@@ -840,13 +1050,6 @@ defineExpose({
 <template>
   <div class="folder-workspace-tab">
     <div class="workspace-shell">
-      <header class="workspace-header">
-        <div class="workspace-heading">
-          <h3 class="workspace-title">{{ $t('chatUi.workspaceTabFolder') }}</h3>
-          <p class="workspace-subtitle" :title="currentRootPath || undefined">{{ currentRootName || $t('chatUi.noFolderSelected') }}</p>
-        </div>
-      </header>
-
       <div v-if="!currentRootPath" class="workspace-empty">
         <div class="workspace-empty-title">{{ $t('chatUi.noWorkspaceSelected') }}</div>
         <button class="choose-folder-btn" type="button" :disabled="isPickingFolder" @click="chooseFolder">
@@ -855,9 +1058,11 @@ defineExpose({
         <div v-if="workspaceError" class="workspace-error">{{ workspaceError }}</div>
       </div>
 
-      <div v-else class="workspace-body">
+      <div v-else class="workspace-body" :class="{ 'tree-collapsed': !isTreeExpanded }">
         <aside class="workspace-tree">
-          <div class="tree-root" :title="currentRootPath || undefined">{{ currentRootName }}</div>
+          <div class="tree-root" :title="currentRootPath || undefined">
+            <span class="tree-root-name">{{ currentRootName }}</span>
+          </div>
           <div class="file-search">
             <input
               ref="fileSearchInputRef"
@@ -911,17 +1116,35 @@ defineExpose({
         </aside>
 
         <main class="workspace-preview">
-          <template v-if="selectedFile">
-            <div class="preview-header">
-              <div class="preview-path" :title="selectedFile.filePath">{{ selectedFile.filePath }}</div>
-              <div class="preview-meta">
-                <span>{{ formatFileSize(selectedFile.size) }}</span>
-                <span v-if="lineCount > 0">{{ $t('chatUi.lineCount', { count: lineCount }) }}</span>
-                <span v-if="selectedFile.truncated">{{ $t('chatUi.contentTruncated') }}</span>
-              </div>
+          <div class="preview-header">
+            <button
+              class="workspace-icon-btn tree-toggle"
+              :class="{ active: isTreeExpanded }"
+              type="button"
+              :title="isTreeExpanded ? $t('chatUi.collapseFileTree') : $t('chatUi.expandFileTree')"
+              :aria-expanded="isTreeExpanded"
+              @click="toggleFileTree"
+            >
+              <SidebarIcon name="panel" :size="14" />
+            </button>
+            <div class="preview-path">
+              <span v-if="currentRootName" class="path-root" :title="currentRootPath || undefined">{{ currentRootName }}</span>
+              <span v-if="currentRootName && selectedFile" class="path-sep" aria-hidden="true">›</span>
+              <span v-if="selectedFile" class="path-file" :title="selectedFile.filePath">{{ selectedFile.filePath }}</span>
             </div>
+            <div v-if="selectedFile" class="preview-meta">
+              <span>{{ formatFileSize(selectedFile.size) }}</span>
+              <span v-if="lineCount > 0">{{ $t('chatUi.lineCount', { count: lineCount }) }}</span>
+              <span v-if="selectedFile.truncated">{{ $t('chatUi.contentTruncated') }}</span>
+            </div>
+          </div>
 
-            <div v-if="selectedFile.isMarkdown" class="markdown-preview markdown-body" v-html="renderedMarkdown"></div>
+            <template v-if="selectedFile">
+              <template v-if="selectedFile.isMarkdown">
+                <div class="markdown-preview markdown-body">
+                  <div v-for="(html, index) in markdownChunks" :key="index" class="markdown-chunk" v-html="html"></div>
+                </div>
+              </template>
             <div
               v-else
               ref="codePreviewRef"
@@ -930,11 +1153,12 @@ defineExpose({
               @mouseup="handleCodeTextSelection"
               @touchend="handleCodeTextSelection"
             >
-              <div ref="codeScrollRef" class="code-scroll">
+              <div ref="codeScrollRef" class="code-scroll" :style="{ height: `${virtualScrollHeight}px` }">
                 <div
-                  v-for="line in codeLines"
+                  v-for="line in renderedRows"
                   :key="line.number"
-                  class="code-line"
+                  class="code-line virtual-row"
+                  :style="{ top: `${line.top}px` }"
                   :class="{ selected: isCodeLineSelected(line.number), pending: codeSelectionStart === line.number && codeSelectionEnd === null }"
                   :data-line-number="line.number"
                 >
@@ -994,43 +1218,6 @@ defineExpose({
   flex-direction: column;
 }
 
-.workspace-header {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 9px 14px;
-  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
-}
-
-.workspace-heading {
-  min-width: 0;
-}
-
-.workspace-title {
-  margin: 0;
-  color: var(--app-text-strong);
-  font-size: 0.92rem;
-  font-weight: 800;
-}
-
-.workspace-subtitle {
-  margin: 3px 0 0;
-  color: var(--app-text-muted);
-  font-size: 0.74rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.workspace-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-}
-
 .workspace-icon-btn {
   width: 32px;
   height: 32px;
@@ -1048,6 +1235,13 @@ defineExpose({
   color: var(--app-text-strong);
   border-color: color-mix(in srgb, var(--app-accent) 36%, var(--app-border));
   background: color-mix(in srgb, var(--app-accent-soft) 38%, var(--app-panel));
+}
+
+/* 左上角目录树开关：展开态用强调色标出当前树可见。 */
+.workspace-icon-btn.tree-toggle.active {
+  color: var(--app-accent-strong, var(--app-accent));
+  border-color: color-mix(in srgb, var(--app-accent) 48%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent-soft) 55%, var(--app-panel));
 }
 
 .workspace-icon-btn:disabled {
@@ -1098,6 +1292,9 @@ defineExpose({
   flex: 1;
   min-height: 0;
   display: flex;
+  /* 收起时目录树整列滑出左侧，需要裁掉越界部分。 */
+  position: relative;
+  overflow: hidden;
 }
 
 .workspace-tree {
@@ -1108,15 +1305,33 @@ defineExpose({
   flex-direction: column;
   border-right: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
   background: color-mix(in srgb, var(--app-panel) 74%, transparent);
+  transition: margin-left 0.22s ease, opacity 0.18s ease, visibility 0s linear 0s;
+}
+
+/* 默认收起（tree-collapsed 由左上角开关控制）：代码查看只占满整行，
+   目录树滑出视口左侧并从可聚焦树里移除；再点开关滑回。 */
+.tree-collapsed .workspace-tree {
+  margin-left: -281px;
+  opacity: 0;
+  visibility: hidden;
+  transition: margin-left 0.22s ease, opacity 0.18s ease, visibility 0s linear 0.22s;
 }
 
 .tree-root {
   flex: 0 0 auto;
-  padding: 10px 12px;
+  /* 与右侧预览头同高(45px)且垂直居中：目录树展开时两侧的项目名行水平对齐。 */
+  min-height: 45px;
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
   border-bottom: 1px solid color-mix(in srgb, var(--app-border) 72%, transparent);
   color: var(--app-text-strong);
   font-size: 0.78rem;
   font-weight: 800;
+}
+
+.tree-root-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1365,20 +1580,44 @@ defineExpose({
   min-height: 45px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 12px;
+  gap: 10px;
+  padding: 6px 12px 6px 8px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.16);
   color: #dbeafe;
 }
 
 .preview-path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+/* 项目/文件夹名作为面包屑第一级，收起目录树时也始终可见。 */
+.path-root {
+  flex-shrink: 0;
+  max-width: 36%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--app-text-muted);
+}
+
+.path-sep {
+  flex-shrink: 0;
+  color: var(--app-text-faint);
+}
+
+.path-file {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.78rem;
 }
 
 .preview-meta {
@@ -1490,16 +1729,24 @@ defineExpose({
 }
 
 .code-scroll {
+  /* 虚拟滚动的定位上下文：高度 = 总行数 × 行高（:style 绑定），
+     可视区之外的行不存在于 DOM。 */
+  position: relative;
   display: inline-block;
   width: max-content;
   min-width: 100%;
   margin: 0;
-  padding: 10px 0 16px;
+  padding: 0;
   color: #e2e8f0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
   white-space: pre;
+}
+
+.virtual-row {
+  position: absolute;
+  left: 0;
 }
 
 .code-line {

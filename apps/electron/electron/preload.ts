@@ -4,6 +4,7 @@ import type { ConversationMetadataPatch } from '../src/shared/conversation-metad
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, BrowserPageContextMenuPayload, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
+import type { WorkspaceTabControlRequestEnvelope, WorkspaceTabControlResponseEnvelope } from '../src/shared/workspace-control-types.js'
 import type {
   TerminalDataEvent,
   TerminalExitEvent,
@@ -15,7 +16,7 @@ import type {
 import type { ActiveTerminalContext } from '../src/shared/terminal-types.js'
 import type { ImageLibraryItem, ImageLibraryPage, ImageLibraryQuery, ImageLibraryData, ImageLibraryFolderCard, ImageStudioGenerateRequest, ImageStudioGenerateResponse, ImageStudioTask } from '../src/shared/image-studio-types.js'
 import type { UsageRecord, UsageSummary } from '../src/main/settings/usage-store.js'
-import type { ConversationFolderWorkspaceState, FolderWorkspaceChangeEvent, FolderWorkspaceListResult, FolderWorkspacePickResult, FolderWorkspaceReadResult } from '../src/shared/folder-workspace-types.js'
+import type { ActiveCodeViewContext, ConversationFolderWorkspaceState, FolderWorkspaceChangeEvent, FolderWorkspaceListResult, FolderWorkspacePickResult, FolderWorkspaceReadResult } from '../src/shared/folder-workspace-types.js'
 import type { LongTermGoalChangeSet, LongTermGoalDefinition, LongTermGoalIntervention, LongTermGoalMessageResult, LongTermGoalRun, LongTermGoalSaveInput, LongTermGoalSnapshot, LongTermGoalStreamEvent } from '../src/shared/long-term-goal-types.js'
 import type { DocumentEditExportRequest, DocumentEditExportResult, DocumentEditImagePickResult, DocumentEditSourceState } from '../src/shared/document-edit-types.js'
 import type { DailySuggestionPreferences, DailySuggestionSnapshot } from '../src/shared/daily-suggestion-types.js'
@@ -523,7 +524,7 @@ interface SystemStatusSnapshot {
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext) => Promise<{ ok: boolean }>
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
@@ -531,6 +532,8 @@ export interface ElectronAPI {
   onPageAutomationRequest: (callback: (payload: PageAutomationRequestEnvelope) => void) => () => void
   onBrowserPageContextMenu: (callback: (payload: BrowserPageContextMenuPayload) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
+  onWorkspaceTabControl: (callback: (payload: WorkspaceTabControlRequestEnvelope) => void) => () => void
+  resolveWorkspaceTabControl: (payload: WorkspaceTabControlResponseEnvelope) => void
   getAboutInfo: () => Promise<AppAboutInfo>
   getAppUpdateState: () => Promise<AppUpdateState>
   getAppUpdateConfig: () => Promise<AppUpdateConfig>
@@ -608,6 +611,9 @@ export interface ElectronAPI {
 
   // Projects
   listProjects: () => Promise<Array<Record<string, unknown>>>
+  listCustomProjects: () => Promise<Array<{ id: string; name: string; rootPath: string; createdAt: string }>>
+  addCustomProject: (rootPath: string, name?: string) => Promise<{ id: string; name: string; rootPath: string; createdAt: string } | null>
+  removeCustomProject: (id: string) => Promise<boolean>
   getProject: (projectId: string) => Promise<Record<string, unknown>>
   getFileTree: (projectId: string) => Promise<Array<Record<string, unknown>>>
   readFile: (projectId: string, filePath: string) => Promise<string>
@@ -823,7 +829,7 @@ export interface ElectronAPI {
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength, agentId, groupId, channelBindingId, targetProjectId, activePageContext, folderWorkspaceRoot),
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot, computerUseEnabled, activeTerminalContext),
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot, computerUseEnabled, activeTerminalContext, activeCodeContext),
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => ipcRenderer.invoke('ai:updateSessionAuthMode', sessionId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => ipcRenderer.invoke('ai:groupInject', sessionId, groupId, content, targetAgentIds),
@@ -982,10 +988,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('browser:openUrlInDock', handler)
     return () => { ipcRenderer.removeListener('browser:openUrlInDock', handler) }
   },
-  onWorkspaceOpenTab: (callback: (event: { kind: string; payload?: Record<string, unknown> }) => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, event: { kind: string; payload?: Record<string, unknown> }) => callback(event)
+  onWorkspaceOpenTab: (callback: (event: { kind: string; payload?: Record<string, unknown>; conversationId?: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: { kind: string; payload?: Record<string, unknown>; conversationId?: string }) => callback(event)
     ipcRenderer.on('workspace:openTab', handler)
     return () => { ipcRenderer.removeListener('workspace:openTab', handler) }
+  },
+  onWorkspaceTabControl: (callback: (payload: WorkspaceTabControlRequestEnvelope) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: WorkspaceTabControlRequestEnvelope) => callback(payload)
+    ipcRenderer.on('workspace:tabControl', handler)
+    return () => { ipcRenderer.removeListener('workspace:tabControl', handler) }
+  },
+  resolveWorkspaceTabControl: (payload: WorkspaceTabControlResponseEnvelope) => {
+    ipcRenderer.send('workspace:tabControlResult', payload)
   },
   onWorkspaceDocumentDraft: (callback: (payload: Record<string, unknown>) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, payload: Record<string, unknown>) => callback(payload)
@@ -1231,6 +1245,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pickFolderWorkspace: () => ipcRenderer.invoke('folderWorkspace:pickFolder'),
   listFolderWorkspaceFiles: (rootPath: string) => ipcRenderer.invoke('folderWorkspace:listFiles', rootPath),
   readFolderWorkspaceFile: (rootPath: string, filePath: string) => ipcRenderer.invoke('folderWorkspace:readFile', rootPath, filePath),
+
+  // Sidebar project folders (user-registered directories)
+  listCustomProjects: () => ipcRenderer.invoke('sidebarProjects:listCustom'),
+  addCustomProject: (rootPath: string, name?: string) => ipcRenderer.invoke('sidebarProjects:addCustom', rootPath, name),
+  removeCustomProject: (id: string) => ipcRenderer.invoke('sidebarProjects:removeCustom', id),
   onFolderWorkspaceChanged: (callback: (event: FolderWorkspaceChangeEvent) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, event: FolderWorkspaceChangeEvent) => callback(event)
     ipcRenderer.on('folderWorkspace:changed', handler)

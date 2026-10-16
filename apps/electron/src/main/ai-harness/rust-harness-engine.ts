@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
 import { USER_ABORT_MESSAGE } from './abort-utils.js'
 import type { UsageStore } from '../settings/usage-store.js'
 import type { ChatContentPart, ChatMessage, MessageContent, ToolDefinition } from './contracts.js'
@@ -198,6 +200,10 @@ export class RustHarnessEngine implements AIHarness {
     let streamError: Error | null = null
     let streamWasAborted = false
     let nativeSideEffects = Promise.resolve()
+    // Write-style tool results carry only a relative path; the matching
+    // tool_call frame supplies the args (e.g. project_id) needed to resolve
+    // it to an absolute path for the clickable written-file card.
+    const pendingToolArgs = new Map<string, Record<string, unknown>>()
     const providerCallId = options?.aiLogger?.logProviderCallStart({
       stream: true,
       model: effectiveConfig.model || 'default',
@@ -230,6 +236,12 @@ export class RustHarnessEngine implements AIHarness {
         assistantContent = checkpointAssistantContent
       }
       if (frame.kind === 'usage') this.recordUsage(frame, effectiveConfig)
+      if (frame.kind === 'tool_call' && typeof frame.call_id === 'string') {
+        const args = frame.args
+        if (args && typeof args === 'object' && !Array.isArray(args)) {
+          pendingToolArgs.set(frame.call_id, args as Record<string, unknown>)
+        }
+      }
       if (frame.kind === 'tool_result' && this.isNativeToolResult(frame, customTools)) {
         nativeSideEffects = nativeSideEffects
           .then(async () => await this.handleNativeToolResult(frame, runOptions))
@@ -248,6 +260,23 @@ export class RustHarnessEngine implements AIHarness {
         for (const event of webToolResultEvents(stringValue(frame.name), frame.content)) {
           emit(event)
         }
+        // Successful write-style results surface as the same file_preview
+        // events the renderer renders as a clickable written-file card. They
+        // must be emitted before the tool_end event below so the card
+        // attaches to the still-running tool run.
+        const callId = typeof frame.call_id === 'string' ? frame.call_id : ''
+        if (frame.isError !== true) {
+          for (const event of fileWritePreviewEvents(
+            stringValue(frame.name),
+            frame.content,
+            runOptions,
+            this.client.workspaceDir,
+            callId ? pendingToolArgs.get(callId) : undefined
+          )) {
+            emit(event)
+          }
+        }
+        if (callId) pendingToolArgs.delete(callId)
       }
       if (frame.kind === 'error') {
         streamError = new Error(String(frame.message || 'Rust harness error'))
@@ -609,6 +638,79 @@ export function webToolResultEvents (toolName: string, content: unknown): Stream
   return events
 }
 
+const FILE_WRITE_PREVIEW_TOOL_NAMES = new Set([
+  'write_file',
+  'edit_file',
+  'patch_file',
+  'doc_write',
+  'local_write_file',
+  'write_workspace_file',
+  'edit_workspace_file',
+  'patch_workspace_file',
+  'write_project_file',
+  'edit_project_file'
+])
+
+/** Write tools whose relative result paths resolve against the conversation's folder workspace root. */
+const FOLDER_WORKSPACE_WRITE_TOOLS = new Set([
+  'write_workspace_file',
+  'edit_workspace_file',
+  'patch_workspace_file'
+])
+
+/**
+ * Native write tools complete atomically inside Rust, so there is no streaming
+ * write phase. Map each successful write-style result onto the same
+ * file_preview event pair the renderer renders as a written-file card. The
+ * result path is resolved to absolute form — probing the roots the tool could
+ * have written to — so the card stays clickable after the conversation
+ * reloads. Exported for tests.
+ */
+export function fileWritePreviewEvents (
+  toolName: string,
+  content: unknown,
+  context: AIRequestOptions,
+  harnessWorkspace: string,
+  toolArgs?: Record<string, unknown>
+): StreamEvent[] {
+  if (!FILE_WRITE_PREVIEW_TOOL_NAMES.has(toolName)) return []
+  const parsed = parseToolResult(content)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return []
+  const record = parsed as Record<string, unknown>
+  const rawPath = typeof record.file_path === 'string' && record.file_path.trim()
+    ? record.file_path.trim()
+    : typeof record.path === 'string' ? record.path.trim() : ''
+  if (!rawPath) return []
+
+  const workspaceRoot = typeof context.workspaceRoot === 'string' ? context.workspaceRoot.trim() : ''
+  const projectId = typeof toolArgs?.project_id === 'string' ? toolArgs.project_id.trim() : ''
+  const candidateRoots = FOLDER_WORKSPACE_WRITE_TOOLS.has(toolName)
+    ? [workspaceRoot, harnessWorkspace]
+    : toolName === 'write_project_file' || toolName === 'edit_project_file'
+      ? [projectId ? path.join(harnessWorkspace, projectId) : '', workspaceRoot, harnessWorkspace]
+      : [harnessWorkspace, workspaceRoot]
+  const filePath = resolveWrittenFilePath(rawPath, candidateRoots)
+  return [
+    { type: 'file_preview_start', filePath },
+    { type: 'file_preview_end', filePath, lineCount: 0, added: 0, removed: 0 }
+  ]
+}
+
+function resolveWrittenFilePath (rawPath: string, candidateRoots: string[]): string {
+  if (path.isAbsolute(rawPath)) return path.normalize(rawPath)
+  let fallback = ''
+  for (const root of candidateRoots) {
+    const trimmedRoot = root.trim()
+    if (!trimmedRoot) continue
+    const joined = path.join(trimmedRoot, rawPath)
+    if (!fallback) fallback = joined
+    // The file was just written, so the candidate root that already contains
+    // it is the one the tool actually used.
+    if (fs.existsSync(joined)) return joined
+  }
+  return fallback || rawPath
+}
+
 function positiveInteger (value: unknown): number {
   const number = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0
@@ -657,7 +759,13 @@ function frameToStreamEvent (frame: RustEventFrame, assistantContent: MessageCon
     case 'tool_call':
       return { type: 'tool_start', name: typeof frame.name === 'string' ? frame.name : 'tool' }
     case 'tool_result':
-      return { type: 'tool_end', name: typeof frame.name === 'string' ? frame.name : 'tool' }
+      // Native tool failures stay silent otherwise: the renderer would keep
+      // showing the run as completed even though the model saw an error.
+      return {
+        type: 'tool_end',
+        name: typeof frame.name === 'string' ? frame.name : 'tool',
+        ...(frame.isError === true ? { error: typeof frame.content === 'string' ? frame.content : 'tool failed' } : {})
+      }
     case 'usage':
       return {
         type: 'cost_update',

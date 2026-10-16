@@ -10,6 +10,10 @@ type AppUpdateState = import('./shared/app-update-types.js').AppUpdateState
 type AppUpdateWebsiteKind = import('./shared/app-update-types.js').AppUpdateWebsiteKind
 type PageAutomationRequestEnvelope = import('./shared/page-automation-types.js').PageAutomationRequestEnvelope
 type PageAutomationResponseEnvelope = import('./shared/page-automation-types.js').PageAutomationResponseEnvelope
+type WorkspaceTabControlRequest = import('./shared/workspace-control-types.js').WorkspaceTabControlRequest
+type WorkspaceTabControlRequestEnvelope = import('./shared/workspace-control-types.js').WorkspaceTabControlRequestEnvelope
+type WorkspaceTabControlResponseEnvelope = import('./shared/workspace-control-types.js').WorkspaceTabControlResponseEnvelope
+type WorkspaceTabSummary = import('./shared/workspace-control-types.js').WorkspaceTabSummary
 type BrowserPageContextMenuPayload = import('./shared/page-automation-types.js').BrowserPageContextMenuPayload
 type TerminalSessionCreateOptions = import('./shared/terminal-types.js').TerminalSessionCreateOptions
 type TerminalSessionInfo = import('./shared/terminal-types.js').TerminalSessionInfo
@@ -18,6 +22,7 @@ type TerminalSnapshotRequest = import('./shared/terminal-types.js').TerminalSnap
 type TerminalDataEvent = import('./shared/terminal-types.js').TerminalDataEvent
 type TerminalExitEvent = import('./shared/terminal-types.js').TerminalExitEvent
 type ActiveTerminalContext = import('./shared/terminal-types.js').ActiveTerminalContext
+type ActiveCodeViewContext = import('./shared/folder-workspace-types.js').ActiveCodeViewContext
 type ImageStudioGenerateRequest = import('./shared/image-studio-types.js').ImageStudioGenerateRequest
 type ImageStudioGenerateResponse = import('./shared/image-studio-types.js').ImageStudioGenerateResponse
 type ImageStudioTask = import('./shared/image-studio-types.js').ImageStudioTask
@@ -107,11 +112,14 @@ interface ConversationSummary {
   reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
   temperature?: number
   targetProjectId?: string
+  projectId?: string
   agentId?: string
   groupId?: string
   channelBindingId?: string
   folderWorkspace?: ConversationFolderWorkspaceState
   workspace?: ConversationWorkspaceState
+  workspaceRootPath?: string
+  workspaceRootName?: string
   forkedFromConversationId?: string
   forkedFromMessageId?: string
   rootConversationId?: string
@@ -149,6 +157,8 @@ interface ConversationWorkspaceState {
 interface WorkspaceOpenTabEvent {
   kind: string
   payload?: Record<string, unknown>
+  /** Chat conversation the requesting AI run belongs to (workspace isolation). */
+  conversationId?: string
 }
 
 type AgentReasoningStrength = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
@@ -1006,6 +1016,8 @@ interface ScheduledTaskRunReport {
   prompt: string
   summary: string
   resultText?: string
+  /** 完整 assistant 输出（含正文交付物）；仅 Rust 调度执行的报告携带。 */
+  outputText?: string
   thinkingText?: string
   error?: string
   progress: ScheduledTaskProgressEntry[]
@@ -1116,7 +1128,7 @@ interface DocumentFileChangedDTO {
 interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext) => Promise<{ ok: boolean }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
@@ -1226,6 +1238,8 @@ interface ElectronAPI {
   onProjectOpenInShell: (callback: (event: { projectId: string; mode?: 'embed' | 'window' }) => void) => () => void
   onBrowserOpenUrlInDock: (callback: (event: { url: string; webContentsId?: number }) => void) => () => void
   onWorkspaceOpenTab: (callback: (event: WorkspaceOpenTabEvent) => void) => () => void
+  onWorkspaceTabControl: (callback: (payload: WorkspaceTabControlRequestEnvelope) => void) => () => void
+  resolveWorkspaceTabControl: (payload: WorkspaceTabControlResponseEnvelope) => void
   getSystemStatus: () => Promise<SystemStatusSnapshot>
   getComputerUsePermissions: () => Promise<import('./shared/computer-use-permissions').ComputerUsePermissionStatus>
   requestComputerUsePermissions: (target?: import('./shared/computer-use-permissions').ComputerUsePermissionTarget) => Promise<{ granted: boolean }>
@@ -1381,6 +1395,9 @@ interface ElectronAPI {
 
   // Folder workspace preview
   pickFolderWorkspace: () => Promise<FolderWorkspacePickResult>
+  listCustomProjects: () => Promise<Array<{ id: string; name: string; rootPath: string; createdAt: string }>>
+  addCustomProject: (rootPath: string, name?: string) => Promise<{ id: string; name: string; rootPath: string; createdAt: string } | null>
+  removeCustomProject: (id: string) => Promise<boolean>
   listFolderWorkspaceFiles: (rootPath: string) => Promise<FolderWorkspaceListResult>
   readFolderWorkspaceFile: (rootPath: string, filePath: string) => Promise<FolderWorkspaceReadResult>
   onFolderWorkspaceChanged: (callback: (event: FolderWorkspaceChangeEvent) => void) => () => void

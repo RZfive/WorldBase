@@ -31,6 +31,7 @@ import type { LongTermGoalService } from '../../src/main/long-term-goals/long-te
 import type { DailySuggestionStore } from '../../src/main/settings/daily-suggestion-store.js'
 import type { DailySuggestionService } from '../../src/main/suggestions/daily-suggestion-service.js'
 import type { PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
+import type { WorkspaceTabControlResult } from '../../src/shared/workspace-control-types.js'
 import { t } from '../../src/main/i18n/main-i18n.js'
 
 export type WindowBounds = ReturnType<BrowserWindow['getBounds']>
@@ -42,6 +43,12 @@ export type EnsureWindowWidthOptions = {
 
 export type PendingPageAutomationRequest = {
   resolve: (result: PageAutomationRendererResult) => void
+  reject: (error: Error) => void
+  timeout: ReturnType<typeof setTimeout>
+}
+
+export type PendingWorkspaceTabControlRequest = {
+  resolve: (result: WorkspaceTabControlResult) => void
   reject: (error: Error) => void
   timeout: ReturnType<typeof setTimeout>
 }
@@ -60,6 +67,7 @@ export const projectWindows = new Map<string, BrowserWindow>()
 export const activeChatSessions = new Map<string, ActiveChatSession>()
 export const aiRequestWindowStorage = new AsyncLocalStorage<BrowserWindow | null>()
 export const pendingPageAutomationRequests = new Map<string, PendingPageAutomationRequest>()
+export const pendingWorkspaceTabControlRequests = new Map<string, PendingWorkspaceTabControlRequest>()
 export const activeWindowWidthAnimations = new Map<number, ActiveWindowWidthAnimation>()
 
 export const mainState = {
@@ -93,6 +101,7 @@ export const mainState = {
   } as MemoryCompactionStatus,
   scheduledTaskStore: null as ScheduledTaskStore | null,
   scheduledTaskService: null as ScheduledTaskService | null,
+  customProjectStore: null as import('../../src/main/settings/custom-project-store.js').CustomProjectStore | null,
   longTermGoalStore: null as LongTermGoalStore | null,
   longTermGoalService: null as LongTermGoalService | null,
   dailySuggestionStore: null as DailySuggestionStore | null,

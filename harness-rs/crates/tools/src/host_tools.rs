@@ -660,7 +660,7 @@ impl Tool for WriteActiveTerminalTool {
         "write_active_terminal"
     }
     fn description(&self) -> &str {
-        "向用户当前激活的工作区终端写入内容。execute=true 时作为命令执行（追加回车），wait_ms 后返回增量输出。命令会实时显示在用户终端里。"
+        "向用户当前激活的工作区终端写入内容。text 非空时逐字输入（execute=true 追加回车作为命令执行）；text 为空或缺省时不输入任何内容，仅等待 wait_ms 后返回这段时间的增量输出——轮询长时间运行的命令请用空 text 等待，不要为等待而向终端输入占位字符。"
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -668,22 +668,21 @@ impl Tool for WriteActiveTerminalTool {
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": "Text to type into the terminal; with execute=true a command line."
+                    "description": "Text to type into the terminal; with execute=true a command line. Leave empty to type nothing and just wait for new output (poll a long-running command); to send a bare Enter on an interactive prompt, pass execute=false with a single newline as text."
                 },
                 "execute": {
                     "type": "boolean",
-                    "description": "Append a carriage return so the shell runs the line (default true)."
+                    "description": "Append a carriage return so the shell runs the line (default true). Ignored when text is empty."
                 },
                 "wait_ms": {
                     "type": "integer",
-                    "description": "Wait this long after writing, then return the incremental output (0-10000)."
+                    "description": "Wait this long after writing, then return the incremental output (0-120000). With empty text this is a pure wait-and-read poll."
                 },
                 "max_chars": {
                     "type": "integer",
                     "description": "Clamp the returned incremental output to this many characters (tail)."
                 }
-            },
-            "required": ["text"]
+            }
         })
     }
     fn domain(&self) -> &str {
@@ -696,22 +695,23 @@ impl Tool for WriteActiveTerminalTool {
         true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let text = input
-            .get("text")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("text must be a string"))?;
-        anyhow::ensure!(
-            !text.is_empty(),
-            "text must not be empty"
-        );
+        let text = match input.get("text") {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(text)) => text.clone(),
+            Some(_) => anyhow::bail!("text must be a string"),
+        };
+        // Empty text types nothing: the call becomes a wait-and-read poll for
+        // output of an already-running command — the only way to wait on the
+        // shared terminal without typing filler keys into it.
+        let wait_only = text.is_empty();
         let execute = input.get("execute").and_then(Value::as_bool).unwrap_or(true);
-        let wait_ms = optional_u64(&input, "wait_ms")?.unwrap_or(1_500).min(10_000);
+        let wait_ms = optional_u64(&input, "wait_ms")?.unwrap_or(1_500).min(120_000);
         let max_chars = optional_u64(&input, "max_chars")?;
         let stream = services.current_stream.lock().unwrap().clone();
         let mut payload = json!({
             "action": "write",
             "text": text,
-            "execute": execute,
+            "execute": if wait_only { false } else { execute },
             "waitMs": wait_ms
         });
         if let Some(max_chars) = max_chars {
@@ -728,6 +728,15 @@ impl Tool for WriteActiveTerminalTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_active_terminal_keeps_text_optional_for_wait_polls() {
+        let schema = WriteActiveTerminalTool.input_schema();
+        assert!(
+            schema.get("required").is_none(),
+            "text must stay optional so an empty-text wait-and-read poll is expressible"
+        );
+    }
 
     #[test]
     fn canonical_questions_are_normalized_as_one_batch() {

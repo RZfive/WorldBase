@@ -15,6 +15,7 @@ import { addSelectionQuote } from './selection-quote-state'
 import { sharedChatPanelState } from './shared-state'
 import { createChatSidebarState } from './sidebar-state'
 import { createChatWorkspaceOptionsState } from './workspace-options-state'
+import { buildActiveCodeViewContext } from '../../workspace/workspace-store'
 import type { ChatPanelProps } from './types'
 import type { MessageAnnotationLocator, MessageAnnotationTurn } from '../types'
 
@@ -192,9 +193,13 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     loadConversations,
     renameConversation,
     rememberConversationContext,
+    updateBackgroundConversationWorkspace,
     saveConversationMetadata,
     saveConversation: doSaveConversation,
-    setConversationTarget
+    setConversationTarget,
+    getConversationProject,
+    setConversationProject,
+    assignConversationProject
   } = createChatConversationStorage({
     t,
     formatAttachmentConversationTitle,
@@ -355,10 +360,12 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     deleteConversation,
     loadConversation,
     newConversation,
+    startBlankConversation,
     openAgentWorkspaceConversation,
     openGroupWorkspaceConversation,
     prepareLongTermGoalWorkspace,
     startOptimizationConversation,
+    startProjectConversation,
     updateFolderWorkspaceState,
     updateWorkspaceTabState
   } = createChatConversationNavigation({
@@ -396,6 +403,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     loadConversations,
     saveConversation: doSaveConversation,
     setConversationTarget,
+    setConversationProject,
     resetTransientStreamState
   })
 
@@ -445,6 +453,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     t,
     getActivePageContext: () => props.activePageContext,
     getActiveTerminalContext: () => props.activeTerminalContext,
+    getActiveCodeContext: () => buildActiveCodeViewContext(),
     messages,
     inputText,
     currentConversationId,
@@ -474,7 +483,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     unreadConversationIds,
     setConversationTarget,
     resolveAssistantSpeakerName,
-    saveConversation: (conversationId, chatMessages) => doSaveConversation(conversationId, chatMessages),
+    saveConversation: (conversationId, chatMessages, options) => doSaveConversation(conversationId, chatMessages, options),
     resetTransientStreamState,
     clearPendingAskUserRequests
   })
@@ -682,6 +691,13 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     addAttachments,
     addSelectionQuoteToInput,
     upsertAnnotationTurns,
-    removeMessageAnnotation
+    removeMessageAnnotation,
+    getConversationProject,
+    assignConversationProject,
+    startProjectConversation,
+    startBlankConversation,
+    startOptimizationConversation,
+    backgroundStreamMessages,
+    updateBackgroundConversationWorkspace
   }
 }

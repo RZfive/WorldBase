@@ -75,7 +75,25 @@ where
 
     let mut request_tasks = JoinSet::new();
     loop {
-        let Some(line) = lines.next_line().await.unwrap_or(None) else {
+        // A child process sharing the stdin open-file description (spawned
+        // with inherited stdio) can flip the descriptor to non-blocking mode;
+        // an momentarily empty pipe then reads as EAGAIN instead of blocking.
+        // That must never shut the harness down: back off and retry so the
+        // host's NDJSON control pipe stays alive.
+        let line = loop {
+            match lines.next_line().await {
+                Ok(line) => break line,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tracing::warn!(error = %error, "app-server stdin would-block; retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "app-server stdin read failed; shutting down");
+                    break None;
+                }
+            }
+        };
+        let Some(line) = line else {
             tracing::info!("input eof, app-server exiting");
             // Complete all requests that were accepted before EOF, then stop
             // the writer after it has drained their responses.

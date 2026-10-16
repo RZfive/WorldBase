@@ -161,6 +161,11 @@ pub struct ChatOptions {
     /// before adding any provider-specific reasoning parameter.
     pub enable_thinking: bool,
     pub reasoning_effort: Option<String>,
+    /// System-prompt tail that may legitimately differ between runs (e.g.
+    /// per-run memory recall). The `system` argument still carries the full
+    /// text including this tail; providers that support prompt caching keep
+    /// the tail outside the cached prefix so the stable head stays cacheable.
+    pub dynamic_system_suffix: Option<String>,
 }
 
 /// token 用量（对齐供应商回传）。

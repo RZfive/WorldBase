@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, provide } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { buildMessageBlocks, getContentExcerpt, getContentParts } from '../message-utils'
 import { copyTextToClipboard } from '../export-utils'
-import type { ChatMessage, GalleryImage, FilePreviewState, MessageAnnotation, MessageAnnotationLocator, QuestionAnnotationNavigationEntry, QuestionNavigationEntry } from '../types'
+import type { ChatMessage, ChatMessageBlock, GalleryImage, FilePreviewState, MessageAnnotation, MessageAnnotationLocator, QuestionAnnotationNavigationEntry, QuestionNavigationEntry } from '../types'
 import MessageRow from './MessageRow.vue'
 import ImageLightbox from '../media/ImageLightbox.vue'
 import MermaidPreviewDialog from '../media/MermaidPreviewDialog.vue'
@@ -25,6 +25,7 @@ const emit = defineEmits<{
   (e: 'respondAuth', requestId: string, approved: boolean): void
   (e: 'respondSudoPassword', requestId: string, password: string | null): void
   (e: 'openLink', url: string): void
+  (e: 'openFilePath', filePath: string): void
   (e: 'requestEditMessage', messageId: string): void
   (e: 'forkMessage', messageId: string): void
   (e: 'submitEdit', payload: { messageId: string; text: string; mode: 'fork' | 'inplace' }): void
@@ -39,6 +40,23 @@ const messagesContainer = ref<HTMLElement | null>(null)
 const lightboxRef = ref<InstanceType<typeof ImageLightbox> | null>(null)
 const selectionToolbarRef = ref<HTMLElement | null>(null)
 const collapsedThinking = reactive<Record<string, boolean>>({})
+
+/**
+ * Absolute paths of every file written during this conversation, from the
+ * persisted file_preview blocks. Content blocks linkify mentions of exactly
+ * these paths — a mention is only clickable when it points at a file the AI
+ * actually wrote here, never at arbitrary text.
+ */
+const writtenFilePaths = computed<string[]>(() => {
+  const paths = new Set<string>()
+  for (const message of props.messages) {
+    for (const block of (message.blocks || []) as ChatMessageBlock[]) {
+      if (block.kind === 'file_preview' && block.filePath.trim()) paths.add(block.filePath.trim())
+    }
+  }
+  return Array.from(paths)
+})
+provide('chatWrittenFilePaths', writtenFilePaths)
 const activeMermaidPreview = ref<{ code: string } | null>(null)
 const scrollTop = ref(0)
 const viewportVisible = ref(false)
@@ -186,18 +204,69 @@ function closeMermaidPreview (): void {
   activeMermaidPreview.value = null
 }
 
+/**
+ * href shapes treated as local file references: file:// URIs decode to a path,
+ * everything else must look like a path (no other scheme, no whitespace, a
+ * final segment with a short extension). Resolution against workspace roots
+ * happens in the container, which knows them.
+ */
+function getFileHrefPath (href: string): string | null {
+  if (/^file:\/\//i.test(href)) {
+    try {
+      const url = new URL(href)
+      const pathname = decodeURIComponent(url.pathname)
+      return url.host && url.host !== 'localhost' ? `//${url.host}${pathname}` : pathname
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+function isLikelyFilePath (href: string): boolean {
+  if (!href || href.startsWith('#')) return false
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return false
+  if (/\s/.test(href)) return false
+  const segments = href.split(/[\\/]/)
+  const last = segments[segments.length - 1]
+  return /\.[a-z0-9]{1,8}$/i.test(last)
+}
+
 function handleMessageLinkClick (event: MouseEvent): void {
   const target = event.target as HTMLElement | null
-  const link = target?.closest('a[href]') as HTMLAnchorElement | null
+  if (!target) return
+  // Written-file cards and linkified path mentions carry the absolute path
+  // they were written to, so they open without any root resolution.
+  const fileTrigger = target.closest('[data-file-path]') as HTMLElement | null
+  if (fileTrigger) {
+    const filePath = fileTrigger.getAttribute('data-file-path')?.trim()
+    if (filePath) {
+      event.preventDefault()
+      emit('openFilePath', filePath)
+    }
+    return
+  }
+  const link = target.closest('a[href]') as HTMLAnchorElement | null
   if (!link || (!link.closest('.markdown-body') && !link.hasAttribute('data-chat-external'))) return
   const href = link.getAttribute('href')?.trim()
-  if (!href || !/^https?:\/\//i.test(href)) return
-  try {
-    const url = new URL(href)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return
-    event.preventDefault()
-    emit('openLink', url.toString())
-  } catch { /* ignore malformed links */ }
+  if (!href) return
+  if (/^https?:\/\//i.test(href)) {
+    try {
+      const url = new URL(href)
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return
+      event.preventDefault()
+      emit('openLink', url.toString())
+    } catch { /* ignore malformed links */ }
+    return
+  }
+  // Markdown links to local files open in a workspace tab; without this the
+  // renderer would try to navigate the window to the raw path.
+  let decodedHref = href
+  try { decodedHref = decodeURIComponent(href) } catch { /* keep raw href */ }
+  const filePath = getFileHrefPath(decodedHref) ?? (isLikelyFilePath(decodedHref) ? decodedHref : '')
+  if (!filePath) return
+  event.preventDefault()
+  emit('openFilePath', filePath)
 }
 
 function hideSelectionCopyMenu (): void {
@@ -558,7 +627,13 @@ onMounted(() => {
   if (props.messages.length > 0) nextTick(scrollToBottom)
   if (typeof ResizeObserver !== 'undefined' && messagesContainer.value) {
     containerObserver = new ResizeObserver(() => {
+      // A composer attachment, textarea resize, or attention panel can change
+      // the viewport height without changing the message array. Preserve the
+      // user's bottom lock across that resize, otherwise the old scrollTop
+      // leaves the newest text stranded below the viewport.
+      const keepAtBottom = autoStickEnabled.value && nearBottom.value
       syncViewportState()
+      if (keepAtBottom) scrollToBottom()
     })
     containerObserver.observe(messagesContainer.value)
   }
@@ -694,6 +769,7 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  background: var(--app-chat-canvas);
 }
 
 .chat-messages {
@@ -706,11 +782,12 @@ onUnmounted(() => {
      list into a horizontal scroll container; `hidden` is the fallback. */
   overflow-x: hidden;
   overflow-x: clip;
-  padding: calc(17px + var(--chat-header-height, 0px)) var(--chat-message-gutter, 27px) calc(8px + var(--chat-input-overlap, 0px));
+  padding: 17px var(--chat-message-gutter, 27px) 24px;
   scrollbar-gutter: stable;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
   position: relative;
+  background: var(--app-chat-canvas);
 }
 
 .message-date-divider {
@@ -873,7 +950,7 @@ onUnmounted(() => {
 
 @media (max-width: 860px) {
   .chat-messages {
-    padding: calc(20px + var(--chat-header-height, 0px)) 16px calc(8px + var(--chat-input-overlap, 0px));
+    padding: 20px 16px 24px;
   }
 
   .empty-state-card {

@@ -468,6 +468,16 @@ impl Hub {
             .collect();
         ChatRunContext {
             active_skill_contents,
+            // 无人值守运行：执行报告只回传 finish_task 的 task_summary（及
+            // 汇总的 assistant 输出），没有用户实时阅读对话流。约束模型把
+            // 完整交付内容写进 task_summary，否则报告里只剩"已完成"概述。
+            system_prompt_sections: vec![
+                "## 无人值守定时任务\n\
+                 - 没有用户实时观看本次对话：用户唯一能看到的是 `finish_task` 工具 `task_summary` 参数的内容（执行报告的\"执行结果\"）。\n\
+                 - 任务要求的完整交付内容（报告/文章/答案正文）必须完整写入 `task_summary`；不要只在普通消息里输出正文，而在 `task_summary` 里只写\"已完成/执行过程\"之类的概述。\n\
+                 - 工具调用过程的叙述与验证说明只能作为 task_summary 的补充部分，不能替代交付内容本身。"
+                    .to_string(),
+            ],
             // Electron treats an empty saved selection as the
             // unrestricted default; a non-empty list narrows it.
             allowed_mcp_server_ids: Some(entry.selected_mcp_server_ids.clone()),

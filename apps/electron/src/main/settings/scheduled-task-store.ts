@@ -94,6 +94,8 @@ export interface ScheduledTaskRunReport {
   prompt: string
   summary: string
   resultText?: string
+  /** 完整 assistant 输出（含正文交付物）；仅 Rust 调度执行的报告携带。 */
+  outputText?: string
   thinkingText?: string
   error?: string
   progress: ScheduledTaskProgressEntry[]
@@ -346,6 +348,7 @@ function normalizeReport (value: unknown): ScheduledTaskRunReport | null {
     prompt,
     summary,
     resultText: normalizeString(record.resultText) || undefined,
+    outputText: normalizeString(record.outputText) || undefined,
     thinkingText: normalizeString(record.thinkingText) || undefined,
     error: normalizeString(record.error) || undefined,
     progress: Array.isArray(record.progress)

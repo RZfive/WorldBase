@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import './register-ts-hooks.mjs'
-import { RustHarnessEngine, planModeExitedAfterNativeResult, webToolResultEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
+import { RustHarnessEngine, planModeExitedAfterNativeResult, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
 import { ElectronToolRegistry } from '../src/main/ai-harness/electron-tool-registry.ts'
 import { MCPService } from '../src/main/mcp/mcp-service.ts'
 import { RustHarnessClient } from '../electron/main-process/rust-harness-client.ts'
@@ -393,8 +393,8 @@ test('all canonical Electron tools have an explicit execution owner', async () =
     runSubagents: async () => []
   }).getToolDefinitions()
   const canonicalNames = catalog.map(tool => tool.name).sort()
-  assert.equal(canonicalNames.length, 7)
-  assert.equal(new Set(canonicalNames).size, 7)
+  assert.equal(canonicalNames.length, 8)
+  assert.equal(new Set(canonicalNames).size, 8)
   // Rust-intrinsic plan controls and Rust-native image/workspace/project-file
   // tools never appear in the Node canonical catalog; Rust advertises and
   // executes them itself.
@@ -1675,4 +1675,68 @@ test('web fetch and batch fetch results re-emit as web_fetch_result events', () 
   assert.deepEqual(webToolResultEvents('web_fetch', 'upstream exploded'), [])
   assert.deepEqual(webToolResultEvents('read_file', JSON.stringify({ content: 'x' })), [])
   assert.deepEqual(webToolResultEvents('fetch_webpage', JSON.stringify({ results: ['nope'] })), [])
+})
+
+test('write tool results re-emit as file_preview events with absolute paths', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'file-preview-root-'))
+  const harnessWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'file-preview-harness-'))
+  try {
+    await fs.mkdir(path.join(root, 'reports'), { recursive: true })
+    await fs.writeFile(path.join(root, 'reports', 'report.md'), '# hi')
+    await fs.writeFile(path.join(harnessWorkspace, 'notes.json'), '{}')
+    await fs.mkdir(path.join(harnessWorkspace, 'alpha', 'docs'), { recursive: true })
+    await fs.writeFile(path.join(harnessWorkspace, 'alpha', 'docs', 'report.md'), 'x')
+
+    // Folder workspace write: the result path resolves against context.workspaceRoot.
+    const folderWrite = fileWritePreviewEvents(
+      'write_workspace_file',
+      JSON.stringify({ success: true, file_path: 'reports/report.md', bytes_written: 4 }),
+      { workspaceRoot: root },
+      harnessWorkspace
+    )
+    assert.equal(folderWrite.length, 2)
+    assert.equal(folderWrite[0].type, 'file_preview_start')
+    assert.equal(folderWrite[0].filePath, path.join(root, 'reports', 'report.md'))
+    assert.equal(folderWrite[1].type, 'file_preview_end')
+    assert.equal(folderWrite[1].filePath, folderWrite[0].filePath)
+
+    // Harness workspace write: write_file paths live under the harness root,
+    // so the folder-root candidate is skipped when the file is not there.
+    const harnessWrite = fileWritePreviewEvents(
+      'write_file',
+      JSON.stringify({ path: 'notes.json', bytes_written: 2 }),
+      { workspaceRoot: root },
+      harnessWorkspace
+    )
+    assert.equal(harnessWrite[0].filePath, path.join(harnessWorkspace, 'notes.json'))
+
+    // Project writes take the project root from the tool_call args.
+    const projectWrite = fileWritePreviewEvents(
+      'write_project_file',
+      JSON.stringify({ success: true, file_path: 'docs/report.md' }),
+      {},
+      harnessWorkspace,
+      { project_id: 'alpha' }
+    )
+    assert.equal(projectWrite[0].filePath, path.join(harnessWorkspace, 'alpha', 'docs', 'report.md'))
+
+    // local_write_file returns an absolute path already.
+    const local = fileWritePreviewEvents(
+      'local_write_file',
+      JSON.stringify({ success: true, file_path: path.join(root, 'notes.xlsx') }),
+      {},
+      harnessWorkspace
+    )
+    assert.equal(local[0].filePath, path.join(root, 'notes.xlsx'))
+
+    // Non-write tools, payloads without a path, and undecodable content stay
+    // silent so unknown shapes degrade to plain tool runs.
+    assert.deepEqual(fileWritePreviewEvents('read_file', JSON.stringify({ path: 'a.md' }), {}, harnessWorkspace), [])
+    assert.deepEqual(fileWritePreviewEvents('write_file', JSON.stringify({ bytes_written: 3 }), {}, harnessWorkspace), [])
+    assert.deepEqual(fileWritePreviewEvents('doc_write', 'not json', {}, harnessWorkspace), [])
+    assert.deepEqual(fileWritePreviewEvents('delete_workspace_file', JSON.stringify({ file_path: 'x' }), {}, harnessWorkspace), [])
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+    await fs.rm(harnessWorkspace, { recursive: true, force: true })
+  }
 })

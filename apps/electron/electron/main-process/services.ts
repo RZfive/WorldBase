@@ -35,6 +35,7 @@ import { DailySuggestionService, type SuggestionProjectContext } from '../../src
 import { getMainLocale } from '../../src/main/i18n/main-i18n.js'
 import type { AppUpdateState } from '../../src/shared/app-update-types.js'
 import type { BrowserAutomationAction, BrowserAutomationArticle, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../src/shared/page-automation-types.js'
+import type { WorkspaceTabControlRequest } from '../../src/shared/workspace-control-types.js'
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AgentDefinition, AgentGroupDefinition } from '../../src/shared/agent-workspace-types.js'
 import { mainState } from './state.js'
@@ -44,7 +45,7 @@ import { getSelectedExecutionEngine, startSelectedRustHarness } from './ai/selec
 
 import { generateImGatewayReply } from './ai/im-replies.js'
 import { normalizeRustAskUserQuestions, normalizeRustAskUserResponse } from './ai/rust-ask-user-contract.js'
-import { broadcastToAppWindows, getActiveAiRequestWindow, getProjectsDir, getSnapshotsDir, requestPageAutomationFromRenderer } from './windows.js'
+import { broadcastToAppWindows, getActiveAiRequestWindow, getProjectsDir, getSnapshotsDir, requestPageAutomationFromRenderer, requestWorkspaceTabControlFromRenderer } from './windows.js'
 import { migrateUserDataForRename } from './user-data-migration.js'
 import { RustHarnessClient, type JsonRpcResult, type RustHostRequest } from './rust-harness-client.js'
 import { buildDocumentRenderPreview, readDocumentRenderAsset } from '../../src/main/document-preview/document-render-service.js'
@@ -455,8 +456,40 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
     if (typeof request.payload.projectId === 'string' && request.payload.projectId.trim()) payload.projectId = request.payload.projectId
     if (win.isMinimized()) win.restore()
     win.focus()
-    win.webContents.send('workspace:openTab', { kind, ...(Object.keys(payload).length > 0 ? { payload } : {}) })
+    win.webContents.send('workspace:openTab', {
+      kind,
+      ...(Object.keys(payload).length > 0 ? { payload } : {}),
+      ...(typeof request.conversationId === 'string' && request.conversationId.trim()
+        ? { conversationId: request.conversationId.trim() }
+        : {})
+    })
     return { success: true, kind }
+  }
+
+  if (request.requestKind === 'manage_workspace_tabs') {
+    const win = getActiveAiRequestWindow()
+    if (!win || win.isDestroyed()) throw new Error('No active Electron window for manage_workspace_tabs')
+    const action = request.payload.action
+    if (action !== 'list' && action !== 'activate' && action !== 'close') {
+      throw new Error('manage_workspace_tabs requires action "list", "activate" or "close"')
+    }
+    const controlRequest: WorkspaceTabControlRequest = { action }
+    for (const key of ['tabId', 'kind', 'url', 'cwd', 'filePath'] as const) {
+      const value = request.payload[key]
+      if (typeof value === 'string' && value.trim()) controlRequest[key] = value.trim()
+    }
+    if (typeof request.conversationId === 'string' && request.conversationId.trim()) {
+      controlRequest.conversationId = request.conversationId.trim()
+    }
+    if (action !== 'list') {
+      if (!controlRequest.tabId && !controlRequest.kind) {
+        throw new Error(`manage_workspace_tabs ${action} requires tabId or kind`)
+      }
+      // Switching/closing is user-visible; bring the shell up like open_workspace_tab.
+      if (win.isMinimized()) win.restore()
+      win.focus()
+    }
+    return await requestWorkspaceTabControlFromRenderer(controlRequest) as unknown as JsonRpcResult
   }
 
   if (request.requestKind === 'document.openOriginal') {
@@ -510,6 +543,7 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
       taskName: String(request.payload.taskName || ''),
       conversationId: typeof request.payload.conversationId === 'string' ? request.payload.conversationId : undefined,
       resultText: typeof request.payload.resultText === 'string' ? request.payload.resultText : undefined,
+      outputText: typeof request.payload.outputText === 'string' ? request.payload.outputText : undefined,
       error: typeof request.payload.error === 'string' ? request.payload.error : undefined,
       trigger: request.payload.trigger === 'manual' ? 'manual' : 'schedule'
     })
@@ -546,8 +580,9 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
       }
     }
     if (action === 'write') {
+      // Empty text is a valid wait-only poll (type nothing, wait, return the
+      // incremental output); the Rust tool contract owns argument validation.
       const text = typeof request.payload.text === 'string' ? request.payload.text : ''
-      if (!text.trim()) throw new Error('terminal_automation write requires text')
       const result = await manager.writeActiveTerminal({
         text,
         execute: request.payload.execute !== false,
@@ -848,6 +883,7 @@ export async function initializeServices (): Promise<void> {
   // Memory is owned by the Rust harness: the shared agent-memory databases, the
   // embedding pipeline, and recall all live in harness-rs (single source).
   mainState.scheduledTaskStore = new ScheduledTaskStore(userDataPath)
+  mainState.customProjectStore = new (await import('../../src/main/settings/custom-project-store.js')).CustomProjectStore(userDataPath)
   mainState.longTermGoalStore = new LongTermGoalStore(userDataPath)
   mainState.dailySuggestionStore = new DailySuggestionStore(userDataPath)
   mainState.imageLibraryStore = new ImageLibraryStore(userDataPath)
@@ -897,6 +933,9 @@ export async function initializeServices (): Promise<void> {
     },
     interactWithActivePage: async (action: BrowserAutomationAction) => {
       return await requestPageAutomationFromRenderer<BrowserAutomationActionResult>({ type: 'action', action })
+    },
+    requestWorkspaceTabControl: async (request) => {
+      return await requestWorkspaceTabControlFromRenderer(request)
     },
     notifySkillsChanged: (event) => {
       broadcastToAppWindows('skills:changed', event)

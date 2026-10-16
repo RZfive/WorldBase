@@ -40,6 +40,12 @@ export interface ConversationSidebarItem {
   isPinned?: boolean
   /** Forked from another conversation (lineage badge ⑂). */
   isFork?: boolean
+  /** Launchpad 项目归属（项目聚合分组；time/folder 模式渲染归属徽标用）。 */
+  projectId?: string
+  updatedAt?: string
+  /** 会话工作过的代码目录（无 Launchpad 归属时代替分组）。 */
+  workspaceRootPath?: string
+  workspaceRootName?: string
 }
 
 export interface LongTermGoalSidebarItem {
@@ -94,5 +100,20 @@ export type ConversationSidebarEntry =
     visibleItems: ConversationSidebarItem[]
     previewItems: ConversationSidebarItem[]
   }
+  | {
+    kind: 'group'
+    /** Stable collapse-state key: `time:<bucket>` / `proj:<id>` / `ws:<rootPath>` / `ungrouped` / `deleted`. */
+    groupId: string
+    groupKind: 'time' | 'project' | 'workspace' | 'ungrouped' | 'deleted'
+    label: string
+    project?: { id: string; name: string; rootPath?: string } | null
+    /** Root path for workspace groups (`ws:`) — "＋" attaches it to new conversations. */
+    workspaceRoot?: string | null
+    items: ConversationSidebarItem[]
+    collapsed: boolean
+  }
+
+/** Sidebar grouping strategy (R1/R3/R6): switchable in the chat section header. */
+export type ConversationGroupingMode = 'time' | 'project' | 'folders'
 
 export type ConversationSidebarSectionKey = 'agents' | 'groups' | 'longTermGoals' | 'conversations'

@@ -8,7 +8,9 @@ import { PROJECT_PACKAGE_EXTENSION } from '../../src/main/project-fs/project-pac
 import { LAN_SERVER_PORT } from '../../src/main/constants.js'
 import { t } from '../../src/main/i18n/main-i18n.js'
 import type { ActivePageAutomationContext, PageAutomationRendererRequest, PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
+import type { ActiveCodeViewContext } from '../../src/shared/folder-workspace-types.js'
 import type { ActiveTerminalContext } from '../../src/shared/terminal-types.js'
+import type { WorkspaceTabControlRequest, WorkspaceTabControlResult } from '../../src/shared/workspace-control-types.js'
 import { forwardProjectRuntimeLog } from './project-runtime-log-routing.js'
 import {
   ALLOWED_WEBVIEW_POPUP_PROTOCOLS,
@@ -17,9 +19,10 @@ import {
   DEFAULT_WINDOW_EXPAND_ANIMATION_DURATION_MS,
   LOCAL_APP_HOSTS,
   PAGE_AUTOMATION_REQUEST_TIMEOUT_MS,
-  VIRTUAL_INTERFACE_NAME_PATTERN
+  VIRTUAL_INTERFACE_NAME_PATTERN,
+  WORKSPACE_TAB_CONTROL_TIMEOUT_MS
 } from './constants.js'
-import { aiRequestWindowStorage, activeWindowWidthAnimations, mainState, pendingPageAutomationRequests, projectWindows, type EnsureWindowWidthOptions, type WindowBounds } from './state.js'
+import { aiRequestWindowStorage, activeWindowWidthAnimations, mainState, pendingPageAutomationRequests, pendingWorkspaceTabControlRequests, projectWindows, type EnsureWindowWidthOptions, type WindowBounds } from './state.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const downloadHandlerSessions = new WeakSet<Session>()
@@ -434,6 +437,38 @@ export async function requestPageAutomationFromRenderer<T extends PageAutomation
   })
 }
 
+/**
+ * Round-trip for the AI `manage_workspace_tabs` tool: the tab state lives in
+ * the renderer's workspace store, so list/activate/close must be answered
+ * there (activate/close go through the chat shell to reuse the panel's
+ * window-width animation). Mirrors `requestPageAutomationFromRenderer`.
+ */
+export async function requestWorkspaceTabControlFromRenderer (request: WorkspaceTabControlRequest): Promise<WorkspaceTabControlResult> {
+  const targetWindow = getActiveAiRequestWindow()
+  if (!targetWindow || targetWindow.isDestroyed() || targetWindow.webContents.isDestroyed()) {
+    throw new Error('No active Electron window for workspace tab control')
+  }
+
+  return await new Promise<WorkspaceTabControlResult>((resolve, reject) => {
+    const requestId = randomUUID()
+    const timeout = setTimeout(() => {
+      pendingWorkspaceTabControlRequests.delete(requestId)
+      reject(new Error('Workspace tab control timed out in the renderer'))
+    }, WORKSPACE_TAB_CONTROL_TIMEOUT_MS)
+
+    pendingWorkspaceTabControlRequests.set(requestId, {
+      resolve: (result) => resolve(result),
+      reject,
+      timeout
+    })
+
+    targetWindow.webContents.send('workspace:tabControl', {
+      requestId,
+      request
+    })
+  })
+}
+
 export function buildActivePagePromptSection (activePageContext?: ActivePageAutomationContext | null): string | null {
   if (!activePageContext || activePageContext.kind !== 'browser') return null
 
@@ -472,6 +507,27 @@ export function buildWebCapabilityPolicySection (): string {
   ].join('\n')
 }
 
+export function buildActiveCodeViewPromptSection (activeCodeContext?: ActiveCodeViewContext | null): string | null {
+  if (!activeCodeContext || !activeCodeContext.filePath) return null
+
+  const lines = [
+    '## Currently viewed code file',
+    `- The user is viewing \`${activeCodeContext.filePath}\` in the folder workspace "${activeCodeContext.rootName}" (${activeCodeContext.rootPath}), ${activeCodeContext.lineCount} lines${activeCodeContext.truncated ? ' (viewer shows a truncated head)' : ''}.`,
+    '- Treat this file as the user\'s current focus: when the request is ambiguous about which file it refers to, prefer this one.',
+    '- Read it with read_workspace_file (relative path) to verify current content before discussing or editing it.'
+  ]
+  if (activeCodeContext.selection) {
+    const { start, end } = activeCodeContext.selection
+    const rangeLabel = start === end ? `line ${start}` : `lines ${start}-${end}`
+    lines.push(
+      `- The user currently checked/selected ${rangeLabel} in the viewer.`,
+      '- When the user says "selected code" / "勾选的部分" / "当前选中" / "选中的几行" without naming a file, they mean this exact range of this file. Read at least that range before answering.'
+    )
+  }
+
+  return lines.join('\n')
+}
+
 export function buildActiveTerminalPromptSection (activeTerminalContext?: ActiveTerminalContext | null): string | null {
   if (!activeTerminalContext) return null
 
@@ -481,6 +537,7 @@ export function buildActiveTerminalPromptSection (activeTerminalContext?: Active
     `- Terminal working directory: ${activeTerminalContext.cwd || '(home directory)'}`,
     '- This is a SHARED terminal: whatever you write appears in the user\'s terminal in real time, and everything the user types is visible to you.',
     '- Use read_active_terminal to inspect the terminal screen (cleaned text tail) before acting, and write_active_terminal with execute=true to run a command, then read the returned output.',
+    '- While a long-running command produces output, never type filler keys (".", spaces, empty lines) to pass time: call write_active_terminal with empty text and a wait_ms (up to 120000) to wait and get the new output in one step. To just press Enter on an interactive prompt, pass execute=false with a single newline as text.',
     '- Prefer dedicated tools (run_project_command, run_workspace_command, file tools) for non-interactive work; use the shared terminal only when the user asks you to operate it or for interactive programs (dev servers, REPLs, paged installers).',
     '- Commands executed here are approved by the user in real time; do not repeat a command whose output already shows it ran, and avoid destructive commands.'
   ]

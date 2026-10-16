@@ -259,7 +259,7 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
     })
   })
 
-  type ConversationPresentation = Pick<SidebarConversationItem, 'id' | 'title' | 'subtitle' | 'searchText' | 'icon' | 'isFork'>
+  type ConversationPresentation = Pick<SidebarConversationItem, 'id' | 'title' | 'subtitle' | 'searchText' | 'icon' | 'isFork' | 'projectId' | 'updatedAt' | 'workspaceRootPath' | 'workspaceRootName'>
   const presentations = new WeakMap<ConversationSummary, ComputedRef<ConversationPresentation>>()
 
   function getConversationPresentation (conversation: ConversationSummary): ConversationPresentation {
@@ -273,7 +273,11 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
           subtitle: conversation.previewText ? `${timestamp} · ${conversation.previewText}` : timestamp,
           searchText: buildSidebarSearchText([conversation.title, conversation.previewText, timestamp]),
           icon: resolveConversationIcon(conversation, groupsById.value, agentsById.value),
-          isFork: Boolean(conversation.forkedFromConversationId)
+          isFork: Boolean(conversation.forkedFromConversationId),
+          projectId: conversation.projectId || conversation.targetProjectId || undefined,
+          updatedAt: conversation.updatedAt,
+          workspaceRootPath: conversation.workspaceRootPath,
+          workspaceRootName: conversation.workspaceRootName
         }
       })
       presentations.set(conversation, presentation)

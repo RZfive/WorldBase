@@ -205,11 +205,13 @@ export class TerminalManager {
     if (!active) throw new Error('No active terminal session')
 
     const session = this.sessions.get(active.id)!
-    const text = request.execute ? `${request.text}\r` : request.text
+    // Empty text types nothing: the call is a wait-only poll for output of an
+    // already-running command (matches the Rust tool contract).
+    const text = request.text ? (request.execute ? `${request.text}\r` : request.text) : ''
     const before = session.scrollback.length
-    this.write(active.id, text)
+    if (text) this.write(active.id, text)
 
-    const waitMs = Math.min(10_000, Math.max(0, Math.floor(request.waitMs ?? 0)))
+    const waitMs = Math.min(120_000, Math.max(0, Math.floor(request.waitMs ?? 0)))
     if (waitMs === 0) {
       return { ok: true, sessionId: active.id, wrote: text.length }
     }

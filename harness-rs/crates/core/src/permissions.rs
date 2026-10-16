@@ -62,6 +62,12 @@ pub async fn check(
 ) -> bool {
     let configured = configured_rule_decision(hub, tool_name, args);
     let policy = configured.as_deref().unwrap_or(policy);
+    // An empty-text terminal write types nothing: it is a wait-and-read poll
+    // equivalent to read_active_terminal. Without an explicit user rule it
+    // needs no approval; a configured "ask"/"deny" rule still wins below.
+    let wait_only_write = configured.is_none()
+        && tool_name == "write_active_terminal"
+        && is_wait_only_terminal_write(args);
     match policy {
         "deny" => false,
         "allow" => true,
@@ -94,6 +100,7 @@ pub async fn check(
                 ask_host(hub, stream_id, tool_name, args, abort).await
             }
         },
+        _ if wait_only_write => true,
         _ => {
             if auto_approve {
                 return true;
@@ -156,6 +163,16 @@ fn is_command_tool(tool_name: &str) -> bool {
         tool_name,
         "run_project_command" | "run_workspace_command" | "local_run_command" | "execute_command"
     )
+}
+
+/// `write_active_terminal` with an empty `text` skips the PTY write entirely —
+/// the call waits and returns incremental output instead (see the tool's
+/// contract), so it is as read-only as `read_active_terminal`.
+fn is_wait_only_terminal_write(args: &Value) -> bool {
+    args.get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .is_empty()
 }
 
 fn classify_command_args(args: &Value) -> SafetyLevel {
@@ -502,10 +519,21 @@ pub fn request_payload(request: &PermissionRequest) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_command, classify_command_args, permission_rule_matches, summarize_args,
-        PermissionRule, SafetyLevel,
+        classify_command, classify_command_args, is_wait_only_terminal_write,
+        permission_rule_matches, summarize_args, PermissionRule, SafetyLevel,
     };
     use serde_json::json;
+
+    #[test]
+    fn wait_only_terminal_write_is_empty_text_only() {
+        assert!(is_wait_only_terminal_write(&json!({ "text": "" })));
+        assert!(is_wait_only_terminal_write(&json!({ "execute": false })));
+        assert!(is_wait_only_terminal_write(&json!({ "text": null })));
+        assert!(!is_wait_only_terminal_write(&json!({ "text": "ls" })));
+        // Any keystroke typed into the shared terminal stays behind approval.
+        assert!(!is_wait_only_terminal_write(&json!({ "text": "." })));
+        assert!(!is_wait_only_terminal_write(&json!({ "text": "\r" })));
+    }
 
     #[test]
     fn argument_summary_truncates_unicode_at_a_character_boundary() {

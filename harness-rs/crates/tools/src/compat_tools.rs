@@ -4558,6 +4558,102 @@ impl Tool for OpenWorkspaceTabTool {
     }
 }
 
+pub struct ManageWorkspaceTabsTool;
+#[async_trait]
+impl Tool for ManageWorkspaceTabsTool {
+    fn name(&self) -> &str {
+        "manage_workspace_tabs"
+    }
+    fn description(&self) -> &str {
+        "List, switch to, or close tabs in the user's right-side workspace panel. Switching tabs retargets your UI tools: after activating a terminal tab, read_active_terminal / write_active_terminal operate on that terminal; after activating a browser tab, read_current_page / interact_current_page operate on that page. Actions: \"list\" returns every open tab with id, kind, title and its url/cwd/file_path/project_id; \"activate\" focuses an existing tab (by tab_id from a previous list, or by kind plus url/cwd/file_path) and reveals the panel — it never creates tabs (use open_workspace_tab for that); \"close\" closes one tab (closing the last tab hides the panel, and closing a terminal tab kills its session)."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "activate", "close"],
+                    "description": "What to do with the workspace tabs."
+                },
+                "tab_id": {
+                    "type": "string",
+                    "description": "Exact tab id from a previous \"list\" result. Wins over kind/matchers."
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["folder", "document", "browser", "terminal", "project"],
+                    "description": "Tab kind filter; with url/cwd/file_path it locates one specific tab, without them it targets the first tab of that kind."
+                },
+                "url": {
+                    "type": "string",
+                    "description": "browser only: match an existing tab by URL (same rule as open dedupe)."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "terminal only: match an existing terminal tab by working directory."
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "document only: match an existing document tab by file path."
+                }
+            },
+            "required": ["action"]
+        })
+    }
+    fn domain(&self) -> &str {
+        "electron_host"
+    }
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let action = require_str(&input, "action")?;
+        if action != "list" && action != "activate" && action != "close" {
+            anyhow::bail!("manage_workspace_tabs: action must be \"list\", \"activate\" or \"close\"");
+        }
+        let optional_field = |key: &str| {
+            input
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        };
+        let tab_id = optional_field("tab_id");
+        let kind = optional_field("kind");
+        let url = optional_field("url");
+        let cwd = optional_field("cwd");
+        let file_path = optional_field("file_path");
+        if action != "list" && tab_id.is_none() && kind.is_none() {
+            anyhow::bail!(
+                "manage_workspace_tabs: {action} requires tab_id (from a previous list) or kind"
+            );
+        }
+        let stream = services.current_stream.lock().unwrap().clone();
+        let mut payload = json!({"action": action});
+        if let Some(id) = tab_id {
+            payload["tabId"] = Value::String(id.to_string());
+        }
+        if let Some(kind) = kind {
+            payload["kind"] = Value::String(kind.to_string());
+        }
+        if let Some(url) = url {
+            payload["url"] = Value::String(url.to_string());
+        }
+        if let Some(cwd) = cwd {
+            payload["cwd"] = Value::String(cwd.to_string());
+        }
+        if let Some(path) = file_path {
+            payload["filePath"] = Value::String(path.to_string());
+        }
+        services
+            .host
+            .request(
+                &stream,
+                "manage_workspace_tabs",
+                payload,
+                Duration::from_secs(30),
+            )
+            .await
+    }
+}
+
 // -------------------------------------------------------------------------
 // Plan, todo, skills, MCP and Agent Workspace
 
@@ -4641,7 +4737,7 @@ impl Tool for ManageTodoListTool {
         "manage_todo_list"
     }
     fn description(&self) -> &str {
-        "Create or update the working todo list for the current task. Provide the complete list each time. Use this for non-trivial multi-step work and keep statuses current as you progress."
+        "Create or update the working todo list for the current task. Provide the complete list each time. Use this for non-trivial multi-step work and keep statuses current as you progress. Status accepts not-started, in-progress, completed (common variants like pending or in_progress are normalized automatically)."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"items":{"type":"array","description":"The complete todo list for the current task. Replace the full list on every update. At most one item should be in-progress.","items":{"type":"object","properties":{"id":{"type":"integer"},"title":{"type":"string"},"status":{"type":"string","enum":["not-started","in-progress","completed"]}},"required":["id","title","status"]}}},"required":["items"]})
@@ -4654,39 +4750,179 @@ impl Tool for ManageTodoListTool {
             .get("items")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow::anyhow!("items must be an array"))?;
-        let mut seen = std::collections::HashSet::new();
-        let mut active = 0;
-        for item in items {
-            let id = item
-                .get("id")
-                .and_then(Value::as_i64)
-                .ok_or_else(|| anyhow::anyhow!("todo id must be an integer"))?;
-            anyhow::ensure!(
-                id > 0 && seen.insert(id),
-                "todo ids must be unique positive integers"
-            );
-            anyhow::ensure!(
-                item.get("title")
-                    .and_then(Value::as_str)
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false),
-                "todo title is required"
-            );
-            match item.get("status").and_then(Value::as_str) {
-                Some("not-started") | Some("completed") => {}
-                Some("in-progress") => active += 1,
-                _ => anyhow::bail!("invalid todo status"),
+        // Models routinely drift from the enum ("pending", "in_progress", …).
+        // Normalize instead of rejecting the whole list: a hard failure made
+        // every call error out and the todo UI never received a list to show.
+        let normalize_status = |status: Option<&str>| -> &'static str {
+            match status.map(str::trim).filter(|value| !value.is_empty()) {
+                Some("completed") | Some("complete") | Some("done") | Some("finished") => "completed",
+                Some("in-progress") | Some("in_progress") | Some("inprogress") | Some("doing") | Some("active") => "in-progress",
+                _ => "not-started",
             }
+        };
+        let mut normalized: Vec<Value> = Vec::with_capacity(items.len());
+        let mut used_ids = std::collections::HashSet::new();
+        let mut next_free_id = 1i64;
+        for item in items {
+            let raw_id = item.get("id");
+            let id = raw_id
+                .and_then(Value::as_i64)
+                .or_else(|| {
+                    raw_id
+                        .and_then(Value::as_str)
+                        .and_then(|value| value.trim().parse::<i64>().ok())
+                })
+                .filter(|id| *id > 0 && used_ids.insert(*id))
+                .unwrap_or_else(|| {
+                    while !used_ids.insert(next_free_id) {
+                        next_free_id += 1;
+                    }
+                    next_free_id
+                });
+            let title = match item.get("title") {
+                Some(Value::String(title)) => title.trim().to_string(),
+                Some(other) if other.is_number() => other.to_string(),
+                _ => anyhow::bail!("each todo item needs a non-empty string title"),
+            };
+            anyhow::ensure!(
+                !title.is_empty(),
+                "each todo item needs a non-empty string title"
+            );
+            let status = normalize_status(item.get("status").and_then(Value::as_str));
+            normalized.push(json!({"id": id, "title": title, "status": status}));
         }
-        anyhow::ensure!(active <= 1, "at most one todo item can be in-progress");
-        *services.todo_items.lock().unwrap() = items.clone();
-        let completed = items
+        *services.todo_items.lock().unwrap() = normalized.clone();
+        let completed = normalized
             .iter()
             .filter(|item| item["status"] == "completed")
             .count();
+        let active = normalized
+            .iter()
+            .filter(|item| item["status"] == "in-progress")
+            .count();
         Ok(
-            json!({"success": true, "items": items, "summary": format!("共 {} 项，已完成 {} 项，进行中 {} 项", items.len(), completed, active)}),
+            json!({"success": true, "items": normalized, "summary": format!("共 {} 项，已完成 {} 项，进行中 {} 项", normalized.len(), completed, active)}),
         )
+    }
+}
+
+#[cfg(test)]
+mod todo_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn services(root: &Path) -> ToolServices {
+        let workspace = root.join("workspace");
+        let projects = root.join("projects");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&projects).unwrap();
+        let store = Arc::new(worldbase_memory::Store::open(&root.join("store.sqlite")).unwrap());
+        ToolServices {
+            host: Arc::new(crate::HostBridge::new()),
+            current_stream: Arc::new(Mutex::new(String::new())),
+            abort: None,
+            workspace,
+            folder_workspace: None,
+            target_project_id: None,
+            created_project_id: Arc::new(std::sync::Mutex::new(None)),
+            allowed_mcp_server_ids: None,
+            plan_goal: Arc::new(Mutex::new(None)),
+            todo_items: Arc::new(Mutex::new(Vec::new())),
+            read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            visible_tool_catalog: None,
+            store: store.clone(),
+            memory_queue: None,
+            memory_scopes: Vec::new(),
+            skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
+            scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
+            mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
+            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(projects)),
+            group_collaboration: None,
+            subagent_runtime: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn normalizes_model_status_drift_instead_of_failing() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path());
+        let result = ManageTodoListTool
+            .execute(
+                json!({"items": [
+                    {"id": 1, "title": "设计", "status": "pending"},
+                    {"id": 2, "title": "实现", "status": "in_progress"},
+                    {"id": 3, "title": "验证", "status": "done"}
+                ]}),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["items"][0]["status"], "not-started");
+        assert_eq!(result["items"][1]["status"], "in-progress");
+        assert_eq!(result["items"][2]["status"], "completed");
+        assert_eq!(
+            *services.todo_items.lock().unwrap(),
+            result["items"].as_array().unwrap().clone()
+        );
+    }
+
+    #[tokio::test]
+    async fn repairs_missing_duplicate_and_string_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path());
+        let result = ManageTodoListTool
+            .execute(
+                json!({"items": [
+                    {"title": "无 id", "status": "not-started"},
+                    {"id": "2", "title": "字符串 id", "status": "not-started"},
+                    {"id": 2, "title": "重复 id", "status": "not-started"}
+                ]}),
+                &services,
+            )
+            .await
+            .unwrap();
+        let ids: Vec<i64> = result["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.iter().all(|id| *id > 0));
+        let unique: std::collections::HashSet<i64> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), 3, "ids must be deduplicated: {ids:?}");
+    }
+
+    #[tokio::test]
+    async fn accepts_multiple_in_progress_and_reports_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path());
+        let result = ManageTodoListTool
+            .execute(
+                json!({"items": [
+                    {"id": 1, "title": "a", "status": "in_progress"},
+                    {"id": 2, "title": "b", "status": "in-progress"}
+                ]}),
+                &services,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["summary"], "共 2 项，已完成 0 项，进行中 2 项");
+    }
+
+    #[tokio::test]
+    async fn still_requires_a_title_per_item() {
+        let temp = tempfile::tempdir().unwrap();
+        let services = services(temp.path());
+        let error = ManageTodoListTool
+            .execute(
+                json!({"items": [{"id": 1, "status": "pending"}]}),
+                &services,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("title"));
     }
 }
 

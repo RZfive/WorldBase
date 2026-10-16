@@ -88,6 +88,26 @@ test('history saves update one summary instead of reloading the complete sidebar
   assert.equal(fixture.conversations.value.length, 3)
 })
 
+test('streaming checkpoint saves do not reorder or repaint the live sidebar', async t => {
+  const fixture = chatFixture(t, {
+    saveConversation: async value => {
+      const { messages, ...summary } = value
+      return {
+        success: true,
+        summary: { ...summary, previewText: 'checkpoint should stay out of the live catalog' }
+      }
+    }
+  })
+  const before = fixture.conversations.value
+  const beforeAlpha = before.find(conversation => conversation.id === 'alpha')
+
+  await fixture.storage.saveConversation('alpha', record('alpha').messages, { refreshSidebar: false })
+
+  assert.equal(fixture.conversations.value, before)
+  assert.equal(fixture.conversations.value.find(conversation => conversation.id === 'alpha'), beforeAlpha)
+  assert.equal(fixture.conversations.value.find(conversation => conversation.id === 'alpha').previewText, undefined)
+})
+
 test('a first user turn appears in the sidebar before the history write finishes', async t => {
   let release
   const fixture = chatFixture(t, {
@@ -181,6 +201,9 @@ test('catalog rows never include message payloads and restart reads catalog inst
   assert.ok(catalog.every(item => !('messages' in item) && !('searchText' in item)))
 
   const restarted = new ChatHistoryStorage(dir)
+  // Steady-state restart: the one-time grouping-root heal has already run and
+  // left its marker, so the catalog read must not touch history files.
+  fs.writeFileSync(path.join(dir, 'conversations', '.grouping-root-healed'), new Date().toISOString(), 'utf8')
   const originalRead = fs.readFileSync
   const reads = []
   t.mock.method(fs, 'readFileSync', (...args) => { reads.push(String(args[0])); return originalRead(...args) })
@@ -421,4 +444,65 @@ test('one-summary updates retain descending timestamp order without refreshing t
   await fixture.storage.saveConversationMetadata('alpha')
   assert.deepEqual(fixture.conversations.value.map(item => item.id), ['gamma', 'alpha', 'beta'])
   assert.equal(fixture.conversations.value[0], unrelated)
+})
+
+test('closing the folder tab between saves keeps the project grouping root sticky', t => {
+  const dir = temporary(t)
+  const store = new ChatHistoryStorage(dir)
+  const folderTab = rootPath => ({ id: 'folder-1', kind: 'folder', state: { rootPath, rootName: 'agentwan' } })
+  const terminalTab = cwd => ({ id: 'term-1', kind: 'terminal', state: { cwd } })
+  const first = store.save({ ...record('alpha'), workspace: { tabs: [folderTab('/tmp/agentwan')], activeTabId: 'folder-1' } })
+  assert.equal(first.workspaceRootPath, '/tmp/agentwan')
+
+  // The folder tab is gone on the next save (closed, background context lost):
+  // the conversation must stay in the group it was already grouped under.
+  const second = store.save({ ...record('alpha'), workspace: { tabs: [terminalTab('/tmp/agentwan')], activeTabId: 'term-1' } })
+  assert.equal(second.workspaceRootPath, '/tmp/agentwan')
+  assert.equal(second.workspaceRootName, 'agentwan')
+
+  // A newly present root is a deliberate move and still reassigns.
+  const moved = store.save({ ...record('alpha'), workspace: { tabs: [folderTab('/tmp/other')], activeTabId: 'folder-1' } })
+  assert.equal(moved.workspaceRootPath, '/tmp/other')
+  assert.equal(new ChatHistoryStorage(dir).list().find(row => row.id === 'alpha').workspaceRootPath, '/tmp/other')
+})
+
+test('one-time heal re-roots conversations whose terminal cwd matches an existing grouping root', t => {
+  const dir = temporary(t)
+  const store = new ChatHistoryStorage(dir)
+  store.save({ ...record('sibling'), workspace: { tabs: [{ id: 'f', kind: 'folder', state: { rootPath: '/tmp/agentwan', rootName: 'agentwan' } }], activeTabId: 'f' } })
+  store.save({ ...record('k8s'), workspace: { tabs: [{ id: 't1', kind: 'terminal', state: { cwd: '/tmp/agentwan' } }], activeTabId: 't1' } })
+  store.save({ ...record('stray'), workspace: { tabs: [{ id: 't2', kind: 'terminal', state: { cwd: '/tmp/nowhere-else' } }], activeTabId: 't2' } })
+  store.save({ ...record('mixed'), workspace: { tabs: [{ id: 't3', kind: 'terminal', state: { cwd: '/tmp/agentwan' } }, { id: 't4', kind: 'terminal', state: { cwd: '/tmp/other' } }], activeTabId: 't3' } })
+
+  // Reproduce the pre-sticky wipe: the k8s JSON lost its folder tab and its
+  // catalog row lost the grouping root, as an old build saved it.
+  const conversationsDir = path.join(dir, 'conversations')
+  const k8s = JSON.parse(fs.readFileSync(path.join(conversationsDir, 'k8s.json'), 'utf8'))
+  k8s.workspace = { tabs: [{ id: 't1', kind: 'terminal', state: { cwd: '/tmp/agentwan' } }], activeTabId: 't1' }
+  fs.writeFileSync(path.join(conversationsDir, 'k8s.json'), JSON.stringify(k8s))
+  const catalog = JSON.parse(fs.readFileSync(path.join(conversationsDir, 'catalog.json'), 'utf8'))
+  for (const row of catalog) if (row.id === 'k8s') { delete row.workspaceRootPath; delete row.workspaceRootName }
+  fs.writeFileSync(path.join(conversationsDir, 'catalog.json'), JSON.stringify(catalog))
+  fs.rmSync(path.join(conversationsDir, '.grouping-root-healed'), { force: true })
+
+  const rows = new ChatHistoryStorage(dir).list()
+  assert.equal(rows.find(row => row.id === 'k8s').workspaceRootPath, '/tmp/agentwan')
+  assert.equal(rows.find(row => row.id === 'k8s').workspaceRootName, 'agentwan')
+  // Conservative: unknown and ambiguous terminal directories never invent groups.
+  assert.equal(rows.find(row => row.id === 'stray').workspaceRootPath, undefined)
+  assert.equal(rows.find(row => row.id === 'mixed').workspaceRootPath, undefined)
+  assert.ok(fs.existsSync(path.join(conversationsDir, '.grouping-root-healed')))
+})
+
+test('optimistic summary keeps the grouping root while the save round trip is in flight', async t => {
+  let release
+  const fixture = chatFixture(t, { saveConversation: () => new Promise(resolve => { release = resolve }) })
+  fixture.conversations.value = [{ ...record('alpha'), workspaceRootPath: '/tmp/agentwan', workspaceRootName: 'agentwan' }]
+  const saving = fixture.storage.saveConversation('alpha', record('alpha').messages)
+  const row = fixture.conversations.value.find(item => item.id === 'alpha')
+  assert.equal(row.workspaceRootPath, '/tmp/agentwan')
+  assert.equal(row.workspaceRootName, 'agentwan')
+  release({ success: true, summary: { ...record('alpha'), workspaceRootPath: '/tmp/agentwan', workspaceRootName: 'agentwan' } })
+  await saving
+  assert.equal(fixture.conversations.value.find(item => item.id === 'alpha').workspaceRootPath, '/tmp/agentwan')
 })

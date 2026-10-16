@@ -1645,6 +1645,14 @@ impl ProjectRuntime {
         };
         command
             .current_dir(&launch.cwd)
+            // The harness's stdin is the host's NDJSON control pipe. A project
+            // process that inherits it shares the same open-file description,
+            // so a dev server that touches stdin (Node/libuv sets O_NONBLOCK
+            // on read) flips the harness's own stdin to non-blocking mode and
+            // a momentarily empty pipe then surfaces as EAGAIN in the
+            // app-server read loop. Dev servers never read meaningful input
+            // here, so hand them /dev/null instead of the control pipe.
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             // The Electron host owns the app-server lifecycle. Do not leave a

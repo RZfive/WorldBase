@@ -33,6 +33,9 @@ export const MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
 export const MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES = 100 * 1024 * 1024
 export const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
 export const PAGE_AUTOMATION_REQUEST_TIMEOUT_MS = 15000
+
+/** Tab control is a fast store round-trip; only panel open/close animates. */
+export const WORKSPACE_TAB_CONTROL_TIMEOUT_MS = 10000
 export const VIRTUAL_INTERFACE_NAME_PATTERN = /(loopback|virtual|vmware|vbox|virtualbox|docker|podman|wsl|hyper-v|vethernet|tailscale|zerotier|utun|tun|tap|bridge)/i
 export const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   '.txt', '.md', '.mdx', '.markdown',
