@@ -30,6 +30,11 @@ const MAX_TOKENS: u32 = 8192;
 const FINISH_TASK_TOOL_NAME: &str = "finish_task";
 const FINISH_TASK_NUDGE_PREFIX: &str = "[FINISH_TASK_NUDGE]";
 const MAX_FINISH_TASK_NUDGES: usize = 2;
+/// Visible fallback when the model signals completion with no usable summary
+/// (for example a malformed/empty `finish_task` input). The run must never end
+/// silently: a turn that stops with no closing message reads as data loss.
+const FINISH_TASK_EMPTY_SUMMARY_MESSAGE: &str =
+    "任务已结束，但模型未返回任务小结。如需补充，请回复「继续」。";
 const TOOL_RESULT_INLINE_THRESHOLD_CHARS: usize = 30_000;
 const TOOL_RESULT_PERSIST_THRESHOLD_CHARS: usize = 100_000;
 const TOOL_RESULT_PREVIEW_CHARS: usize = 500;
@@ -263,17 +268,35 @@ fn split_finish_task_tool_calls(
     (finish_input, message)
 }
 
+/// Accept the documented field plus common model drifts (`summary`,
+/// `taskSummary`, …). Long summaries are exactly where providers/models are
+/// most likely to differ, and dropping them used to end the run silently.
+fn finish_task_string<'a>(input: &'a serde_json::Value, keys: &[&str]) -> &'a str {
+    keys.iter()
+        .find_map(|key| {
+            input
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_default()
+}
+
 fn build_finish_task_message(input: &serde_json::Value, fallback_content: &str) -> String {
-    let task_summary = input
-        .get("task_summary")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    let final_response = input
-        .get("final_response")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
+    let task_summary =
+        finish_task_string(input, &["task_summary", "taskSummary", "summary", "task"]);
+    let final_response = finish_task_string(
+        input,
+        &[
+            "final_response",
+            "finalResponse",
+            "message",
+            "content",
+            "result",
+            "report",
+        ],
+    );
 
     if !task_summary.is_empty() {
         let summary = format!("## 任务小结\n\n{task_summary}");
@@ -3422,6 +3445,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finish_task_without_a_summary_does_not_end_silently() {
+        let (hub, provider, workspace, conversation_id) =
+            protocol_test_hub(vec![protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-empty",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({}),
+                )],
+            )]);
+
+        let events = run_protocol_chat(hub.clone(), &conversation_id).await;
+        assert_eq!(provider.requests().len(), 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EventKind::Delta { text } if text == FINISH_TASK_EMPTY_SUMMARY_MESSAGE
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EventKind::AssistantMessage { content, .. }
+                if content == FINISH_TASK_EMPTY_SUMMARY_MESSAGE
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+
+        let stored = hub.store.list_messages(&conversation_id, 20).unwrap();
+        assert!(stored.iter().any(|message| {
+            message.role == Role::Assistant && message.content == FINISH_TASK_EMPTY_SUMMARY_MESSAGE
+        }));
+
+        drop(hub);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn finish_task_accepts_summary_aliases() {
+        let (hub, provider, workspace, conversation_id) =
+            protocol_test_hub(vec![protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-alias",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({ "summary": "Alias summary." }),
+                )],
+            )]);
+
+        let events = run_protocol_chat(hub.clone(), &conversation_id).await;
+        assert_eq!(provider.requests().len(), 1);
+        let expected = "## 任务小结\n\nAlias summary.";
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EventKind::Delta { text } if text == expected
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EventKind::AssistantMessage { content, .. } if content == expected
+        )));
+
+        drop(hub);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
     async fn mixed_finish_task_is_ignored_while_regular_tools_execute() {
         let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
             protocol_assistant(
@@ -5097,8 +5184,19 @@ async fn run_chat_inner(
         // call. Persist and publish only its rendered user-visible message so
         // replay never contains a tool_use without a matching tool_result.
         if let Some(finish_input) = finish_call.as_ref().filter(|_| tool_uses.is_empty()) {
-            let finish_content =
+            let mut finish_content =
                 build_finish_task_message(finish_input, &assistant_msg.text_view());
+            if finish_content.trim().is_empty() {
+                // Never terminate with an invisible turn. The provider may
+                // have dropped the tool arguments (see the OpenAI Responses
+                // adapter fallbacks), and the model may also call finish_task
+                // with an unexpected field name.
+                tracing::warn!(
+                    input = %finish_input,
+                    "finish_task ended the run without a usable task summary"
+                );
+                finish_content = FINISH_TASK_EMPTY_SUMMARY_MESSAGE.to_string();
+            }
             let record = ChatMessage {
                 id: 0,
                 role: Role::Assistant,

@@ -283,6 +283,77 @@ struct CallAcc {
     call_id: String,
     name: String,
     args: String,
+    /// Set once a terminal event supplied a complete, valid argument payload.
+    /// Late deltas from a misbehaving endpoint must not be appended to it.
+    args_complete: bool,
+}
+
+/// Some compatible endpoints send `arguments` as a JSON object instead of a
+/// string. Accept both shapes rather than silently dropping the payload.
+fn function_arguments_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(args) => Some(args.clone()),
+        Value::Object(_) | Value::Array(_) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn arguments_parse_as_object(tool_name: &str, args: &str) -> bool {
+    let args = args.trim();
+    !args.is_empty()
+        && crate::tool_input::parse_tool_input("openai-responses", tool_name, args).is_ok()
+}
+
+/// Terminal events (`function_call_arguments.done`, `output_item.done`,
+/// `response.completed`) carry the authoritative argument string. Providers
+/// vary in which of them they emit; a partial `delta` must never win over a
+/// complete payload, otherwise tool calls such as `finish_task` arrive with
+/// empty arguments and their result is silently lost.
+fn apply_complete_arguments(entry: &mut CallAcc, complete: &str) {
+    let complete = complete.trim();
+    if complete.is_empty() {
+        return;
+    }
+    let accumulated_is_valid = arguments_parse_as_object(&entry.name, &entry.args);
+    let complete_is_valid = arguments_parse_as_object(&entry.name, complete);
+    if entry.args.trim().is_empty()
+        || (complete_is_valid && (!accumulated_is_valid || entry.args.trim() != complete))
+        || (!accumulated_is_valid && !complete_is_valid && entry.args.len() < complete.len())
+    {
+        entry.args = complete.to_string();
+        entry.args_complete = complete_is_valid;
+    }
+}
+
+/// Resolve an accumulator even when a compatible endpoint omits `item_id`
+/// from a terminal event.
+fn tool_call_entry<'a>(
+    calls: &'a mut BTreeMap<String, CallAcc>,
+    item_id: &str,
+    call_id: Option<&str>,
+) -> &'a mut CallAcc {
+    let item_id = item_id.trim();
+    // Prefer an existing accumulator with the same call_id even when the
+    // terminal event uses a different item id. Creating a second entry would
+    // execute the same tool call twice.
+    if let Some(call_id) = call_id.map(str::trim).filter(|value| !value.is_empty()) {
+        if item_id.is_empty() || !calls.contains_key(item_id) {
+            if let Some(key) = calls
+                .iter()
+                .find(|(_, acc)| acc.call_id == call_id)
+                .map(|(key, _)| key.clone())
+            {
+                return calls.get_mut(&key).expect("accumulator exists");
+            }
+        }
+    }
+    if !item_id.is_empty() {
+        return calls.entry(item_id.to_string()).or_default();
+    }
+    if calls.len() == 1 {
+        return calls.values_mut().next().expect("single accumulator");
+    }
+    calls.entry(String::new()).or_default()
 }
 
 #[async_trait::async_trait]
@@ -389,6 +460,64 @@ impl Provider for OpenAIResponsesProvider {
                 self.finished = true;
             }
 
+            /// Some compatible endpoints only provide the final text/tool
+            /// payload inside `response.completed.output` and never emit the
+            /// incremental events. Recover it so a completed turn can never
+            /// become empty (notably a `finish_task` call whose summary would
+            /// otherwise disappear and end the run silently).
+            fn apply_completed_output(&mut self, response: &Value) {
+                let Some(output) = response["output"].as_array() else {
+                    return;
+                };
+                let mut completed_text = String::new();
+                for item in output {
+                    if item["type"] != "message" {
+                        continue;
+                    }
+                    let Some(parts) = item["content"].as_array() else {
+                        continue;
+                    };
+                    for part in parts {
+                        let kind = part["type"].as_str().unwrap_or_default();
+                        if kind != "output_text" && kind != "text" {
+                            continue;
+                        }
+                        if let Some(text) = part["text"].as_str() {
+                            completed_text.push_str(text);
+                        }
+                    }
+                }
+                if !completed_text.is_empty()
+                    && (self.text.is_empty()
+                        || (completed_text.starts_with(&self.text)
+                            && completed_text.len() > self.text.len()))
+                {
+                    self.text = completed_text;
+                }
+                for item in output {
+                    if item["type"] != "function_call" {
+                        continue;
+                    }
+                    let call_id = item["call_id"].as_str().unwrap_or_default();
+                    let entry = tool_call_entry(
+                        &mut self.tool_calls,
+                        item["id"].as_str().unwrap_or_default(),
+                        Some(call_id),
+                    );
+                    if entry.call_id.is_empty() && !call_id.is_empty() {
+                        entry.call_id = call_id.to_string();
+                    }
+                    if entry.name.is_empty() {
+                        entry
+                            .name
+                            .push_str(item["name"].as_str().unwrap_or_default());
+                    }
+                    if let Some(args) = function_arguments_string(&item["arguments"]) {
+                        apply_complete_arguments(entry, &args);
+                    }
+                }
+            }
+
             fn on_event(&mut self, ev: &super::sse::SseEvent) {
                 let event = ev.event.as_deref().unwrap_or_default();
                 // 部分兼容实现不带 event: 行，用 data.type 兜底。
@@ -419,45 +548,71 @@ impl Provider for OpenAIResponsesProvider {
                     "response.output_item.added" => {
                         let item = &payload["item"];
                         if item["type"] == "function_call" {
-                            let item_id = item["id"].as_str().unwrap_or_default().to_string();
-                            let entry = self.tool_calls.entry(item_id).or_default();
-                            entry.call_id =
-                                item["call_id"].as_str().unwrap_or_default().to_string();
-                            entry
-                                .name
-                                .push_str(item["name"].as_str().unwrap_or_default());
-                        }
-                    }
-                    "response.output_item.done" => {
-                        let item = &payload["item"];
-                        if item["type"] == "function_call" {
-                            let item_id = item["id"].as_str().unwrap_or_default().to_string();
-                            let entry = self.tool_calls.entry(item_id).or_default();
-                            if entry.call_id.is_empty() {
-                                entry.call_id =
-                                    item["call_id"].as_str().unwrap_or_default().to_string();
+                            let call_id = item["call_id"].as_str().unwrap_or_default();
+                            let entry = tool_call_entry(
+                                &mut self.tool_calls,
+                                item["id"].as_str().unwrap_or_default(),
+                                Some(call_id),
+                            );
+                            if entry.call_id.is_empty() && !call_id.is_empty() {
+                                entry.call_id = call_id.to_string();
                             }
                             if entry.name.is_empty() {
                                 entry
                                     .name
                                     .push_str(item["name"].as_str().unwrap_or_default());
                             }
-                            // 无增量流的兼容实现会在 done 事件里带完整参数。
-                            if entry.args.is_empty() {
-                                if let Some(args) = item["arguments"].as_str() {
-                                    entry.args.push_str(args);
-                                }
+                            // Non-streaming-compatible endpoints may already
+                            // include the full arguments here.
+                            if let Some(args) = function_arguments_string(&item["arguments"]) {
+                                apply_complete_arguments(entry, &args);
+                            }
+                        }
+                    }
+                    "response.output_item.done" => {
+                        let item = &payload["item"];
+                        if item["type"] == "function_call" {
+                            let call_id = item["call_id"].as_str().unwrap_or_default();
+                            let entry = tool_call_entry(
+                                &mut self.tool_calls,
+                                item["id"].as_str().unwrap_or_default(),
+                                Some(call_id),
+                            );
+                            if entry.call_id.is_empty() && !call_id.is_empty() {
+                                entry.call_id = call_id.to_string();
+                            }
+                            if entry.name.is_empty() {
+                                entry
+                                    .name
+                                    .push_str(item["name"].as_str().unwrap_or_default());
+                            }
+                            // 无增量流，或增量只到达了一部分时，done 事件里的
+                            // 完整参数是最终权威值。
+                            if let Some(args) = function_arguments_string(&item["arguments"]) {
+                                apply_complete_arguments(entry, &args);
                             }
                         }
                     }
                     "response.function_call_arguments.delta" => {
                         let item_id = payload["item_id"].as_str().unwrap_or_default();
-                        if let Some(delta) = payload["delta"].as_str() {
-                            self.tool_calls
-                                .entry(item_id.to_string())
-                                .or_default()
-                                .args
-                                .push_str(delta);
+                        let call_id = payload["call_id"].as_str();
+                        if let Some(delta) =
+                            payload["delta"].as_str().filter(|delta| !delta.is_empty())
+                        {
+                            let entry = tool_call_entry(&mut self.tool_calls, item_id, call_id);
+                            if !entry.args_complete {
+                                entry.args.push_str(delta);
+                            }
+                        }
+                    }
+                    "response.function_call_arguments.done" => {
+                        // 标准 Responses 协议会用这个事件下发完整参数；
+                        // 只监听 delta 的适配器会在端点跳过 delta 时拿到空参数。
+                        let item_id = payload["item_id"].as_str().unwrap_or_default();
+                        let call_id = payload["call_id"].as_str();
+                        if let Some(args) = function_arguments_string(&payload["arguments"]) {
+                            let entry = tool_call_entry(&mut self.tool_calls, item_id, call_id);
+                            apply_complete_arguments(entry, &args);
                         }
                     }
                     "response.completed" | "response.incomplete" => {
@@ -480,6 +635,7 @@ impl Provider for OpenAIResponsesProvider {
                         if event == "response.incomplete" {
                             self.stop_reason = "length".into();
                         }
+                        self.apply_completed_output(response);
                         self.finish();
                     }
                     "response.failed" => {
@@ -807,6 +963,215 @@ mod tests {
         assert_eq!(usage.output_tokens, 7);
         assert_eq!(usage.cache_read_tokens, 3);
         assert!(stream.next().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn function_call_arguments_done_recovers_after_partial_deltas() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            write_sse(
+                &mut socket,
+                &[
+                    ("response.output_item.added", r#"{"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_9","name":"read_file"}}"#),
+                    ("response.function_call_arguments.delta", r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"path\":"}"#),
+                    ("response.function_call_arguments.done", r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"path\":\"a.txt\"}"}"#),
+                    ("response.completed", r#"{"type":"response.completed","response":{"status":"completed","usage":{}}}"#),
+                ],
+            )
+            .await;
+        });
+
+        let provider = OpenAIResponsesProvider::new(
+            "test-key".into(),
+            "compatible-model".into(),
+            Some(format!("http://{address}/v1")),
+        );
+        let mut stream = provider
+            .chat_stream(
+                None,
+                vec![LlmMessage::text(LlmRole::User, "hi")],
+                vec![],
+                8192,
+                ChatOptions::default(),
+            )
+            .await
+            .unwrap();
+        let StreamChunk::Completed { assistant, .. } = stream.next().await.unwrap().unwrap() else {
+            panic!("expected completion");
+        };
+        let ContentBlock::ToolUse {
+            input, input_error, ..
+        } = &assistant.content[0]
+        else {
+            panic!("expected tool use block");
+        };
+        assert_eq!(input, &json!({ "path": "a.txt" }));
+        assert!(input_error.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_arguments_match_call_id_when_item_id_is_missing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            write_sse(
+                &mut socket,
+                &[
+                    ("response.output_item.added", r#"{"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_9","name":"read_file"}}"#),
+                    ("response.function_call_arguments.delta", r#"{"type":"response.function_call_arguments.delta","call_id":"call_9","delta":"{\"path\":"}"#),
+                    ("response.function_call_arguments.done", r#"{"type":"response.function_call_arguments.done","call_id":"call_9","arguments":"{\"path\":\"a.txt\"}"}"#),
+                    ("response.completed", r#"{"type":"response.completed","response":{"status":"completed","usage":{}}}"#),
+                ],
+            )
+            .await;
+        });
+
+        let provider = OpenAIResponsesProvider::new(
+            "test-key".into(),
+            "compatible-model".into(),
+            Some(format!("http://{address}/v1")),
+        );
+        let mut stream = provider
+            .chat_stream(
+                None,
+                vec![LlmMessage::text(LlmRole::User, "hi")],
+                vec![],
+                8192,
+                ChatOptions::default(),
+            )
+            .await
+            .unwrap();
+        let StreamChunk::Completed { assistant, .. } = stream.next().await.unwrap().unwrap() else {
+            panic!("expected completion");
+        };
+        assert_eq!(
+            assistant.content.len(),
+            1,
+            "must not duplicate the tool call"
+        );
+        let ContentBlock::ToolUse {
+            input, input_error, ..
+        } = &assistant.content[0]
+        else {
+            panic!("expected tool use block");
+        };
+        assert_eq!(input, &json!({ "path": "a.txt" }));
+        assert!(input_error.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn output_item_done_full_arguments_override_partial_deltas() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            write_sse(
+                &mut socket,
+                &[
+                    ("response.output_item.added", r#"{"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_9","name":"read_file"}}"#),
+                    ("response.function_call_arguments.delta", r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"path\":"}"#),
+                    ("response.output_item.done", r#"{"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","call_id":"call_9","name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}"#),
+                    ("response.completed", r#"{"type":"response.completed","response":{"status":"completed","usage":{}}}"#),
+                ],
+            )
+            .await;
+        });
+
+        let provider = OpenAIResponsesProvider::new(
+            "test-key".into(),
+            "compatible-model".into(),
+            Some(format!("http://{address}/v1")),
+        );
+        let mut stream = provider
+            .chat_stream(
+                None,
+                vec![LlmMessage::text(LlmRole::User, "hi")],
+                vec![],
+                8192,
+                ChatOptions::default(),
+            )
+            .await
+            .unwrap();
+        let StreamChunk::Completed { assistant, .. } = stream.next().await.unwrap().unwrap() else {
+            panic!("expected completion");
+        };
+        let ContentBlock::ToolUse {
+            input, input_error, ..
+        } = &assistant.content[0]
+        else {
+            panic!("expected tool use block");
+        };
+        assert_eq!(input, &json!({ "path": "a.txt" }));
+        assert!(input_error.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn response_completed_output_recovers_text_and_tool_calls() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut socket).await;
+            write_sse(
+                &mut socket,
+                &[(
+                    "response.completed",
+                    r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":5,"output_tokens":6},"output":[{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"Hello"}]},{"type":"function_call","id":"fc_1","call_id":"call_9","name":"read_file","arguments":"{\"path\":\"a.txt\"}"}]}}"#,
+                )],
+            )
+            .await;
+        });
+
+        let provider = OpenAIResponsesProvider::new(
+            "test-key".into(),
+            "compatible-model".into(),
+            Some(format!("http://{address}/v1")),
+        );
+        let mut stream = provider
+            .chat_stream(
+                None,
+                vec![LlmMessage::text(LlmRole::User, "hi")],
+                vec![],
+                8192,
+                ChatOptions::default(),
+            )
+            .await
+            .unwrap();
+        let StreamChunk::Completed {
+            assistant, usage, ..
+        } = stream.next().await.unwrap().unwrap()
+        else {
+            panic!("expected completion");
+        };
+        assert!(matches!(
+            &assistant.content[0],
+            ContentBlock::Text { text } if text == "Hello"
+        ));
+        let ContentBlock::ToolUse {
+            id,
+            name,
+            input,
+            input_error,
+            ..
+        } = &assistant.content[1]
+        else {
+            panic!("expected tool use block");
+        };
+        assert_eq!(id, "call_9");
+        assert_eq!(name, "read_file");
+        assert_eq!(input, &json!({ "path": "a.txt" }));
+        assert!(input_error.is_none());
+        assert_eq!(usage.output_tokens, 6);
         server.await.unwrap();
     }
 
