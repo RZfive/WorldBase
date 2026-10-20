@@ -538,7 +538,7 @@ export function buildActiveTerminalPromptSection (activeTerminalContext?: Active
     '- This is a SHARED terminal: whatever you write appears in the user\'s terminal in real time, and everything the user types is visible to you.',
     '- Use read_active_terminal to inspect the terminal screen (cleaned text tail) before acting, and write_active_terminal with execute=true to run a command, then read the returned output.',
     '- While a long-running command produces output, never type filler keys (".", spaces, empty lines) to pass time: call write_active_terminal with empty text and a wait_ms (up to 120000) to wait and get the new output in one step. To just press Enter on an interactive prompt, pass execute=false with a single newline as text.',
-    '- Prefer dedicated tools (run_project_command, run_workspace_command, file tools) for non-interactive work; use the shared terminal only when the user asks you to operate it or for interactive programs (dev servers, REPLs, paged installers).',
+    '- Prefer dedicated tools (run_shell_command, file tools) for non-interactive work; use the shared terminal only when the user asks you to operate it or for interactive programs (dev servers, REPLs, paged installers).',
     '- Commands executed here are approved by the user in real time; do not repeat a command whose output already shows it ran, and avoid destructive commands.'
   ]
 

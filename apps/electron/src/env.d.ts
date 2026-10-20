@@ -71,6 +71,8 @@ interface StreamEvent {
   type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_session_state' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'group_board' | 'group_direct_reply' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
+  /** Compact argument summary for tool_start rows (built host-side). */
+  summary?: string
   message?: { role: string; content: MessageContent }
   thinking?: string
   error?: string

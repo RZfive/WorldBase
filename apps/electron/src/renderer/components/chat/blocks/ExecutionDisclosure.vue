@@ -5,14 +5,31 @@ const props = withDefaults(defineProps<{
   title: string
   meta?: string
   detail?: string
+  /** Red count badge (e.g. "2 failed") for mixed completed/failed groups. */
+  failureLabel?: string
+  /** Target path for a file-tool row; makes `fileLabel` a click-to-open link. */
+  filePath?: string
+  /** Visible label of the click-to-open link (usually the clamped file path). */
+  fileLabel?: string
   status?: 'running' | 'completed' | 'failed' | 'neutral'
   defaultExpanded?: boolean
 }>(), {
   meta: '',
   detail: '',
+  failureLabel: '',
+  filePath: '',
+  fileLabel: '',
   status: 'neutral',
   defaultExpanded: false
 })
+
+const emit = defineEmits<{
+  (e: 'openFilePath', filePath: string): void
+}>()
+
+function openFile (): void {
+  if (props.filePath) emit('openFilePath', props.filePath)
+}
 
 const expanded = ref(props.defaultExpanded)
 const slots = defineSlots<{
@@ -44,7 +61,16 @@ watch(
     >
       <span class="execution-dot" aria-hidden="true" />
       <span class="execution-title">{{ props.title }}</span>
+      <span
+        v-if="props.fileLabel"
+        class="execution-file-link"
+        role="link"
+        tabindex="0"
+        @click.stop="openFile"
+        @keydown.enter.stop.prevent="openFile"
+      >{{ props.fileLabel }}</span>
       <span v-if="props.meta" class="execution-meta">{{ props.meta }}</span>
+      <span v-if="props.failureLabel" class="execution-failures">{{ props.failureLabel }}</span>
       <span v-if="props.detail" class="execution-detail">{{ props.detail }}</span>
       <span v-if="hasDetails" class="execution-chevron" aria-hidden="true">›</span>
     </button>
@@ -131,6 +157,34 @@ watch(
 }
 .execution-meta { flex: 0 0 auto; color: var(--app-text-muted); white-space: nowrap; }
 .execution-meta::before { content: '·'; margin-right: 7px; }
+/* Click-to-open file name on file-operation rows. The row itself stays a
+   disclosure toggle; the path is a separate affordance inside it. */
+.execution-file-link {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 52%;
+  margin-left: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--app-accent-strong);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.execution-file-link:hover { color: var(--app-accent); text-decoration-style: solid; }
+.execution-failures {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 999px;
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--app-danger-strong);
+  font-size: 0.94em;
+  font-weight: 600;
+  white-space: nowrap;
+}
 .execution-detail {
   flex: 1 1 auto;
   min-width: 0;

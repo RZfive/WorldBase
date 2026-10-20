@@ -1,7 +1,7 @@
 {
   "name": "the-world",
   "productName": "WorldBase",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "AI-powered project generator and manager",
   "license": "Apache-2.0",
   "repository": {
@@ -46,6 +46,9 @@
     "test:provider-models": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/provider-model-service.test.mjs",
     "test:renderer-navigation": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/renderer-navigation-performance.test.mjs tests/chat-history-performance.test.mjs tests/sidebar-performance.test.mjs",
     "test:message-branching": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-branching.test.mjs",
+    "test:message-render-blocks": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-utils-blocks.test.mjs",
+    "test:message-segments": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-segments.test.mjs",
+    "test:tool-run-summary": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/tool-run-summary.test.mjs",
     "test:computer-use-permissions": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/computer-use-permissions.test.mjs",
     "test:document-html-preview": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/document-html-preview.test.mjs",
     "test:document-editing": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/document-file-watcher.test.mjs",

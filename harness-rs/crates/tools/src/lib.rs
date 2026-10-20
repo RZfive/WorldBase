@@ -38,15 +38,15 @@ pub use compat_tools::{
     AnalyzeProjectDataTool, CallProjectApiTool, ClearProjectBuildFlagTool, CreateAgentGroupTool,
     CreateAgentTool, CreateScheduledTaskTool, DocumentListTool, DocumentReadTool, EditImageTool,
     EnterPlanModeTool, ExitPlanModeTool, FillCurrentPageFormTool, FinalizeProjectTool,
-    GenerateImageTool, GetProjectCommandStatusTool, GetProjectLogsTool, GetTaskStatusTool,
-    GetWorkspaceCommandStatusTool, GlobSearchTool, GrepSearchTool, InstallMcpServerTool,
-    InstallSkillTool, ListAgentWorkspaceCatalogTool, ListScheduledTasksTool, LocalCommandTool,
-    LocalReadFileTool, LocalWriteFileTool, ManageTodoListTool, ManageWorkspaceTabsTool,
-    OpenProjectAppTool, OpenWorkspaceTabTool, QueryProjectDatabaseTool, RebuildProjectTool,
-    RunProjectCommandTool, SaveCurrentPageAsDocumentTool, SpawnSubagentsTool, StartAsyncTaskTool,
-    WorkspaceCommandTool, WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool,
-    WorkspaceGrepTool, WorkspaceListFilesTool, WorkspacePatchFileTool, WorkspaceReadFileTool,
-    WorkspaceWriteFileTool,
+    GenerateImageTool, GetCommandStatusTool, GetProjectCommandStatusTool, GetProjectLogsTool,
+    GetTaskStatusTool, GetWorkspaceCommandStatusTool, GlobSearchTool, GrepSearchTool,
+    InstallMcpServerTool, InstallSkillTool, ListAgentWorkspaceCatalogTool, ListScheduledTasksTool,
+    LocalCommandTool, LocalReadFileTool, LocalWriteFileTool, ManageTodoListTool,
+    ManageWorkspaceTabsTool, OpenProjectAppTool, OpenWorkspaceTabTool, QueryProjectDatabaseTool,
+    RebuildProjectTool, RunProjectCommandTool, SaveCurrentPageAsDocumentTool, SpawnSubagentsTool,
+    StartAsyncTaskTool, WorkspaceCommandTool, WorkspaceDeleteFileTool, WorkspaceEditFileTool,
+    WorkspaceGlobTool, WorkspaceGrepTool, WorkspaceListFilesTool, WorkspacePatchFileTool,
+    WorkspaceReadFileTool, WorkspaceShellCommandTool, WorkspaceWriteFileTool,
 };
 pub use computer_use::{ComputerActionTool, ComputerObserveTool};
 pub use document::{DocDraftTool, DocParseTool, DocWriteTool};
@@ -206,12 +206,11 @@ impl ToolServices {
                 | "write_project_file"
                 | "patch_project_file"
                 | "delete_project_file"
-                | "run_project_command"
                 | "write_workspace_file"
                 | "edit_workspace_file"
                 | "patch_workspace_file"
                 | "delete_workspace_file"
-                | "run_workspace_command"
+                | "run_shell_command"
                 | "install_dependencies"
                 | "install_skill"
                 | "install_mcp_server"
@@ -640,7 +639,6 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(ProjectDevStopTool),
         Arc::new(ProjectDevRestartTool),
         Arc::new(ProjectStatusTool),
-        Arc::new(ExecuteCommandTool),
         Arc::new(WorkspaceListFilesTool),
         Arc::new(WorkspaceReadFileTool),
         Arc::new(WorkspaceWriteFileTool),
@@ -649,15 +647,16 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(WorkspaceDeleteFileTool),
         Arc::new(WorkspaceGlobTool),
         Arc::new(WorkspaceGrepTool),
-        Arc::new(WorkspaceCommandTool),
-        Arc::new(RunProjectCommandTool),
+        // The merged shell executor; the legacy run_workspace_command /
+        // run_project_command / local_run_command / execute_command tools and
+        // their two status tools stay defined but unregistered — legacy names
+        // keep working through permission-rule and allow-list aliasing.
+        Arc::new(WorkspaceShellCommandTool),
         Arc::new(GlobSearchTool),
         Arc::new(GrepSearchTool),
-        Arc::new(GetProjectCommandStatusTool),
-        Arc::new(GetWorkspaceCommandStatusTool),
+        Arc::new(GetCommandStatusTool),
         Arc::new(LocalReadFileTool),
         Arc::new(LocalWriteFileTool),
-        Arc::new(LocalCommandTool),
         Arc::new(CallProjectApiTool),
         Arc::new(QueryProjectDatabaseTool),
         Arc::new(AnalyzeProjectDataTool),
@@ -1019,7 +1018,23 @@ mod tests {
         }
 
         let full = filter_tools(&tools, &worldbase_protocol::types::Capabilities::desktop());
-        assert!(full.iter().any(|t| t.name() == "execute_command"));
+        // The merged executor replaced the legacy command tools, which stay
+        // defined but unregistered (see `builtin_tools`).
+        assert!(full.iter().any(|t| t.name() == "run_shell_command"));
+        assert!(full.iter().any(|t| t.name() == "get_command_status"));
+        for legacy in [
+            "run_workspace_command",
+            "run_project_command",
+            "local_run_command",
+            "execute_command",
+            "get_workspace_command_status",
+            "get_project_command_status",
+        ] {
+            assert!(
+                full.iter().all(|t| t.name() != legacy),
+                "legacy command tool {legacy} must not be advertised"
+            );
+        }
     }
 
     #[test]

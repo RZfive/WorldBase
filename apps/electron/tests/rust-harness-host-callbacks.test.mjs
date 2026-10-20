@@ -152,10 +152,8 @@ test('project file tools are Rust-native and register no Node override', async (
     'list_project_files',
     'glob_search',
     'grep_search',
-    'run_workspace_command',
-    'get_workspace_command_status',
-    'run_project_command',
-    'get_project_command_status',
+    'run_shell_command',
+    'get_command_status',
     'query_project_database',
     'analyze_project_data',
     'create_project',
@@ -419,10 +417,8 @@ test('all canonical Electron tools have an explicit execution owner', async () =
     'list_project_files',
     'glob_search',
     'grep_search',
-    'run_workspace_command',
-    'get_workspace_command_status',
-    'run_project_command',
-    'get_project_command_status',
+    'run_shell_command',
+    'get_command_status',
     'query_project_database',
     'analyze_project_data',
     'create_project',
@@ -540,8 +536,8 @@ test('MCP discovery/resource/prompt tools are Rust-native and register no Node o
 })
 
 test('project command tools are Rust-native and register no Node override', async () => {
-  // run/get_project_command_status and the workspace pair execute in Rust
-  // (`electron_native`) with the same validators, output caps, and
+  // The merged run_shell_command / get_command_status pair executes in
+  // Rust (`electron_native`) with the same output caps and
   // timeout-to-background semantics the Electron registry used to own.
   const services = createServices()
   const registrations = await collectHostTools(
@@ -553,10 +549,8 @@ test('project command tools are Rust-native and register no Node override', asyn
   )
 
   for (const name of [
-    'run_project_command',
-    'get_project_command_status',
-    'run_workspace_command',
-    'get_workspace_command_status'
+    'run_shell_command',
+    'get_command_status'
   ]) {
     assert.equal(
       registrations.some(tool => tool.definition.name === name),

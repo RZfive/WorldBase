@@ -570,6 +570,14 @@ impl Store {
         PathBuf::from(home).join(".the-world")
     }
 
+    /// 本库文件所在的数据目录，与 `default_dir()` 对应（生产环境两者一致），
+    /// 供命令输出落盘等同目录工件复用。
+    pub fn data_dir(&self) -> &Path {
+        self.memory_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+    }
+
     pub fn open_default() -> Result<Self> {
         let dir = Self::default_dir();
         Self::open(&dir.join("app.sqlite"))

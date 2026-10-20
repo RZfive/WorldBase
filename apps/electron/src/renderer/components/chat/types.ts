@@ -30,6 +30,14 @@ export interface ToolRun {
   startedAt?: number
   /** Epoch ms when the run reached a terminal status. */
   endedAt?: number
+  /**
+   * Compact argument summary for the row title (e.g. the searched pattern or
+   * target file path). Absent on runs produced before this field existed —
+   * the renderer falls back to the bare tool name.
+   */
+  summary?: string
+  /** Full target path for file tools, used by the click-to-open affordance. */
+  filePath?: string
 }
 
 export interface WebSearchResultItem {

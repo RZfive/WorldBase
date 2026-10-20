@@ -4,6 +4,7 @@ use crate::hub::Hub;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use worldbase_protocol::event::EventKind;
@@ -11,7 +12,7 @@ use worldbase_protocol::types::PermissionRequest;
 
 const ASK_TIMEOUT: Duration = Duration::from_secs(300);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum SafetyLevel {
     Safe,
     Risky,
@@ -56,6 +57,7 @@ pub async fn check(
     policy: &str,
     tool_name: &str,
     args: &Value,
+    workspace_root: Option<&Path>,
     interactive: bool,
     auto_approve: bool,
     abort: Option<&CancellationToken>,
@@ -71,35 +73,47 @@ pub async fn check(
     match policy {
         "deny" => false,
         "allow" => true,
-        // Electron's local_run_command always shows an explicit approval
-        // card, even for an otherwise read-only command such as `pwd`.
-        // Keep the safety classifier for execute/project commands, but do not
-        // silently auto-approve this user-machine capability.
-        _ if tool_name == "local_run_command" => {
-            if auto_approve {
-                // Even with the task-level grant, an unattended shell must
-                // never run the destructive-command class (rm -rf, sudo,
-                // mkfs, fork bombs, ...).
-                classify_command_args(args) != SafetyLevel::Deny
-            } else if !interactive {
-                false
-            } else {
-                ask_host(hub, stream_id, tool_name, args, abort).await
-            }
-        }
-        _ if is_command_tool(tool_name) => match classify_command_args(args) {
-            SafetyLevel::Deny => false,
-            SafetyLevel::Safe => true,
-            SafetyLevel::Risky => {
-                if auto_approve {
-                    return true;
+        // The command safety classifier governs shell execution: routine
+        // workspace commands (installs, builds, tests, read-only inspection)
+        // run without a prompt, unknown commands ask, and the destructive
+        // class is rejected outright. A `cwd` outside the selected workspace
+        // root escalates even a textually safe command to the ask path.
+        _ if is_command_tool(tool_name) => {
+            let cwd_outside = command_cwd_outside_root(args, workspace_root);
+            match classify_command_args(args, workspace_root) {
+                SafetyLevel::Deny => false,
+                SafetyLevel::Safe if !cwd_outside => true,
+                SafetyLevel::Safe | SafetyLevel::Risky => {
+                    if auto_approve {
+                        return true;
+                    }
+                    if !interactive {
+                        return false;
+                    }
+                    ask_host(hub, stream_id, tool_name, args, abort).await
                 }
-                if !interactive {
-                    return false;
-                }
-                ask_host(hub, stream_id, tool_name, args, abort).await
             }
         },
+        // The local_* file tools accept arbitrary machine paths, so the
+        // decision follows the path: inside the conversation's selected
+        // folder workspace it is auto-approved, outside it (or when no root
+        // is selected) the host is asked. The structurally sandboxed
+        // workspace_*/project_*/bare fs tools never reach this branch —
+        // their execute-time guards confine them to a workspace already.
+        _ if is_path_tool(tool_name) => {
+            match path_args_inside_root(args, workspace_root) {
+                Some(true) => true,
+                Some(false) | None => {
+                    if auto_approve {
+                        return true;
+                    }
+                    if !interactive {
+                        return false;
+                    }
+                    ask_host(hub, stream_id, tool_name, args, abort).await
+                }
+            }
+        }
         _ if wait_only_write => true,
         _ => {
             if auto_approve {
@@ -138,7 +152,12 @@ fn configured_rule_decision(hub: &Hub, tool_name: &str, args: &Value) -> Option<
 }
 
 fn permission_rule_matches(rule: &PermissionRule, tool_name: &str, args: &Value) -> bool {
-    if rule.tool != "*" && rule.tool != tool_name {
+    // A rule written against a legacy command-tool name applies to its
+    // merged successor (see `canonical_tool_name`).
+    if rule.tool != "*"
+        && rule.tool != tool_name
+        && canonical_tool_name(&rule.tool) != canonical_tool_name(tool_name)
+    {
         return false;
     }
     match (rule.arg_pattern.as_deref(), rule.arg_field.as_deref()) {
@@ -159,10 +178,113 @@ fn permission_rule_matches(rule: &PermissionRule, tool_name: &str, args: &Value)
 }
 
 fn is_command_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "run_project_command" | "run_workspace_command" | "local_run_command" | "execute_command"
-    )
+    // `execute_command` remains listed for the low-level `exec.run` RPC,
+    // which classifies under this name even though the tool itself was
+    // merged into `run_shell_command`.
+    matches!(tool_name, "run_shell_command" | "execute_command")
+}
+
+/// Map a legacy tool name to its merged successor; identity otherwise. Rules
+/// and allow/deny lists written before the command-tool merge keep working
+/// through this mapping.
+pub fn canonical_tool_name(tool_name: &str) -> &str {
+    match tool_name {
+        "run_workspace_command" | "run_project_command" | "local_run_command"
+        | "execute_command" => "run_shell_command",
+        "get_workspace_command_status" | "get_project_command_status" => "get_command_status",
+        other => other,
+    }
+}
+
+/// Machine-scope file tools that take arbitrary absolute paths in their
+/// arguments (unlike the structurally sandboxed workspace_*/project_*/bare
+/// fs tools, whose execute-time guards confine them to a workspace root).
+fn is_path_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "local_read_file" | "local_write_file")
+}
+
+const PATH_ARG_FIELDS: &[&str] = &["path", "file_path", "dir_path"];
+
+/// Lexically normalize a path (no filesystem access) so `..` and `.` are
+/// resolved before prefix comparison. Permission-time classification only —
+/// the tools' own execute-time guards remain the real boundary.
+fn normalize_lexical(path: &str, home: Option<&Path>) -> Option<PathBuf> {
+    let expanded = if let Some(rest) = path.strip_prefix('~') {
+        let home = home?;
+        if rest.is_empty() {
+            home.to_path_buf()
+        } else {
+            home.join(rest.trim_start_matches(['/', '\\']))
+        }
+    } else {
+        PathBuf::from(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in expanded.components() {
+        use std::path::Component;
+        match component {
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Some(normalized)
+}
+
+/// Decide whether a path-carrying tool call stays inside the workspace root.
+/// `Some(true)` inside, `Some(false)` outside, `None` when it cannot be
+/// resolved (no root selected, no path argument, or `..` escaping above the
+/// filesystem root) — the unresolved cases are treated as outside.
+/// Resolve `text` against `workspace_root` and return the absolute candidate
+/// plus the normalized root. Joining happens before normalization so a
+/// relative `..` resolves with the root as its base; an absolute argument
+/// replaces the join entirely, and `~` expands to the home directory.
+fn resolve_under_root(text: &str, workspace_root: &Path) -> Option<(PathBuf, PathBuf)> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let root = normalize_lexical(&workspace_root.display().to_string(), home.as_deref())?;
+    let candidate = if text.starts_with('~') {
+        normalize_lexical(text, home.as_deref())?
+    } else {
+        normalize_lexical(&root.join(text).display().to_string(), home.as_deref())?
+    };
+    Some((candidate, root))
+}
+
+fn path_args_inside_root(args: &Value, workspace_root: Option<&Path>) -> Option<bool> {
+    let root = workspace_root?;
+    let text = PATH_ARG_FIELDS.iter().find_map(|field| {
+        args.get(*field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    })?;
+    let (candidate, root) = resolve_under_root(text.trim(), root)?;
+    Some(candidate.starts_with(&root))
+}
+
+/// A shell command whose `cwd` resolves outside the selected workspace root
+/// always asks, even when the command text itself looks read-only. Calls
+/// that pass a `project_id` resolve their `cwd` against the project root, so
+/// this check is conservative for that combination when a folder workspace
+/// is also selected. Without a selected root there is nothing to compare
+/// against and the classifier alone decides.
+fn command_cwd_outside_root(args: &Value, workspace_root: Option<&Path>) -> bool {
+    let Some(root) = workspace_root else {
+        return false;
+    };
+    let text = args
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(".");
+    match resolve_under_root(text, root) {
+        Some((candidate, root)) => !candidate.starts_with(&root),
+        None => true,
+    }
 }
 
 /// `write_active_terminal` with an empty `text` skips the PTY write entirely —
@@ -175,9 +297,9 @@ fn is_wait_only_terminal_write(args: &Value) -> bool {
         .is_empty()
 }
 
-fn classify_command_args(args: &Value) -> SafetyLevel {
+fn classify_command_args(args: &Value, workspace_root: Option<&Path>) -> SafetyLevel {
     if let Some(command) = args.get("command").and_then(Value::as_str) {
-        return classify_command(command);
+        return classify_command(command, workspace_root);
     }
 
     let Some(program) = args.get("program").and_then(Value::as_str) else {
@@ -261,7 +383,7 @@ fn argv_is_dangerous(program: &str, args: &[&str]) -> bool {
                 is_shell_command_option(argument)
                     && args
                         .get(index + 1)
-                        .is_some_and(|nested| classify_command(nested) == SafetyLevel::Deny)
+                        .is_some_and(|nested| classify_command(nested, None) == SafetyLevel::Deny)
             })
         }
         "rm" => args.iter().any(|arg| {
@@ -357,7 +479,7 @@ fn argv_classify_known(program: &str, args: &[&str]) -> SafetyLevel {
     }
 }
 
-fn classify_command(command: &str) -> SafetyLevel {
+fn classify_command(command: &str, workspace_root: Option<&Path>) -> SafetyLevel {
     let command = command.trim();
 
     // Destructive fragments win even when a compound command begins with a
@@ -385,36 +507,205 @@ fn classify_command(command: &str) -> SafetyLevel {
         return SafetyLevel::Deny;
     }
 
-    const SAFE_PATTERNS: &[&str] = &[
-        r"(?i)^(?:cat|head|tail|wc|ls|find|grep|echo|pwd|which|type|file)\b",
-        r"(?i)^npm\s+(?:list|ls|outdated|audit|info|view|pack|explain|why)\b",
-        r"(?i)^node\s+-[ce]\b",
-        r"(?i)^node\s+--check\b",
-        r"(?i)^git\s+(?:status|log|diff|show|branch|tag|remote|stash\s+list)\b",
-    ];
-    if SAFE_PATTERNS.iter().any(|pattern| {
+    // Compound commands are judged by their riskiest segment, so
+    // `pnpm test && git push` still asks while `echo one && echo two` does
+    // not. The deny list above already scanned the raw command.
+    let mut worst = SafetyLevel::Safe;
+    for segment in split_shell_segments(command) {
+        worst = worst.max(classify_single_command(&segment, workspace_root));
+        if worst == SafetyLevel::Deny {
+            break;
+        }
+    }
+    worst
+}
+
+/// Commands that are routine inside a workspace and run without a prompt:
+/// package installs, builds, tests, lints, type-checks, read-only
+/// inspection, and interpreter script runs — the same surface the retired
+/// `run_workspace_command` allow-list used to accept. Everything unknown
+/// stays Risky (asks); long-running dev servers land here on purpose, and
+/// the destructive-class deny list still wins over every entry.
+const SAFE_COMMAND_PATTERNS: &[&str] = &[
+    r"^(?:cat|head|tail|wc|ls|find|grep|rg|echo|pwd|which|type|file|stat|du|df|date|env|printenv|sort|uniq|true|whoami|hostname|uname)\b",
+    // Shell control keywords are structural, not work: a loop is judged by
+    // its body segments. `cd`/`pushd` are judged by their target path in
+    // `directory_change_safety`; `popd` returns to a directory that was
+    // already validated when it was pushed.
+    r"^(?:popd|for|while|until|if|then|else|elif|fi|do|done|case|esac)\b",
+    r"^npm\s+(?:list|ls|outdated|audit|info|view|pack|explain|why)\b",
+    r"^(?:npm|pnpm|yarn|bun)\s+(?:install|i|ci|add|remove|uninstall|update|upgrade)\b",
+    r"^(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|compile|lint|typecheck|type-check|check|fmt|format))\b",
+    r"^(?:tsc|eslint|prettier|vitest|jest|playwright|tsx)\b",
+    r"^npx\s+(?:tsc|eslint|prettier|vitest|jest|playwright|tsx)\b",
+    r"^node\b",
+    r"^(?:python3?|pip3?)\b",
+    r"^go\s+(?:test|build|vet|fmt|version)\b",
+    r"^cargo\s+(?:test|check|build|clippy|fmt)\b",
+    r"^git\s+(?:status|log|diff|show|branch|tag|remote|stash\s+list|rev-parse|describe|blame|shortlog)\b",
+];
+
+fn classify_single_command(segment: &str, workspace_root: Option<&Path>) -> SafetyLevel {
+    // A structural keyword can carry the first real command on the same
+    // segment (`do git push`, `then pnpm build`): judge that remainder, not
+    // the keyword.
+    for prefix in ["do ", "then ", "else "] {
+        if let Some(rest) = segment
+            .strip_prefix(prefix)
+            .map(str::trim)
+            .filter(|rest| !rest.is_empty())
+        {
+            return classify_single_command(rest, workspace_root);
+        }
+    }
+    let (keyword, rest) = split_first_word(segment);
+    if keyword == "cd" || keyword == "pushd" {
+        return directory_change_safety(rest, workspace_root);
+    }
+    if SAFE_COMMAND_PATTERNS.iter().any(|pattern| {
         Regex::new(pattern)
             .expect("command safe regex")
-            .is_match(command)
+            .is_match(segment)
     }) {
         return SafetyLevel::Safe;
     }
+    SafetyLevel::Risky
+}
 
-    const RISKY_PATTERNS: &[&str] = &[
-        r"(?i)^npm\s+(?:install|i|ci|add|remove|uninstall)\b",
-        r"(?i)^git\s+(?:push|reset|rebase|merge|checkout|clean)\b",
-        r"(?i)^npm\s+run\s+(?:build|dev|start|test)\b",
-    ];
-    if RISKY_PATTERNS.iter().any(|pattern| {
-        Regex::new(pattern)
-            .expect("command risk regex")
-            .is_match(command)
-    }) {
+/// Split a shell segment into its first word and the remaining arguments.
+fn split_first_word(segment: &str) -> (&str, &str) {
+    let trimmed = segment.trim_start();
+    let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    (&trimmed[..end], trimmed[end..].trim_start())
+}
+
+/// Extract the first shell word, honoring quotes and stopping at unquoted
+/// control operators.
+fn first_shell_word(text: &str) -> Option<String> {
+    let mut word = String::new();
+    let mut quote = None;
+    let mut started = false;
+    for character in text.trim_start().chars() {
+        match quote {
+            Some(active) => {
+                if character == active {
+                    quote = None;
+                } else {
+                    word.push(character);
+                }
+                started = true;
+            }
+            None => {
+                if matches!(character, '\'' | '"') {
+                    quote = Some(character);
+                    started = true;
+                } else if character.is_whitespace() || matches!(character, ';' | '|' | '&') {
+                    break;
+                } else {
+                    word.push(character);
+                    started = true;
+                }
+            }
+        }
+    }
+    started.then_some(word)
+}
+
+/// `cd`/`pushd` are allowed without a prompt only when their target provably
+/// stays inside the selected workspace root. Home expansion, variables,
+/// relative `..` escapes, absolute outside paths, and runs without a selected
+/// root all need user authorization.
+fn directory_change_safety(rest: &str, workspace_root: Option<&Path>) -> SafetyLevel {
+    let Some(target) = first_shell_word(rest) else {
+        // Bare `cd` goes to $HOME, which is outside the workspace.
+        return SafetyLevel::Risky;
+    };
+    if target == "-"
+        || target.starts_with('~')
+        || target.contains('$')
+        || target.contains('`')
+    {
         return SafetyLevel::Risky;
     }
+    let Some(root) = workspace_root else {
+        return SafetyLevel::Risky;
+    };
+    match resolve_under_root(&target, root) {
+        Some((candidate, root)) if candidate.starts_with(&root) => SafetyLevel::Safe,
+        _ => SafetyLevel::Risky,
+    }
+}
 
-    // Unknown commands require confirmation, matching Electron.
-    SafetyLevel::Risky
+/// Split a shell command at unquoted `;`, `&`, `|`, and newline separators.
+/// Redirection fd duplication (`2>&1`, `>&2`) is kept inside its segment so
+/// it is not mistaken for a background separator.
+fn split_shell_segments(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let chars: Vec<char> = command.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        if escaped {
+            current.push(character);
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            current.push(character);
+            if active_quote == '"' && character == '\\' {
+                escaped = true;
+            } else if character == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if character == '\\' {
+            current.push(character);
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            current.push(character);
+            index += 1;
+            continue;
+        }
+        if matches!(character, ';' | '|' | '&') && !(character == '&' && current.ends_with(['>', '<'])) {
+            if !current.trim().is_empty() {
+                segments.push(current.trim().to_string());
+            }
+            current.clear();
+            // Consume the second half of `&&` and `||` as one operator.
+            if index + 1 < chars.len()
+                && ((character == '&' && chars[index + 1] == '&')
+                    || (character == '|' && matches!(chars[index + 1], '|' | '&')))
+            {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if character == '\n' {
+            if !current.trim().is_empty() {
+                segments.push(current.trim().to_string());
+            }
+            current.clear();
+            index += 1;
+            continue;
+        }
+        current.push(character);
+        index += 1;
+    }
+    if !current.trim().is_empty() {
+        segments.push(current.trim().to_string());
+    }
+    segments
 }
 
 async fn ask_host(
@@ -519,15 +810,168 @@ pub fn request_payload(request: &PermissionRequest) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_command, classify_command_args, is_wait_only_terminal_write,
-        permission_rule_matches, summarize_args, PermissionRule, SafetyLevel,
+        is_wait_only_terminal_write, path_args_inside_root, permission_rule_matches,
+        summarize_args, PermissionRule, SafetyLevel,
     };
     use serde_json::json;
+    use std::path::Path;
+
+    fn classify (command: &str) -> SafetyLevel {
+        super::classify_command(command, None)
+    }
+
+    fn classify_in (command: &str, root: &str) -> SafetyLevel {
+        super::classify_command(command, Some(Path::new(root)))
+    }
+
+    fn classify_args (args: &serde_json::Value) -> SafetyLevel {
+        super::classify_command_args(args, None)
+    }
+
+    #[test]
+    fn path_args_inside_root_classifies_local_file_paths() {
+        let root = Path::new("/tmp/worldbase-workspace");
+        // Relative paths resolve against the root; `..` escaping is outside.
+        assert_eq!(
+            path_args_inside_root(&json!({ "file_path": "notes/a.txt" }), Some(root)),
+            Some(true)
+        );
+        assert_eq!(
+            path_args_inside_root(&json!({ "file_path": "../escape.txt" }), Some(root)),
+            Some(false)
+        );
+        assert_eq!(
+            path_args_inside_root(
+                &json!({ "file_path": "/tmp/worldbase-workspace/deep/file.md" }),
+                Some(root)
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            path_args_inside_root(&json!({ "file_path": "/etc/hosts" }), Some(root)),
+            Some(false)
+        );
+        // Without a selected root nothing can be proven inside.
+        assert_eq!(
+            path_args_inside_root(&json!({ "file_path": "notes/a.txt" }), None),
+            None
+        );
+        assert_eq!(path_args_inside_root(&json!({}), Some(root)), None);
+    }
+
+    #[test]
+    fn command_cwd_outside_root_escalates() {
+        use super::command_cwd_outside_root;
+        let root = Path::new("/tmp/worldbase-workspace");
+        assert!(!command_cwd_outside_root(&json!({}), Some(root)));
+        assert!(!command_cwd_outside_root(&json!({ "cwd": "sub/dir" }), Some(root)));
+        assert!(command_cwd_outside_root(&json!({ "cwd": ".." }), Some(root)));
+        assert!(command_cwd_outside_root(&json!({ "cwd": "/etc" }), Some(root)));
+        // Without a selected root the classifier alone decides.
+        assert!(!command_cwd_outside_root(&json!({ "cwd": "/etc" }), None));
+    }
+
+    #[test]
+    fn command_classifier_judges_compound_commands_by_riskiest_segment() {
+        use super::classify_command;
+        assert_eq!(classify("pnpm test"), SafetyLevel::Safe);
+        assert_eq!(
+            classify("pnpm install && pnpm run build"),
+            SafetyLevel::Safe
+        );
+        assert_eq!(classify("echo one && echo two"), SafetyLevel::Safe);
+        assert_eq!(
+            classify("node -e \"x\" 2>&1 | head -5"),
+            SafetyLevel::Safe
+        );
+        assert_eq!(classify("pnpm test && git push"), SafetyLevel::Risky);
+        assert_eq!(classify("npm run dev"), SafetyLevel::Risky);
+        // `cd` is allowed only while its target stays inside the workspace
+        // root; leaving it needs user authorization. Loop keywords are
+        // structural — the real commands decide.
+        assert_eq!(
+            classify_in(
+                "cd /Users/me/project && git log --oneline -15 && echo done",
+                "/Users/me/project"
+            ),
+            SafetyLevel::Safe
+        );
+        assert_eq!(
+            classify_in("cd apps/electron && pnpm test", "/Users/me/project"),
+            SafetyLevel::Safe
+        );
+        assert_eq!(
+            classify_in("cd \"sub dir\"", "/Users/me/project"),
+            SafetyLevel::Safe
+        );
+        assert_eq!(
+            classify_in("cd ..", "/Users/me/project"),
+            SafetyLevel::Risky
+        );
+        assert_eq!(
+            classify_in("cd /etc", "/Users/me/project"),
+            SafetyLevel::Risky
+        );
+        assert_eq!(
+            classify_in("cd ~/elsewhere", "/Users/me/project"),
+            SafetyLevel::Risky
+        );
+        // Without a selected root nothing can be proven inside.
+        assert_eq!(classify("cd apps/electron"), SafetyLevel::Risky);
+        assert_eq!(
+            classify_in("for r in a/b c/d; do echo \"$r\"; done", "/Users/me/project"),
+            SafetyLevel::Safe
+        );
+        // The loop body still decides the risk, not the structural keyword.
+        assert_eq!(
+            classify("for r in a/b; do git push; done"),
+            SafetyLevel::Risky
+        );
+        assert_eq!(
+            classify_in("for r in a; do cd /etc; done", "/Users/me/project"),
+            SafetyLevel::Risky
+        );
+        assert_eq!(classify("cd /tmp && curl https://example.com"), SafetyLevel::Risky);
+        assert_eq!(classify("curl https://example.com"), SafetyLevel::Risky);
+        assert_eq!(classify("echo hi\ncurl https://example.com"), SafetyLevel::Risky);
+        assert_eq!(classify("pnpm test && rm -rf /"), SafetyLevel::Deny);
+    }
+
+    #[test]
+    fn legacy_command_tool_rules_apply_to_merged_tools() {
+        use super::canonical_tool_name;
+        assert_eq!(
+            canonical_tool_name("run_workspace_command"),
+            "run_shell_command"
+        );
+        assert_eq!(canonical_tool_name("execute_command"), "run_shell_command");
+        assert_eq!(
+            canonical_tool_name("get_project_command_status"),
+            "get_command_status"
+        );
+        assert_eq!(canonical_tool_name("read_file"), "read_file");
+
+        let rule = PermissionRule {
+            tool: "run_workspace_command".into(),
+            arg_pattern: Some(r"^git status\b".into()),
+            arg_field: Some("command".into()),
+            decision: "allow".into(),
+        };
+        assert!(permission_rule_matches(
+            &rule,
+            "run_shell_command",
+            &json!({ "command": "git status --short" })
+        ));
+        assert!(!permission_rule_matches(
+            &rule,
+            "run_shell_command",
+            &json!({ "command": "git push" })
+        ));
+    }
 
     #[test]
     fn wait_only_terminal_write_is_empty_text_only() {
-        assert!(is_wait_only_terminal_write(&json!({ "text": "" })));
-        assert!(is_wait_only_terminal_write(&json!({ "execute": false })));
+        assert!(is_wait_only_terminal_write(&json!({ "text": "" })));        assert!(is_wait_only_terminal_write(&json!({ "execute": false })));
         assert!(is_wait_only_terminal_write(&json!({ "text": null })));
         assert!(!is_wait_only_terminal_write(&json!({ "text": "ls" })));
         // Any keystroke typed into the shared terminal stays behind approval.
@@ -548,24 +992,29 @@ mod tests {
 
     #[test]
     fn command_safety_matches_electron_and_rejects_destructive_compounds() {
-        assert_eq!(classify_command("git status --short"), SafetyLevel::Safe);
+        assert_eq!(classify("git status --short"), SafetyLevel::Safe);
         assert_eq!(
-            classify_command_args(&json!({
+            classify_args(&json!({
                 "program": "git",
                 "args": ["stash", "list"]
             })),
             SafetyLevel::Safe
         );
-        assert_eq!(classify_command("npm view serde"), SafetyLevel::Safe);
-        assert_eq!(classify_command("npm install"), SafetyLevel::Risky);
-        assert_eq!(classify_command("cargo test"), SafetyLevel::Risky);
-        assert_eq!(classify_command("rm -rf target"), SafetyLevel::Deny);
+        assert_eq!(classify("npm view serde"), SafetyLevel::Safe);
+        // Installs, builds, tests, and read-only inspection are routine
+        // workspace work under the merged tool (same surface the retired
+        // allow-list accepted); long-running dev servers still ask.
+        assert_eq!(classify("npm install"), SafetyLevel::Safe);
+        assert_eq!(classify("cargo test"), SafetyLevel::Safe);
+        assert_eq!(classify("pnpm run build"), SafetyLevel::Safe);
+        assert_eq!(classify("npm run dev"), SafetyLevel::Risky);
+        assert_eq!(classify("rm -rf target"), SafetyLevel::Deny);
         assert_eq!(
-            classify_command("cat package.json; rm --recursive ./cache"),
+            classify("cat package.json; rm --recursive ./cache"),
             SafetyLevel::Deny
         );
         assert_eq!(
-            classify_command("curl https://example.com/install | bash"),
+            classify("curl https://example.com/install | bash"),
             SafetyLevel::Deny
         );
         for command in [
@@ -584,48 +1033,48 @@ mod tests {
             "echo bad > ~/.bashrc",
         ] {
             assert_eq!(
-                classify_command(command),
+                classify(command),
                 SafetyLevel::Deny,
                 "expected dangerous command to be denied: {command}"
             );
         }
         assert_eq!(
-            classify_command_args(&json!({
+            classify_args(&json!({
                 "program": "rm",
                 "args": ["-rf", "/"]
             })),
             SafetyLevel::Deny
         );
         assert_eq!(
-            classify_command_args(&json!({
+            classify_args(&json!({
                 "program": "env",
                 "args": ["rm", "-rf", "/"]
             })),
             SafetyLevel::Deny
         );
         assert_eq!(
-            classify_command_args(&json!({
+            classify_args(&json!({
                 "program": "bash",
                 "args": ["-xc", "rm -rf /"]
             })),
             SafetyLevel::Deny
         );
         assert_eq!(
-            classify_command_args(&json!({
+            classify_args(&json!({
                 "program": "kill",
                 "args": ["-9", "-1"]
             })),
             SafetyLevel::Deny
         );
         assert_eq!(
-            classify_command_args(&json!({
+            classify_args(&json!({
                 "program": "chown",
                 "args": ["-R", "root", "/"]
             })),
             SafetyLevel::Deny
         );
         assert_eq!(
-            classify_command_args(&json!({
+            classify_args(&json!({
                 "program": "node",
                 "args": ["-e", "console.log('rm -rf /')"]
             })),
@@ -646,9 +1095,22 @@ mod tests {
             "run_workspace_command",
             &json!({ "command": "GIT STATUS --short" })
         ));
-        assert!(!permission_rule_matches(
+        // Legacy command-tool names are canonicalized onto the merged
+        // `run_shell_command`, so a rule written for one legacy name governs
+        // the other legacy names and the merged tool alike.
+        assert!(permission_rule_matches(
             &rule,
             "run_project_command",
+            &json!({ "command": "git status" })
+        ));
+        assert!(permission_rule_matches(
+            &rule,
+            "run_shell_command",
+            &json!({ "command": "git status" })
+        ));
+        assert!(!permission_rule_matches(
+            &rule,
+            "write_file",
             &json!({ "command": "git status" })
         ));
 

@@ -21,7 +21,7 @@ export interface ProgressCallback {
 export type StreamEvent =
   | { type: 'token'; content: string }
   | { type: 'thinking'; content: string }
-  | { type: 'tool_start'; name: string }
+  | { type: 'tool_start'; name: string; summary?: string; filePath?: string }
   | { type: 'tool_end'; name: string; error?: string }
   | ProgressEvent
   | { type: 'reset' }

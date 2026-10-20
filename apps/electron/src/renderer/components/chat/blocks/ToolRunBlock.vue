@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ChatMessageBlock, ToolRun } from '../types'
-import { formatElapsedDuration } from '../message-utils'
+import { formatElapsedDuration, getToolRunDisplayName } from '../message-utils'
 import { translateProgressEntry } from '../progress-i18n'
 import ExecutionDisclosure from './ExecutionDisclosure.vue'
 
@@ -10,7 +10,46 @@ const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'tool' }>
 }>()
 
+const emit = defineEmits<{
+  (e: 'openFilePath', filePath: string): void
+}>()
+
 const { t } = useI18n()
+
+// Workspace file tools whose row can open the target file in a workspace tab.
+// Legacy runs carry no `filePath`, so a short (unclamped) summary is used as a
+// fallback; `:line` anchors and truncated paths are not openable.
+const WORKSPACE_FILE_TOOLS = new Set([
+  'read_workspace_file',
+  'write_workspace_file',
+  'edit_workspace_file',
+  'patch_workspace_file',
+  'delete_workspace_file'
+])
+
+const openableFilePath = computed(() => {
+  const run = props.block.toolRun
+  const explicit = run.filePath?.trim()
+  if (explicit) return explicit
+  if (!WORKSPACE_FILE_TOOLS.has(run.name)) return ''
+  const summary = run.summary?.trim() || ''
+  if (!summary || summary.includes('…')) return ''
+  return summary.replace(/:\d+$/, '')
+})
+
+const fileLabel = computed(() => {
+  return openableFilePath.value ? (props.block.toolRun.summary?.trim() || openableFilePath.value) : ''
+})
+
+// Style "tool name · arguments": the summary is built host-side from the
+// tool call's own arguments (searched pattern, target file, command text…)
+// and is absent on legacy runs, which keep the bare tool-name title. File
+// tools render the path as its own click-to-open link instead.
+const runTitle = computed(() => {
+  const display = getToolRunDisplayName(props.block.toolRun.name)
+  const summary = fileLabel.value ? '' : props.block.toolRun.summary?.trim()
+  return summary ? `${display} · ${summary}` : display
+})
 
 // Codex-style work row: live seconds while the run is active, frozen total
 // once it reaches a terminal status (design v1.7 P1).
@@ -51,7 +90,9 @@ const elapsedLabel = computed(() => {
 
 function getToolRunSummaryStatusLabel (status: ToolRun['status']): string {
   if (status === 'completed') {
-    return elapsedLabel.value ? t('chatUi.toolDoneElapsed', { time: elapsedLabel.value }) : ''
+    return elapsedLabel.value
+      ? t('chatUi.toolDoneElapsed', { time: elapsedLabel.value })
+      : t('chatUi.toolStatusCompleted')
   }
   if (status === 'failed') {
     return elapsedLabel.value
@@ -83,26 +124,22 @@ function getLatestProgressText (): string {
   const translated = translateProgressEntry(latest, t)
   return translated.detail ? `${translated.stage}: ${translated.detail}` : translated.stage
 }
-
-function getToolRunDisplayName (name: string): string {
-  if (name === 'long_term_goal_propose_update') return '生成待确认目标变更'
-  if (name === 'long_term_goal_get_context') return '读取长期目标状态'
-  if (name === 'long_term_goal_update_schedule') return '更新长期目标排期'
-  if (name === 'long_term_goal_record_run_result') return '记录长期目标执行结果'
-  return name
-}
 </script>
 
 <template>
   <ExecutionDisclosure
-    :title="getToolRunDisplayName(props.block.toolRun.name)"
+    class="tool-run"
+    :title="runTitle"
     :meta="getToolRunSummaryStatusLabel(props.block.toolRun.status)"
     :detail="getLatestProgressText()"
+    :file-path="openableFilePath"
+    :file-label="fileLabel"
     :status="props.block.toolRun.status"
     :default-expanded="props.block.toolRun.status === 'failed'"
+    @open-file-path="filePath => emit('openFilePath', filePath)"
   >
     <div class="tool-run-header">
-      <div class="tool-run-name">{{ getToolRunDisplayName(props.block.toolRun.name) }}</div>
+      <div class="tool-run-name">{{ runTitle }}</div>
       <span class="tool-run-status" :class="props.block.toolRun.status">
         {{ getToolRunStatusLabel(props.block.toolRun.status) }}
       </span>
@@ -174,6 +211,18 @@ function getToolRunDisplayName (name: string): string {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* Per-row status colors inside the group trace: each tool call must show
+   whether IT succeeded or failed, independently of the group summary. The
+   dot already uses the shared status colors; the meta label and (for
+   failures) the row surface follow the same mapping. */
+.tool-run.completed :deep(.execution-meta) { color: #15803d; }
+.tool-run.running :deep(.execution-meta) { color: var(--app-accent-strong); }
+.tool-run.failed :deep(.execution-meta) { color: var(--app-danger-strong); }
+.tool-run.failed :deep(.execution-summary) {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.06);
 }
 
 .tool-run-step {

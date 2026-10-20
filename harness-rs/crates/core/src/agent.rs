@@ -30,6 +30,11 @@ const MAX_TOKENS: u32 = 8192;
 const FINISH_TASK_TOOL_NAME: &str = "finish_task";
 const FINISH_TASK_NUDGE_PREFIX: &str = "[FINISH_TASK_NUDGE]";
 const MAX_FINISH_TASK_NUDGES: usize = 2;
+/// Visible fallback when the model signals completion with no usable summary
+/// (for example a malformed/empty `finish_task` input). The run must never end
+/// silently: a turn that stops with no closing message reads as data loss.
+const FINISH_TASK_EMPTY_SUMMARY_MESSAGE: &str =
+    "任务已结束，但模型未返回任务小结。如需补充，请回复「继续」。";
 const TOOL_RESULT_INLINE_THRESHOLD_CHARS: usize = 30_000;
 const TOOL_RESULT_PERSIST_THRESHOLD_CHARS: usize = 100_000;
 const TOOL_RESULT_PREVIEW_CHARS: usize = 500;
@@ -59,12 +64,19 @@ const ELECTRON_HOST_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::fro
 fn serialize_tool_result(result: Result<serde_json::Value>) -> (String, bool) {
     match result {
         Ok(value) => {
-            // Match Electron AgentCore: a structured result containing an
-            // `error` field is a failed tool call even when the handler chose
-            // to return it instead of throwing.
+            // A structured result is a failed tool call only when the handler
+            // actually populated `error` with content. Project tools such as
+            // rebuild_project / get_project_status legitimately include
+            // `"error": null` in successful payloads, so key presence alone
+            // would flag every successful run as failed.
             let is_error = value
                 .as_object()
-                .is_some_and(|object| object.contains_key("error"));
+                .and_then(|object| object.get("error"))
+                .is_some_and(|error| match error {
+                    serde_json::Value::Null => false,
+                    serde_json::Value::String(text) => !text.is_empty(),
+                    _ => true,
+                });
             (
                 serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
                 is_error,
@@ -263,17 +275,35 @@ fn split_finish_task_tool_calls(
     (finish_input, message)
 }
 
+/// Accept the documented field plus common model drifts (`summary`,
+/// `taskSummary`, …). Long summaries are exactly where providers/models are
+/// most likely to differ, and dropping them used to end the run silently.
+fn finish_task_string<'a>(input: &'a serde_json::Value, keys: &[&str]) -> &'a str {
+    keys.iter()
+        .find_map(|key| {
+            input
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_default()
+}
+
 fn build_finish_task_message(input: &serde_json::Value, fallback_content: &str) -> String {
-    let task_summary = input
-        .get("task_summary")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    let final_response = input
-        .get("final_response")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
+    let task_summary =
+        finish_task_string(input, &["task_summary", "taskSummary", "summary", "task"]);
+    let final_response = finish_task_string(
+        input,
+        &[
+            "final_response",
+            "finalResponse",
+            "message",
+            "content",
+            "result",
+            "report",
+        ],
+    );
 
     if !task_summary.is_empty() {
         let summary = format!("## 任务小结\n\n{task_summary}");
@@ -1024,6 +1054,24 @@ fn role_and_core_rules_prompt(tools: &PromptToolContext<'_>) -> String {
     lines.join("\n")
 }
 
+/// Output-format capabilities the chat renderer actually supports. Without this
+/// the model falls back to plain prose and does not reach for diagrams, even
+/// when a flow or architecture is far easier to read as a graph.
+fn response_formatting_prompt() -> String {
+    [
+        "## Response formatting",
+        "- The chat UI renders GitHub-flavored Markdown, LaTeX math, and Mermaid diagrams directly.",
+        "- Write mathematical expressions in LaTeX: `$...$` inline and `$$...$$` for display blocks.",
+        "- Default to a ```mermaid diagram whenever the answer can be expressed as a graph or chart. This is the expected default, not an optional extra: if the content has structure, draw it.",
+        "- Content that must be drawn: request and data flow, process steps, decision logic, call and message sequences, system and service architecture, module and dependency structure, state transitions, database and data-model relationships, hierarchies and mind maps, timelines and milestones, and proportions or comparisons.",
+        "- Pick the most expressive Mermaid type instead of always using a flowchart: `flowchart` for process and architecture, `sequenceDiagram` for interactions, `classDiagram` for types and code structure, `stateDiagram-v2` for state machines, `erDiagram` for data models, `gantt` for schedules, `timeline` for chronology, `mindmap` for breakdowns, `pie` or `quadrantChart` for proportions and positioning.",
+        "- A diagram replaces the prose that would describe the same relationships. Keep only the conclusions, caveats, and details a diagram cannot show; never restate the full flow as both a list and a diagram.",
+        "- Only skip the diagram when the answer is genuinely one or two sentences, is a plain lookup or yes/no, or the user explicitly asks for prose. Defaulting to prose while a diagram was available is the failure mode to avoid.",
+        "- Emit the Mermaid source inside the fence and let the UI render it; do not describe the syntax instead of producing the diagram. Keep labels short so the rendered graph stays readable.",
+    ]
+    .join("\n")
+}
+
 fn software_engineering_prompt(tools: &PromptToolContext<'_>) -> String {
     let exploration = tools.visible_names(&[
         "list_project_files",
@@ -1480,6 +1528,7 @@ fn new_project_prompt(tools: &PromptToolContext<'_>, context: &ChatRunContext) -
     let mut lines = vec![
         "## New managed project workflow".to_string(),
         "- Before implementation, present a concise PRD-style plan covering the goal, modules, pages, interactions, layout, stack, data model, and primary flow; wait for explicit approval.".into(),
+        "- In that plan, use a ```mermaid block for the primary user flow and any architecture or data-model relationships. Describe page layout in short prose or a compact list instead of a second diagram.".into(),
         "- After approval, call `create_project` exactly once. For a medium, large, multi-screen, or uncertain project, use `development_mode: true` and create only the starter shell or first coherent file batch.".into(),
         "- Use the built-in Next.js App Router starter and runtime-compatible dependency versions. Keep `build: next build`, a valid start script, standalone output, one route implementation per language, and global styles imported from the root layout.".into(),
     ];
@@ -1516,6 +1565,7 @@ fn static_system_prompt_sections(
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let mut sections = vec![
         role_and_core_rules_prompt(&tools),
+        response_formatting_prompt(),
         available_tools_prompt(&tools),
         software_engineering_prompt(&tools),
         execution_safety_prompt(&tools),
@@ -2570,6 +2620,29 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_advertises_supported_output_formats_and_proactive_diagrams() {
+        let prompt = static_system_prompt_sections(
+            std::path::Path::new("/workspace"),
+            &ChatRunContext::default(),
+            &[],
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("## Response formatting"));
+        assert!(prompt.contains("LaTeX"));
+        assert!(prompt.contains("```mermaid"));
+        assert!(prompt.contains("Default to a ```mermaid diagram"));
+        assert!(
+            prompt.contains("sequenceDiagram") && prompt.contains("erDiagram"),
+            "the model must know which diagram types are available"
+        );
+        assert!(
+            prompt.contains("GitHub-flavored Markdown"),
+            "the renderer's output formats must be advertised to the model"
+        );
+    }
+
+    #[test]
     fn system_prompt_uses_only_the_final_mobile_tool_catalog() {
         let tools = vec![
             prompt_tool("read_file", "Read   a workspace file."),
@@ -3008,7 +3081,10 @@ mod tests {
     fn folder_workspace_tools_require_a_selected_workspace_for_each_run() {
         let empty = ChatRunContext::default();
         assert!(!tool_visible_for_run("list_workspace_files", &empty));
-        assert!(!tool_visible_for_run("run_workspace_command", &empty));
+        assert!(!tool_visible_for_run("read_workspace_file", &empty));
+        // The merged shell tool is not workspace-gated: it also serves
+        // managed-project conversations via its project_id argument.
+        assert!(tool_visible_for_run("run_shell_command", &empty));
         assert!(tool_visible_for_run("read_project_file", &empty));
 
         let selected = ChatRunContext {
@@ -3016,7 +3092,24 @@ mod tests {
             ..ChatRunContext::default()
         };
         assert!(tool_visible_for_run("list_workspace_files", &selected));
-        assert!(tool_visible_for_run("run_workspace_command", &selected));
+        assert!(tool_visible_for_run("run_shell_command", &selected));
+    }
+
+    #[test]
+    fn legacy_command_tool_allow_lists_authorize_the_merged_tool() {
+        let context = ChatRunContext {
+            allowed_tool_names: vec!["run_workspace_command".into()],
+            ..ChatRunContext::default()
+        };
+        let policy = run_tool_policy(&context, None);
+        assert!(tool_allowed_for_run("run_shell_command", &policy));
+
+        let denied_context = ChatRunContext {
+            denied_tool_names: vec!["run_project_command".into()],
+            ..ChatRunContext::default()
+        };
+        let policy = run_tool_policy(&denied_context, None);
+        assert!(!tool_allowed_for_run("run_shell_command", &policy));
     }
 
     #[test]
@@ -3061,6 +3154,36 @@ mod tests {
             !is_error,
             "Node treats only an explicit error field as failure"
         );
+    }
+
+    #[test]
+    fn null_or_empty_error_field_is_not_a_failure() {
+        // rebuild_project / get_project_status always emit `error: null` on
+        // success; the run must not be marked failed.
+        let (_, is_error) = serialize_tool_result(Ok(serde_json::json!({
+            "success": true,
+            "buildStatus": "built",
+            "error": null
+        })));
+        assert!(!is_error);
+
+        let (_, is_error) = serialize_tool_result(Ok(serde_json::json!({
+            "alive": true,
+            "healthy": true,
+            "error": ""
+        })));
+        assert!(!is_error);
+
+        let (_, is_error) = serialize_tool_result(Ok(serde_json::json!({
+            "buildStatus": "failed",
+            "error": "Build succeeded but restart failed: port in use"
+        })));
+        assert!(is_error);
+
+        let (_, is_error) = serialize_tool_result(Ok(serde_json::json!({
+            "error": { "code": 7, "message": "boom" }
+        })));
+        assert!(is_error);
     }
 
     #[test]
@@ -3422,6 +3545,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finish_task_without_a_summary_does_not_end_silently() {
+        let (hub, provider, workspace, conversation_id) =
+            protocol_test_hub(vec![protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-empty",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({}),
+                )],
+            )]);
+
+        let events = run_protocol_chat(hub.clone(), &conversation_id).await;
+        assert_eq!(provider.requests().len(), 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EventKind::Delta { text } if text == FINISH_TASK_EMPTY_SUMMARY_MESSAGE
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EventKind::AssistantMessage { content, .. }
+                if content == FINISH_TASK_EMPTY_SUMMARY_MESSAGE
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+
+        let stored = hub.store.list_messages(&conversation_id, 20).unwrap();
+        assert!(stored.iter().any(|message| {
+            message.role == Role::Assistant && message.content == FINISH_TASK_EMPTY_SUMMARY_MESSAGE
+        }));
+
+        drop(hub);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn finish_task_accepts_summary_aliases() {
+        let (hub, provider, workspace, conversation_id) =
+            protocol_test_hub(vec![protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-alias",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({ "summary": "Alias summary." }),
+                )],
+            )]);
+
+        let events = run_protocol_chat(hub.clone(), &conversation_id).await;
+        assert_eq!(provider.requests().len(), 1);
+        let expected = "## 任务小结\n\nAlias summary.";
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EventKind::Delta { text } if text == expected
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EventKind::AssistantMessage { content, .. } if content == expected
+        )));
+
+        drop(hub);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
     async fn mixed_finish_task_is_ignored_while_regular_tools_execute() {
         let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
             protocol_assistant(
@@ -3593,16 +3780,27 @@ fn run_tool_policy(
     context: &ChatRunContext,
     agent: Option<&worldbase_protocol::types::AgentDefinition>,
 ) -> RunToolPolicy {
-    let request_allowed = optional_allow_list(&context.allowed_tool_names);
-    let agent_allowed = agent.and_then(|agent| optional_allow_list(&agent.allowed_tools));
+    // Allow/deny lists written before the command-tool merge reference the
+    // legacy names; map them onto the merged tools so existing agents keep
+    // working.
+    let canonicalize = |values: &[String]| -> Vec<String> {
+        normalized_tool_names(values)
+            .into_iter()
+            .map(|name| crate::permissions::canonical_tool_name(&name).to_string())
+            .collect()
+    };
+    let request_allowed = optional_allow_list(&canonicalize(&context.allowed_tool_names));
+    let agent_allowed = agent
+        .and_then(|agent| optional_allow_list(&canonicalize(&agent.allowed_tools)));
     let allowed = match (request_allowed, agent_allowed) {
         (Some(request), Some(agent)) => Some(request.intersection(&agent).cloned().collect()),
         (Some(allowed), None) | (None, Some(allowed)) => Some(allowed),
         (None, None) => None,
     };
-    let mut denied = normalized_tool_names(&context.denied_tool_names);
+    let mut denied: std::collections::HashSet<String> =
+        canonicalize(&context.denied_tool_names).into_iter().collect();
     if let Some(agent) = agent {
-        denied.extend(normalized_tool_names(&agent.denied_tools));
+        denied.extend(canonicalize(&agent.denied_tools));
     }
     RunToolPolicy { allowed, denied }
 }
@@ -4432,12 +4630,27 @@ async fn execute_tool_for_run(
         ))
     } else {
         let policy = worldbase_policy_for(hub.store.as_ref(), tool, custom_tool, &name);
+        // The workspace root defines the "safe zone" for command and path
+        // permissions: folder-workspace conversations use the selected folder,
+        // managed-project runs use the project root.
+        let approved_root = services.folder_workspace.clone().or_else(|| {
+            let project_id = input
+                .get("project_id")
+                .or_else(|| input.get("project"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .or_else(|| services.target_project_id.clone());
+            project_id.and_then(|id| services.projects.project_root(&id).ok())
+        });
         let allowed = crate::permissions::check(
             hub,
             stream_id,
             &policy,
             &name,
             &input,
+            approved_root.as_deref(),
             interactive,
             auto_approve,
             Some(abort),
@@ -5097,8 +5310,19 @@ async fn run_chat_inner(
         // call. Persist and publish only its rendered user-visible message so
         // replay never contains a tool_use without a matching tool_result.
         if let Some(finish_input) = finish_call.as_ref().filter(|_| tool_uses.is_empty()) {
-            let finish_content =
+            let mut finish_content =
                 build_finish_task_message(finish_input, &assistant_msg.text_view());
+            if finish_content.trim().is_empty() {
+                // Never terminate with an invisible turn. The provider may
+                // have dropped the tool arguments (see the OpenAI Responses
+                // adapter fallbacks), and the model may also call finish_task
+                // with an unexpected field name.
+                tracing::warn!(
+                    input = %finish_input,
+                    "finish_task ended the run without a usable task summary"
+                );
+                finish_content = FINISH_TASK_EMPTY_SUMMARY_MESSAGE.to_string();
+            }
             let record = ChatMessage {
                 id: 0,
                 role: Role::Assistant,

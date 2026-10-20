@@ -29,6 +29,40 @@ fn thinking_budget(effort: Option<&str>) -> Option<u32> {
     }
 }
 
+fn adaptive_effort(effort: Option<&str>) -> Option<&'static str> {
+    match effort.unwrap_or("medium") {
+        "none" => None,
+        "low" => Some("low"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" | "ultra" => Some("max"),
+        _ => Some("medium"),
+    }
+}
+
+/// The two thinking wire shapes an Anthropic-compatible endpoint may accept.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ThinkingMode {
+    /// `thinking: {type: "enabled", budget_tokens}` — classic extended thinking.
+    Classic,
+    /// `thinking: {type: "adaptive"}` + `output_config.effort` — required by
+    /// Claude 5.5+ upstreams, which reject the classic budget form.
+    Adaptive,
+}
+
+fn default_thinking_mode(model: &str) -> ThinkingMode {
+    let id = model.trim().to_ascii_lowercase();
+    let id = id.split('[').next().unwrap_or_default();
+    let mut parts = id.strip_prefix("claude-").unwrap_or_default().split('-');
+    let family = parts.next().unwrap_or_default();
+    let major = parts.next().and_then(|v| v.parse::<u32>().ok());
+    let minor = parts.next().and_then(|v| v.parse::<u32>().ok());
+    match (family, major, minor) {
+        ("opus", Some(5), Some(minor)) if minor >= 5 => ThinkingMode::Adaptive,
+        _ => ThinkingMode::Classic,
+    }
+}
+
 pub struct AnthropicProvider {
     client: Client,
     api_key: String,
@@ -166,6 +200,10 @@ impl AnthropicProvider {
             .collect()
     }
 
+    /// Test convenience resolving the thinking mode from the model; production
+    /// callers go through `request_body_with_mode` so the 400 fallback can
+    /// rebuild the body with the flipped mode.
+    #[cfg(test)]
     fn request_body(
         &self,
         system: Option<&str>,
@@ -174,15 +212,46 @@ impl AnthropicProvider {
         max_tokens: u32,
         options: &ChatOptions,
     ) -> Value {
-        let thinking = options
-            .enable_thinking
-            .then(|| thinking_budget(options.reasoning_effort.as_deref()))
-            .flatten()
-            .map(|budget_tokens| json!({ "type": "enabled", "budget_tokens": budget_tokens }));
-        let max_tokens = thinking
+        let mode = default_thinking_mode(&self.model);
+        self.request_body_with_mode(system, messages, tools, max_tokens, options, mode)
+    }
+
+    fn request_body_with_mode(
+        &self,
+        system: Option<&str>,
+        messages: &[LlmMessage],
+        tools: &[LlmTool],
+        max_tokens: u32,
+        options: &ChatOptions,
+        thinking_mode: ThinkingMode,
+    ) -> Value {
+        // (thinking block, optional output_config, classic budget for max_tokens)
+        let reasoning =
+            options
+                .enable_thinking
+                .then(|| match thinking_mode {
+                    ThinkingMode::Classic => thinking_budget(options.reasoning_effort.as_deref())
+                        .map(|budget| {
+                            (
+                                json!({ "type": "enabled", "budget_tokens": budget }),
+                                None,
+                                Some(budget),
+                            )
+                        }),
+                    ThinkingMode::Adaptive => adaptive_effort(options.reasoning_effort.as_deref())
+                        .map(|effort| {
+                            (
+                                json!({ "type": "adaptive" }),
+                                Some(json!({ "effort": effort })),
+                                None,
+                            )
+                        }),
+                })
+                .flatten();
+        let max_tokens = reasoning
             .as_ref()
-            .and_then(|value| value["budget_tokens"].as_u64())
-            .map(|budget| (budget as u32).saturating_add(4096))
+            .and_then(|(.., budget)| *budget)
+            .map(|budget| budget.saturating_add(4096))
             .unwrap_or_else(|| max_tokens.max(DEFAULT_MAX_TOKENS));
         let mut body = json!({
             "model": self.model,
@@ -215,15 +284,21 @@ impl AnthropicProvider {
             }
             body["system"] = Value::Array(blocks);
         }
-        if let Some(thinking) = thinking {
-            body["thinking"] = thinking;
-        } else {
-            let temperature = options
-                .temperature
-                .filter(|value| value.is_finite())
-                .unwrap_or(CODING_TEMPERATURE)
-                .clamp(0.0, 1.0);
-            body["temperature"] = json!(temperature);
+        match reasoning {
+            Some((thinking, output_config, ..)) => {
+                body["thinking"] = thinking;
+                if let Some(output_config) = output_config {
+                    body["output_config"] = output_config;
+                }
+            }
+            None => {
+                let temperature = options
+                    .temperature
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(CODING_TEMPERATURE)
+                    .clamp(0.0, 1.0);
+                body["temperature"] = json!(temperature);
+            }
         }
         if !tools.is_empty() {
             body["tools"] = json!(tools
@@ -237,6 +312,24 @@ impl AnthropicProvider {
             body["tool_choice"] = json!({ "type": "auto" });
         }
         body
+    }
+
+    async fn send_messages(
+        &self,
+        url: &reqwest::Url,
+        headers: &reqwest::header::HeaderMap,
+        body: &Value,
+    ) -> Result<reqwest::Response> {
+        crate::http::send_with_retry("anthropic", || {
+            self.client
+                .post(url.clone())
+                .header("x-api-key", &self.api_key)
+                .bearer_auth(&self.api_key)
+                .header("anthropic-version", API_VERSION)
+                .headers(headers.clone())
+                .json(body)
+        })
+        .await
     }
 }
 
@@ -536,24 +629,47 @@ impl Provider for AnthropicProvider {
         max_tokens: u32,
         options: ChatOptions,
     ) -> Result<ChunkStream> {
-        let body = self.request_body(system, &messages, &tools, max_tokens, &options);
+        let mode = default_thinking_mode(&self.model);
+        let mut body =
+            self.request_body_with_mode(system, &messages, &tools, max_tokens, &options, mode);
         let url = crate::urls::anthropic_messages_url(&self.base_url, DEFAULT_BASE_URL)?;
         let headers = crate::http::session_headers(&url, options.session_id.as_deref())?;
-        let resp = crate::http::send_with_retry("anthropic", || {
-            self.client
-                .post(url.clone())
-                .header("x-api-key", &self.api_key)
-                .bearer_auth(&self.api_key)
-                .header("anthropic-version", API_VERSION)
-                .headers(headers.clone())
-                .json(&body)
-        })
-        .await?;
+        let mut resp = self.send_messages(&url, &headers, &body).await?;
 
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            bail!("anthropic api error ({status}): {text}");
+            // Relays and upstreams disagree on the thinking wire shape: Claude
+            // 5.5+ rejects the classic budget block while older endpoints
+            // reject the adaptive form. Retry once with the other shape when
+            // the 400 points at the thinking block.
+            let flipped = if body.get("thinking").is_some() {
+                match mode {
+                    ThinkingMode::Classic if text.contains("adaptive thinking") => {
+                        Some(ThinkingMode::Adaptive)
+                    }
+                    ThinkingMode::Adaptive if text.contains("thinking") => {
+                        Some(ThinkingMode::Classic)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            match flipped {
+                Some(fallback) => {
+                    body = self.request_body_with_mode(
+                        system, &messages, &tools, max_tokens, &options, fallback,
+                    );
+                    resp = self.send_messages(&url, &headers, &body).await?;
+                    let retry_status = resp.status();
+                    if !retry_status.is_success() {
+                        let retry_text = resp.text().await.unwrap_or_default();
+                        bail!("anthropic api error ({retry_status}): {retry_text}");
+                    }
+                }
+                None => bail!("anthropic api error ({status}): {text}"),
+            }
         }
 
         let state = StreamState {
@@ -714,6 +830,233 @@ mod tests {
         assert_eq!(normal["max_tokens"], DEFAULT_MAX_TOKENS);
         assert_eq!(normal["temperature"], json!(CODING_TEMPERATURE));
         assert!(normal.get("thinking").is_none());
+    }
+
+    #[test]
+    fn adaptive_models_use_the_adaptive_thinking_shape() {
+        let provider = AnthropicProvider::new(
+            "key".into(),
+            "claude-opus-5-5".into(),
+            Some("https://api.anthropic.com/v1".into()),
+        )
+        .unwrap();
+        let body = provider.request_body(
+            Some("system"),
+            &[LlmMessage::text(LlmRole::User, "hello")],
+            &[],
+            1024,
+            &ChatOptions {
+                enable_thinking: true,
+                reasoning_effort: Some("ultra".into()),
+                ..ChatOptions::default()
+            },
+        );
+        assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+        assert_eq!(body["output_config"], json!({ "effort": "max" }));
+        assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn thinking_mode_detection_covers_context_suffixes_and_families() {
+        assert!(matches!(
+            default_thinking_mode("claude-opus-5-5"),
+            ThinkingMode::Adaptive
+        ));
+        assert!(matches!(
+            default_thinking_mode("claude-opus-5-6"),
+            ThinkingMode::Adaptive
+        ));
+        assert!(matches!(
+            default_thinking_mode("claude-opus-5-5[1M]"),
+            ThinkingMode::Adaptive
+        ));
+        assert!(matches!(
+            default_thinking_mode("claude-opus-5"),
+            ThinkingMode::Classic
+        ));
+        assert!(matches!(
+            default_thinking_mode("claude-opus-4-6"),
+            ThinkingMode::Classic
+        ));
+        assert!(matches!(
+            default_thinking_mode("claude-sonnet-5"),
+            ThinkingMode::Classic
+        ));
+        assert!(matches!(
+            default_thinking_mode("glm-5.3"),
+            ThinkingMode::Classic
+        ));
+    }
+
+    #[test]
+    fn adaptive_effort_maps_reasoning_levels() {
+        let effort = |value: &str| adaptive_effort(Some(value.to_string()).as_deref());
+        assert_eq!(effort("low"), Some("low"));
+        assert_eq!(effort("medium"), Some("medium"));
+        assert_eq!(effort("high"), Some("high"));
+        assert_eq!(effort("xhigh"), Some("xhigh"));
+        assert_eq!(effort("max"), Some("max"));
+        assert_eq!(effort("ultra"), Some("max"));
+        assert_eq!(effort("unknown"), Some("medium"));
+        assert_eq!(effort("none"), None);
+        assert_eq!(adaptive_effort(None), Some("medium"));
+    }
+
+    #[tokio::test]
+    async fn classic_thinking_400_retries_with_the_adaptive_shape() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let body: Value = serde_json::from_str(
+                String::from_utf8_lossy(&request)
+                    .split_once("\r\n\r\n")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            assert_eq!(body["thinking"]["type"], "enabled");
+
+            let error = json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "claude-sonnet-5 requires adaptive thinking; omit thinking or use thinking.type=adaptive and output_config.effort"
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{error}",
+                error.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let body: Value = serde_json::from_str(
+                String::from_utf8_lossy(&request)
+                    .split_once("\r\n\r\n")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+            assert_eq!(body["output_config"], json!({ "effort": "medium" }));
+            write_sse_response(
+                &mut socket,
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+            )
+            .await;
+        });
+
+        let provider = AnthropicProvider::new(
+            "test-key".into(),
+            "claude-sonnet-5".into(),
+            Some(format!("http://{address}/v1/messages")),
+        )
+        .unwrap();
+        let mut stream = provider
+            .chat_stream(
+                None,
+                vec![LlmMessage::text(LlmRole::User, "hello")],
+                vec![],
+                1024,
+                ChatOptions {
+                    enable_thinking: true,
+                    ..ChatOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut answer = String::new();
+        while let Some(chunk) = stream.next().await {
+            if let StreamChunk::TextDelta(delta) = chunk.unwrap() {
+                answer.push_str(&delta);
+            }
+        }
+        server.await.unwrap();
+        assert_eq!(answer, "ok");
+    }
+
+    #[tokio::test]
+    async fn adaptive_thinking_400_retries_with_the_classic_shape() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let body: Value = serde_json::from_str(
+                String::from_utf8_lossy(&request)
+                    .split_once("\r\n\r\n")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+
+            let error = json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "thinking.type: unrecognized value; expected enabled with budget_tokens"
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{error}",
+                error.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let body: Value = serde_json::from_str(
+                String::from_utf8_lossy(&request)
+                    .split_once("\r\n\r\n")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            assert_eq!(body["thinking"]["type"], "enabled");
+            assert_eq!(body["thinking"]["budget_tokens"], 40_000);
+            assert!(body.get("output_config").is_none());
+            write_sse_response(
+                &mut socket,
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+            )
+            .await;
+        });
+
+        let provider = AnthropicProvider::new(
+            "test-key".into(),
+            "claude-opus-5-5".into(),
+            Some(format!("http://{address}/v1/messages")),
+        )
+        .unwrap();
+        let mut stream = provider
+            .chat_stream(
+                None,
+                vec![LlmMessage::text(LlmRole::User, "hello")],
+                vec![],
+                1024,
+                ChatOptions {
+                    enable_thinking: true,
+                    reasoning_effort: Some("ultra".into()),
+                    ..ChatOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut answer = String::new();
+        while let Some(chunk) = stream.next().await {
+            if let StreamChunk::TextDelta(delta) = chunk.unwrap() {
+                answer.push_str(&delta);
+            }
+        }
+        server.await.unwrap();
+        assert_eq!(answer, "ok");
     }
 
     #[test]

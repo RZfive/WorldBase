@@ -165,6 +165,63 @@ test('ensureMessageIds backfills legacy messages in place and keeps existing ids
   assert.equal(legacy[1].id, 'keep-me', 'existing id is preserved')
 })
 
+function createImageUserMessage (id, text) {
+  return {
+    role: 'user',
+    id,
+    content: [
+      { type: 'text', text },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }
+    ],
+    blocks: [
+      { id: `${id}-text`, kind: 'content', content: text },
+      { id: `${id}-image`, kind: 'content', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }] }
+    ]
+  }
+}
+
+function contentPartsOf (message) {
+  return (message.blocks || [])
+    .filter(block => block.kind === 'content')
+    .flatMap(block => typeof block.content === 'string'
+      ? [{ type: 'text', text: block.content }]
+      : block.content)
+}
+
+test('in-place resend of an image message keeps the edited text next to the image', async () => {
+  const sourceMessages = [
+    createImageUserMessage('u1', 'look at this screenshot'),
+    { role: 'assistant', id: 'a1', content: 'r1' }
+  ]
+  const { branching, messages, sentPrepared } = createHarness({ sourceMessages })
+
+  await branching.submitEdit('u1', 'look at this screenshot renamed', 'inplace')
+
+  const resent = messages.value[0]
+  const parts = contentPartsOf(resent)
+  assert.equal(parts.filter(part => part.type === 'text').map(part => part.text).join(''), 'look at this screenshot renamed')
+  assert.equal(parts.filter(part => part.type === 'image_url').length, 1, 'the image is still rendered')
+
+  // The model still receives both the edited text and the image.
+  assert.equal(sentPrepared[0].prepared.content[0].type, 'text')
+  assert.equal(sentPrepared[0].prepared.content[0].text, 'look at this screenshot renamed')
+  assert.equal(sentPrepared[0].prepared.content[1].type, 'image_url')
+})
+
+test('fork resend of an image message keeps the edited text next to the image', async () => {
+  const sourceMessages = [
+    createImageUserMessage('u1', 'look at this screenshot'),
+    { role: 'assistant', id: 'a1', content: 'r1' }
+  ]
+  const { branching, messages } = createHarness({ sourceMessages })
+
+  await branching.submitEdit('u1', 'edited with image', 'fork')
+
+  const parts = contentPartsOf(messages.value[0])
+  assert.equal(parts.filter(part => part.type === 'text').map(part => part.text).join(''), 'edited with image')
+  assert.equal(parts.filter(part => part.type === 'image_url').length, 1, 'the image is still rendered')
+})
+
 test('editing is limited to user messages with a stable id and blocked while streaming', async () => {
   const sourceMessages = [
     { role: 'user', content: 'legacy message without id' },

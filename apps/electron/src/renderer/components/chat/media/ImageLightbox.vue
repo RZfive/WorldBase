@@ -291,24 +291,37 @@ defineExpose({ open })
   position: fixed;
   inset: 0;
   z-index: 1200;
-  background: rgba(9, 13, 20, 0.78);
-  backdrop-filter: blur(16px);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: 32px;
+  /* No scrim: the dialog floats over the app so the conversation behind stays
+     visible. Clicking this transparent layer still closes the preview. */
+  background: transparent;
 }
 
 .image-lightbox-dialog {
-  width: min(960px, calc(100vw - 48px));
-  max-height: calc(100vh - 48px);
+  width: min(920px, calc(100vw - 64px));
+  max-height: calc(100vh - 64px);
   display: flex;
   flex-direction: column;
-  background: var(--app-panel);
+  background: var(--app-panel-strong);
   border: 1px solid var(--app-border-strong);
-  border-radius: 20px;
+  border-radius: 16px;
   overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--shadow-3);
+  animation: image-lightbox-enter 160ms var(--ease-out);
+}
+
+@keyframes image-lightbox-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .image-lightbox-toolbar {
@@ -316,26 +329,33 @@ defineExpose({ open })
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 12px;
-  padding: 14px 18px;
+  gap: 10px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--app-border);
+  background: var(--app-panel-strong);
 }
 
 .image-lightbox-meta {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  min-width: 0;
 }
 
 .image-lightbox-title {
-  font-size: 0.95rem;
-  color: var(--app-text-strong);
-  font-weight: 600;
+  font-size: 0.86rem;
+  font-weight: 500;
+  color: var(--app-text-soft);
+  letter-spacing: 0.01em;
 }
 
 .image-lightbox-counter {
-  font-size: 0.82rem;
-  color: var(--app-text-muted);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--app-panel-muted);
+  color: var(--app-text-faint);
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .image-lightbox-actions {
@@ -346,53 +366,63 @@ defineExpose({ open })
 }
 
 .image-lightbox-zoom {
-  min-width: 60px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid var(--app-border-strong);
-  background: var(--app-panel-strong);
-  color: var(--app-text-muted);
-  font-size: 0.82rem;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  background: var(--app-panel-subtle);
+  color: var(--app-text-faint);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .image-lightbox-btn {
-  padding: 8px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--app-accent-glow);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 38%, transparent);
   background: var(--app-accent-soft);
   color: var(--app-text-strong);
+  font-size: 0.8rem;
   cursor: pointer;
-  transition: background 0.16s ease, border-color 0.16s ease;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
 }
 
 .image-lightbox-btn:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
-.image-lightbox-btn:hover {
+.image-lightbox-btn:hover:not(:disabled) {
   background: var(--app-panel-muted);
-  border-color: var(--app-accent);
-}
-
-.image-lightbox-btn:disabled:hover {
-  background: transparent;
   border-color: var(--app-border-strong);
 }
 
 .image-lightbox-btn.secondary {
   border-color: var(--app-border-strong);
   background: transparent;
+  color: var(--app-text-soft);
+}
+
+.image-lightbox-btn.secondary:hover:not(:disabled) {
+  background: var(--app-panel-muted);
+  color: var(--app-text-strong);
 }
 
 .image-lightbox-body {
-  padding: 20px;
+  padding: 18px;
   overflow: auto;
   overscroll-behavior: contain;
   overflow-anchor: none;
   min-height: 280px;
-  background: var(--app-panel-strong);
+  background: var(--app-chat-canvas);
   scrollbar-gutter: stable both-edges;
   scrollbar-width: thin;
   scrollbar-color: var(--app-border-strong) transparent;
@@ -427,8 +457,8 @@ defineExpose({ open })
   display: block;
   max-width: none;
   max-height: none;
-  border-radius: 14px;
-  border: 1px solid var(--app-border-strong);
+  border-radius: 10px;
+  border: 1px solid var(--app-border);
   background: var(--app-panel-strong);
   cursor: default;
   transition: border-color 0.18s ease;
@@ -441,21 +471,21 @@ defineExpose({ open })
 
 .image-lightbox-strip {
   display: flex;
-  gap: 10px;
-  padding: 14px 18px 18px;
+  gap: 8px;
+  padding: 10px 14px 12px;
   overflow-x: auto;
   border-top: 1px solid var(--app-border);
-  background: var(--app-panel);
+  background: var(--app-panel-strong);
 }
 
 .image-lightbox-thumb {
   flex: 0 0 auto;
-  width: 68px;
-  height: 68px;
-  padding: 4px;
-  border-radius: 12px;
+  width: 56px;
+  height: 56px;
+  padding: 3px;
+  border-radius: 10px;
   border: 1px solid var(--app-border-strong);
-  background: var(--app-panel-strong);
+  background: var(--app-panel-subtle);
   cursor: pointer;
   transition: border-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
 }
@@ -478,8 +508,12 @@ defineExpose({ open })
 }
 
 @media (max-width: 860px) {
+  .image-lightbox {
+    padding: 12px;
+  }
+
   .image-lightbox-dialog {
-    width: calc(100vw - 24px);
+    width: 100%;
     max-height: calc(100vh - 24px);
   }
 }

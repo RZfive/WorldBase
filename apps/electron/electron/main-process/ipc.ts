@@ -95,7 +95,7 @@ function buildFolderWorkspacePromptSection (workspaceRoot: string | null): strin
     '- Use relative paths inside the selected folder. Do not use absolute paths as tool arguments.',
     '- Explore with list_workspace_files, read_workspace_file, grep_workspace, and glob_workspace.',
     '- Before editing an existing file, read it with read_workspace_file, then use edit_workspace_file for targeted exact replacements. Use write_workspace_file for new files or broad rewrites, and patch_workspace_file for line-range patches when appropriate.',
-    '- Verify changes with run_workspace_command for short install, build, test, lint, type-check, or diagnostic commands. If a workspace command times out, check it with get_workspace_command_status before retrying.',
+    '- Verify changes with run_shell_command (installs, builds, tests, lint, type-checks, git, and chained commands all run there; routine workspace commands run without a permission prompt). If a command times out, check it with get_command_status before retrying. It can also run inside a managed project by passing project_id.',
     '- Plan mode still applies: read/search tools are allowed, while workspace write/delete/run tools are blocked until planning exits.'
   ].join('\n')
 }
