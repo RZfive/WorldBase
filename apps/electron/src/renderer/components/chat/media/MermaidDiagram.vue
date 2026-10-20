@@ -128,9 +128,13 @@ watch(
 }
 
 .mermaid-diagram.preview {
-  min-width: min(960px, calc(100vw - 220px));
+  /* Fits the 920px preview dialog (884px of content after its 18px padding). */
+  min-width: min(880px, calc(100vw - 140px));
   width: max-content;
   max-width: none;
+  border: none;
+  background: transparent;
+  overflow: visible;
 }
 
 .mermaid-diagram-header {
@@ -202,6 +206,12 @@ watch(
 .mermaid-diagram-canvas.preview {
   overflow: visible;
   min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  /* Mermaid renders with the light "neutral" theme regardless of app theme, so
+     the diagram keeps its own light surface instead of inheriting the canvas. */
+  background: #fdfdff;
 }
 
 .mermaid-diagram-placeholder,

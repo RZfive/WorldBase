@@ -1054,6 +1054,24 @@ fn role_and_core_rules_prompt(tools: &PromptToolContext<'_>) -> String {
     lines.join("\n")
 }
 
+/// Output-format capabilities the chat renderer actually supports. Without this
+/// the model falls back to plain prose and does not reach for diagrams, even
+/// when a flow or architecture is far easier to read as a graph.
+fn response_formatting_prompt() -> String {
+    [
+        "## Response formatting",
+        "- The chat UI renders GitHub-flavored Markdown, LaTeX math, and Mermaid diagrams directly.",
+        "- Write mathematical expressions in LaTeX: `$...$` inline and `$$...$$` for display blocks.",
+        "- Default to a ```mermaid diagram whenever the answer can be expressed as a graph or chart. This is the expected default, not an optional extra: if the content has structure, draw it.",
+        "- Content that must be drawn: request and data flow, process steps, decision logic, call and message sequences, system and service architecture, module and dependency structure, state transitions, database and data-model relationships, hierarchies and mind maps, timelines and milestones, and proportions or comparisons.",
+        "- Pick the most expressive Mermaid type instead of always using a flowchart: `flowchart` for process and architecture, `sequenceDiagram` for interactions, `classDiagram` for types and code structure, `stateDiagram-v2` for state machines, `erDiagram` for data models, `gantt` for schedules, `timeline` for chronology, `mindmap` for breakdowns, `pie` or `quadrantChart` for proportions and positioning.",
+        "- A diagram replaces the prose that would describe the same relationships. Keep only the conclusions, caveats, and details a diagram cannot show; never restate the full flow as both a list and a diagram.",
+        "- Only skip the diagram when the answer is genuinely one or two sentences, is a plain lookup or yes/no, or the user explicitly asks for prose. Defaulting to prose while a diagram was available is the failure mode to avoid.",
+        "- Emit the Mermaid source inside the fence and let the UI render it; do not describe the syntax instead of producing the diagram. Keep labels short so the rendered graph stays readable.",
+    ]
+    .join("\n")
+}
+
 fn software_engineering_prompt(tools: &PromptToolContext<'_>) -> String {
     let exploration = tools.visible_names(&[
         "list_project_files",
@@ -1510,6 +1528,7 @@ fn new_project_prompt(tools: &PromptToolContext<'_>, context: &ChatRunContext) -
     let mut lines = vec![
         "## New managed project workflow".to_string(),
         "- Before implementation, present a concise PRD-style plan covering the goal, modules, pages, interactions, layout, stack, data model, and primary flow; wait for explicit approval.".into(),
+        "- In that plan, use a ```mermaid block for the primary user flow and any architecture or data-model relationships. Describe page layout in short prose or a compact list instead of a second diagram.".into(),
         "- After approval, call `create_project` exactly once. For a medium, large, multi-screen, or uncertain project, use `development_mode: true` and create only the starter shell or first coherent file batch.".into(),
         "- Use the built-in Next.js App Router starter and runtime-compatible dependency versions. Keep `build: next build`, a valid start script, standalone output, one route implementation per language, and global styles imported from the root layout.".into(),
     ];
@@ -1546,6 +1565,7 @@ fn static_system_prompt_sections(
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let mut sections = vec![
         role_and_core_rules_prompt(&tools),
+        response_formatting_prompt(),
         available_tools_prompt(&tools),
         software_engineering_prompt(&tools),
         execution_safety_prompt(&tools),
@@ -2597,6 +2617,29 @@ mod tests {
                 && text == "I found it."
                 && data == "encrypted-thinking-payload"
         ));
+    }
+
+    #[test]
+    fn system_prompt_advertises_supported_output_formats_and_proactive_diagrams() {
+        let prompt = static_system_prompt_sections(
+            std::path::Path::new("/workspace"),
+            &ChatRunContext::default(),
+            &[],
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("## Response formatting"));
+        assert!(prompt.contains("LaTeX"));
+        assert!(prompt.contains("```mermaid"));
+        assert!(prompt.contains("Default to a ```mermaid diagram"));
+        assert!(
+            prompt.contains("sequenceDiagram") && prompt.contains("erDiagram"),
+            "the model must know which diagram types are available"
+        );
+        assert!(
+            prompt.contains("GitHub-flavored Markdown"),
+            "the renderer's output formats must be advertised to the model"
+        );
     }
 
     #[test]

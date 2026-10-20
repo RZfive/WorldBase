@@ -725,8 +725,12 @@ onUnmounted(() => {
         </div>
       </template>
 
-      <ImageLightbox v-if="galleryActive" ref="lightboxRef" :images="galleryImages" @close="closeLightbox" />
-      <MermaidPreviewDialog :diagram="activeMermaidPreview" @close="closeMermaidPreview" />
+      <Teleport to="body">
+        <ImageLightbox v-if="galleryActive" ref="lightboxRef" :images="galleryImages" @close="closeLightbox" />
+      </Teleport>
+      <Teleport to="body">
+        <MermaidPreviewDialog :diagram="activeMermaidPreview" @close="closeMermaidPreview" />
+      </Teleport>
 
       <Teleport to="body">
         <div

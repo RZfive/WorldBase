@@ -138,21 +138,34 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  background: rgba(9, 13, 20, 0.78);
-  backdrop-filter: blur(16px);
+  padding: 32px;
+  /* No scrim, matching the image lightbox: the diagram floats over the app
+     and the conversation behind it stays readable. */
+  background: transparent;
 }
 
 .mermaid-preview-dialog {
-  width: min(1200px, calc(100vw - 48px));
-  max-height: calc(100vh - 48px);
+  width: min(920px, calc(100vw - 64px));
+  max-height: calc(100vh - 64px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-radius: 22px;
+  border-radius: 16px;
   border: 1px solid var(--app-border-strong);
-  background: var(--app-panel);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+  background: var(--app-panel-strong);
+  box-shadow: var(--shadow-3);
+  animation: mermaid-preview-enter 160ms var(--ease-out);
+}
+
+@keyframes mermaid-preview-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .mermaid-preview-toolbar {
@@ -160,77 +173,98 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 12px;
-  padding: 14px 18px;
+  gap: 10px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--app-border);
+  background: var(--app-panel-strong);
 }
 
-.mermaid-preview-meta,
+.mermaid-preview-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
 .mermaid-preview-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
 .mermaid-preview-title {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--app-text-strong);
+  font-size: 0.86rem;
+  font-weight: 500;
+  color: var(--app-text-soft);
+  letter-spacing: 0.01em;
 }
 
 .mermaid-preview-hint {
-  font-size: 0.8rem;
-  color: var(--app-text-muted);
+  font-size: 0.74rem;
+  color: var(--app-text-faint);
 }
 
 .mermaid-preview-zoom {
-  min-width: 60px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid var(--app-border-strong);
-  background: var(--app-panel-strong);
-  color: var(--app-text-muted);
-  font-size: 0.82rem;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  background: var(--app-panel-subtle);
+  color: var(--app-text-faint);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .mermaid-preview-btn {
-  padding: 8px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--app-accent-glow);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 38%, transparent);
   background: var(--app-accent-soft);
   color: var(--app-text-strong);
+  font-size: 0.8rem;
   cursor: pointer;
-  transition: background 0.16s ease, border-color 0.16s ease;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
 }
 
 .mermaid-preview-btn.secondary {
   border-color: var(--app-border-strong);
   background: transparent;
+  color: var(--app-text-soft);
 }
 
-.mermaid-preview-btn:hover {
+.mermaid-preview-btn:hover:not(:disabled) {
   background: var(--app-panel-muted);
-  border-color: var(--app-accent);
+  border-color: var(--app-border-strong);
+}
+
+.mermaid-preview-btn.secondary:hover:not(:disabled) {
+  color: var(--app-text-strong);
 }
 
 .mermaid-preview-btn:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .mermaid-preview-body {
   flex: 1;
-  min-height: 360px;
+  min-height: 280px;
   overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  background:
-    radial-gradient(circle at center, rgba(91, 140, 255, 0.08), transparent 55%),
-    var(--app-panel-strong);
+  padding: 18px;
+  background: var(--app-chat-canvas);
   cursor: grab;
   user-select: none;
 }
@@ -250,7 +284,7 @@ onUnmounted(() => {
   }
 
   .mermaid-preview-dialog {
-    width: calc(100vw - 24px);
+    width: 100%;
     max-height: calc(100vh - 24px);
   }
 
@@ -260,7 +294,7 @@ onUnmounted(() => {
   }
 
   .mermaid-preview-body {
-    padding: 16px;
+    padding: 12px;
   }
 }
 </style>
