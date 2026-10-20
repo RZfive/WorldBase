@@ -720,6 +720,7 @@ onUnmounted(() => {
             @cancel-edit="() => emit('cancelEdit')"
             @remove-annotation="(annotationId) => emit('removeMessageAnnotation', { messageId: msg.id || null, messageIndex: index, annotationId })"
             @open-annotation-thread="({ annotationId, anchor }) => emit('openAnnotationThread', { messageId: msg.id || null, messageIndex: index, annotationId, anchor })"
+            @open-file-path="(filePath) => emit('openFilePath', filePath)"
           />
         </div>
       </template>

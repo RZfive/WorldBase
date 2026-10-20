@@ -35,13 +35,14 @@ export function cloneToolRuns (toolRuns: ToolRun[]): ToolRun[] {
   }))
 }
 
-export function createToolRun (name: string): ToolRun {
+export function createToolRun (name: string, filePath?: string): ToolRun {
   return {
     id: generateId(),
     name,
     status: 'running',
     progress: [],
-    startedAt: Date.now()
+    startedAt: Date.now(),
+    ...(filePath ? { filePath } : {})
   }
 }
 

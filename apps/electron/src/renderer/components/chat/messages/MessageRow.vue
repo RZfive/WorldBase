@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import SidebarIcon from '../layout/SidebarIcon.vue'
 import { useI18n } from 'vue-i18n'
 import { buildMessageBlocks, getContentText, hasRenderableContent } from '../message-utils'
+import { buildRenderSegments } from '../message-segments'
 import type { ChatMessage, ChatMessageBlock, FilePreviewState } from '../types'
 import ThinkingBlock from '../blocks/ThinkingBlock.vue'
 import ToolRunBlock from '../blocks/ToolRunBlock.vue'
@@ -51,6 +52,7 @@ const emit = defineEmits<{
   (e: 'cancelEdit'): void
   (e: 'removeAnnotation', annotationId: string): void
   (e: 'openAnnotationThread', payload: { annotationId: string; anchor: { left: number; top: number; right: number; bottom: number } }): void
+  (e: 'openFilePath', filePath: string): void
 }>()
 
 function getBlocks (): ChatMessageBlock[] {
@@ -106,65 +108,16 @@ const lastContentBlockIndex = computed(() => getLastContentBlockIndex(blocks.val
 const messageText = computed(() => getMessageText())
 
 /**
- * Codex-style work summary: consecutive thinking + tool + web result runs
+ * Codex-style work summary: consecutive thinking + tool + web result runs —
+ * plus the narration text between tool calls and settled "已写入" file rows —
  * collapse into ONE row (live seconds while working, frozen total once
- * settled), expanding to the full trace — thinking pills, per-tool rows and
- * web result cards. Any run holding at least one non-thinking item collapses
- * into a summary row — including a lone tool call — so every tool execution
- * stays inside the expandable summary; lone thinking stays a standalone pill.
- * File-write cards are deliberately NOT grouped: the work summary stays
- * collapsed after it settles, and a written document must stay visible and
- * clickable without expanding the trace. Purely a render-level transform, so
- * stored/legacy conversations group the same way as live ones.
+ * settled), expanding to the full trace — narration paragraphs, thinking
+ * pills, per-tool rows, web result cards and written-file rows. The message's
+ * trailing content (the actual answer) always stays visible outside the
+ * summary. The transform lives in message-segments.ts so it stays
+ * unit-testable.
  */
-type WorkBurstBlock = Extract<ChatMessageBlock, { kind: 'thinking' | 'tool' | 'web_search' | 'web_fetch' | 'file_preview' }>
-
-const GROUPABLE_KINDS = new Set<ChatMessageBlock['kind']>(['thinking', 'tool', 'web_search', 'web_fetch'])
-
-interface MessageRenderSegment {
-  type: 'single' | 'group'
-  key: string
-  block: ChatMessageBlock
-  blockIndex: number
-  groupBlocks: WorkBurstBlock[]
-}
-
-const renderSegments = computed<MessageRenderSegment[]>(() => {
-  const all = blocks.value
-  const segments: MessageRenderSegment[] = []
-  let run: Array<{ block: ChatMessageBlock; blockIndex: number }> = []
-
-  const flushRun = () => {
-    if (run.length === 0) return
-    const renderable = run.filter(entry => entry.block.kind !== 'thinking' || hasRenderableBlock(entry.block))
-    const hasWork = renderable.some(entry => entry.block.kind !== 'thinking')
-    if (hasWork) {
-      segments.push({
-        type: 'group',
-        key: `group-${renderable[0].block.id}`,
-        block: renderable[0].block,
-        blockIndex: renderable[0].blockIndex,
-        groupBlocks: renderable.map(entry => entry.block) as WorkBurstBlock[]
-      })
-    } else {
-      for (const entry of renderable) {
-        segments.push({ type: 'single', key: entry.block.id, block: entry.block, blockIndex: entry.blockIndex, groupBlocks: [] })
-      }
-    }
-    run = []
-  }
-
-  all.forEach((block, blockIndex) => {
-    if (GROUPABLE_KINDS.has(block.kind)) {
-      run.push({ block, blockIndex })
-      return
-    }
-    flushRun()
-    segments.push({ type: 'single', key: block.id, block, blockIndex, groupBlocks: [] })
-  })
-  flushRun()
-  return segments
-})
+const renderSegments = computed(() => buildRenderSegments(blocks.value))
 
 // A thinking block is only "live" while it is the newest block and still open —
 // message-level streaming alone made every historical thinking block tick.
@@ -210,8 +163,17 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
             <!-- design v1.7: consecutive thinking + tool runs as one work summary row -->
             <ToolGroupBlock
               v-if="segment.type === 'group'"
-              :blocks="segment.groupBlocks"
+              :entries="segment.groupEntries"
               :message-streaming="isStreamingAssistantMessage"
+              :role="props.msg.role"
+              :message-index="props.index"
+              :message-text="messageText"
+              :annotations="props.msg.annotations"
+              @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
+              @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
+              @remove-annotation="(annotationId) => emit('removeAnnotation', annotationId)"
+              @open-annotation-thread="(payload) => emit('openAnnotationThread', payload)"
+              @open-file-path="filePath => emit('openFilePath', filePath)"
             />
             <template v-else>
               <ThinkingBlock
@@ -225,6 +187,7 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
               <ToolRunBlock
                 v-else-if="segment.block.kind === 'tool'"
                 :block="segment.block"
+                @open-file-path="filePath => emit('openFilePath', filePath)"
               />
             </template>
 

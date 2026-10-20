@@ -1100,6 +1100,7 @@ const zhCN = {
     toolStatusCompleted: '已完成',
     toolStatusFailed: '失败',
     toolStatusRunning: '执行中',
+    toolFailuresCount: '失败 {count}',
     excelColumnFallback: '列{index}',
     unconfiguredProvider: '未配置供应商',
     unconfiguredModel: '未配置模型',

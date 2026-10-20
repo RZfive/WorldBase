@@ -1624,7 +1624,7 @@ async fn agent_workspace_catalog_stays_platform_wide_inside_a_restricted_agent_r
         .collect::<Vec<_>>();
     assert!(names.contains(&"list_agent_workspace_catalog"));
     assert!(names.contains(&"read_file"));
-    assert!(names.contains(&"execute_command"));
+    assert!(names.contains(&"run_shell_command"));
 }
 
 #[tokio::test]
@@ -1915,13 +1915,16 @@ async fn abort_interrupts_provider_setup_and_stalled_stream_reads() {
 
 #[tokio::test]
 async fn abort_during_permission_wait_prevents_a_late_allow_from_executing() {
-    let marker = "must-not-be-written-after-abort.txt";
+    // local_write_file targets arbitrary machine paths, so a path outside
+    // the (absent) workspace root must produce a permission request.
+    let marker = std::env::temp_dir().join("must-not-be-written-after-abort.txt");
+    let _ = std::fs::remove_file(&marker);
     let script = vec![MockTurn {
         text: "Request a protected write.".into(),
         tool_calls: vec![(
             "protected-write".into(),
-            "write_file".into(),
-            serde_json::json!({ "path": marker, "content": "too late" }),
+            "local_write_file".into(),
+            serde_json::json!({ "file_path": marker.display().to_string(), "content": "too late" }),
         )],
         stream_in_chunks: false,
     }];
@@ -1961,7 +1964,7 @@ async fn abort_during_permission_wait_prevents_a_late_allow_from_executing() {
                 ..
             } = frame.kind
             {
-                assert_eq!(tool_name, "write_file");
+                assert_eq!(tool_name, "local_write_file");
                 break request_id;
             }
         }
@@ -2005,7 +2008,7 @@ async fn abort_during_permission_wait_prevents_a_late_allow_from_executing() {
     .await
     .expect("permission wait did not terminate promptly after abort");
     assert_eq!(stop_reason, "aborted");
-    assert!(!hub.workspace.join(marker).exists());
+    assert!(!marker.exists());
     assert!(hub.pending_permissions.lock().unwrap().is_empty());
 
     let stale = dispatch(
@@ -2760,7 +2763,9 @@ async fn tool_list_respects_capability_filter() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"execute_command"));
+    // The merged shell executor replaced the legacy command tools.
+    assert!(names.contains(&"run_shell_command"));
+    assert!(names.contains(&"get_command_status"));
 
     let filtered = dispatch(&hub, &mobile, method::TOOL_LIST, serde_json::json!({}))
         .await
@@ -2772,7 +2777,7 @@ async fn tool_list_respects_capability_filter() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(
-        !names.contains(&"execute_command"),
+        !names.contains(&"run_shell_command"),
         "mobile must not see desktop tools"
     );
     assert!(names.contains(&"read_file"));

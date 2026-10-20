@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { USER_ABORT_MESSAGE } from './abort-utils.js'
+import { buildToolRunSummary, filePathForToolRun } from './tool-run-summary.js'
 import type { UsageStore } from '../settings/usage-store.js'
 import type { ChatContentPart, ChatMessage, MessageContent, ToolDefinition } from './contracts.js'
 import {
@@ -756,8 +757,19 @@ function frameToStreamEvent (frame: RustEventFrame, assistantContent: MessageCon
       // Rust emits this before a provider-stream retry. Preserve Node's
       // renderer contract so partial token/thinking buffers are discarded.
       return { type: 'reset' }
-    case 'tool_call':
-      return { type: 'tool_start', name: typeof frame.name === 'string' ? frame.name : 'tool' }
+    case 'tool_call': {
+      const name = typeof frame.name === 'string' ? frame.name : 'tool'
+      const summary = buildToolRunSummary(name, frame.args)
+      // Full (unclamped) target path for file tools so the renderer can open
+      // the file in a workspace tab from the row title.
+      const filePath = filePathForToolRun(name, frame.args)
+      return {
+        type: 'tool_start',
+        name,
+        ...(summary ? { summary } : {}),
+        ...(filePath ? { filePath } : {})
+      }
+    }
     case 'tool_result':
       // Native tool failures stay silent otherwise: the renderer would keep
       // showing the run as completed even though the model saw an error.

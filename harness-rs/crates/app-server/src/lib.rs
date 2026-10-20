@@ -30,7 +30,6 @@ where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let ctx = Arc::new(ConnectionContext::new(capabilities));
-    let mut lines = BufReader::new(input).lines();
     let output = Arc::new(tokio::sync::Mutex::new(output));
 
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -74,74 +73,122 @@ where
     });
 
     let mut request_tasks = JoinSet::new();
+    // NDJSON control frames are not bounded by the BufReader capacity: image
+    // attachments serialize into multi-megabyte base64 lines that span
+    // thousands of reads. Lines must therefore be assembled manually. A
+    // `Lines::next_line()` retry cannot survive a mid-line error — tokio
+    // discards the bytes read before the failure, silently truncating the
+    // request into an uncorrelated -32700 parse error — so transient read
+    // errors must resume into a persistent line buffer instead.
+    let mut reader = BufReader::new(input);
+    let mut line_buf: Vec<u8> = Vec::new();
     loop {
-        // A child process sharing the stdin open-file description (spawned
-        // with inherited stdio) can flip the descriptor to non-blocking mode;
-        // an momentarily empty pipe then reads as EAGAIN instead of blocking.
-        // That must never shut the harness down: back off and retry so the
-        // host's NDJSON control pipe stays alive.
-        let line = loop {
-            match lines.next_line().await {
-                Ok(line) => break line,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    tracing::warn!(error = %error, "app-server stdin would-block; retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        match reader.fill_buf().await {
+            // Ok(empty) reports EOF on the control pipe.
+            Ok(available) if available.is_empty() => {}
+            Ok(available) => {
+                let mut consumed = 0;
+                while let Some(newline) = available[consumed..]
+                    .iter()
+                    .position(|&byte| byte == b'\n')
+                {
+                    line_buf.extend_from_slice(&available[consumed..consumed + newline]);
+                    consumed += newline + 1;
+                    let line = String::from_utf8_lossy(&line_buf).into_owned();
+                    line_buf.clear();
+                    dispatch_line(&hub, &ctx, &out_tx, &mut request_tasks, &line);
                 }
-                Err(error) => {
-                    tracing::error!(error = %error, "app-server stdin read failed; shutting down");
-                    break None;
-                }
+                line_buf.extend_from_slice(&available[consumed..]);
+                let chunk_len = available.len();
+                reader.consume(chunk_len);
+                continue;
             }
-        };
-        let Some(line) = line else {
-            tracing::info!("input eof, app-server exiting");
-            // Complete all requests that were accepted before EOF, then stop
-            // the writer after it has drained their responses.
-            while request_tasks.join_next().await.is_some() {}
-            drop(out_tx);
-            let _ = writer_stop_tx.send(());
-            let _ = writer_task.await;
-            break;
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(incoming) = serde_json::from_str::<Incoming>(trimmed) else {
-            let resp = Response::error(
-                RequestId::Null,
-                worldbase_protocol::rpc::ErrorObject::new(
-                    worldbase_protocol::rpc::PARSE_ERROR,
-                    "invalid json",
-                ),
-            );
-            let _ = out_tx.send(resp.to_message() + "\n");
-            continue;
-        };
-        let hub = hub.clone();
-        let ctx = ctx.clone();
-        let out_tx = out_tx.clone();
-        match incoming {
-            Incoming::Request(req) => {
-                request_tasks.spawn(async move {
-                    let id = req.id.clone();
-                    let result =
-                        dispatcher::dispatch(&hub, &ctx, &req.method, req.params.clone()).await;
-                    let resp = match result {
-                        Ok(value) => Response::success(id, value),
-                        Err(err) => Response::error(id, err),
-                    };
-                    let _ = out_tx.send(resp.to_message() + "\n");
-                });
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                // A child process sharing the stdin open-file description
+                // (spawned with inherited stdio) can flip the descriptor
+                // to non-blocking mode; a momentarily empty pipe then reads
+                // as EAGAIN instead of blocking. That must never shut the
+                // harness down: back off and retry so the host's NDJSON
+                // control pipe stays alive.
+                tracing::warn!(error = %error, "app-server stdin would-block; retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                continue;
             }
-            Incoming::Notification(n) => {
-                request_tasks.spawn(async move {
-                    let _ = dispatcher::dispatch(&hub, &ctx, &n.method, n.params.clone()).await;
-                });
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "app-server stdin read failed; shutting down");
             }
         }
+        if !line_buf.is_empty() {
+            // The host closed its write end after a final line without a
+            // trailing newline; treat the remainder as one last frame.
+            let line = String::from_utf8_lossy(&line_buf).into_owned();
+            line_buf.clear();
+            dispatch_line(&hub, &ctx, &out_tx, &mut request_tasks, &line);
+        }
+        tracing::info!("input eof, app-server exiting");
+        // Complete all requests that were accepted before EOF, then stop
+        // the writer after it has drained their responses.
+        while request_tasks.join_next().await.is_some() {}
+        drop(out_tx);
+        let _ = writer_stop_tx.send(());
+        let _ = writer_task.await;
+        break;
     }
     Ok(())
+}
+
+/// Parse one NDJSON frame and dispatch it. A malformed line answers with an
+/// uncorrelated -32700 response and must never take the control loop down.
+fn dispatch_line(
+    hub: &Arc<Hub>,
+    ctx: &Arc<ConnectionContext>,
+    out_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    request_tasks: &mut JoinSet<()>,
+    line: &str,
+) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let Ok(incoming) = serde_json::from_str::<Incoming>(trimmed) else {
+        let resp = Response::error(
+            RequestId::Null,
+            worldbase_protocol::rpc::ErrorObject::new(
+                worldbase_protocol::rpc::PARSE_ERROR,
+                "invalid json",
+            ),
+        );
+        let _ = out_tx.send(resp.to_message() + "\n");
+        return;
+    };
+    match incoming {
+        Incoming::Request(req) => {
+            let hub = hub.clone();
+            let ctx = ctx.clone();
+            let out_tx = out_tx.clone();
+            request_tasks.spawn(async move {
+                let id = req.id.clone();
+                let result =
+                    dispatcher::dispatch(&hub, &ctx, &req.method, req.params.clone()).await;
+                let resp = match result {
+                    Ok(value) => Response::success(id, value),
+                    Err(err) => Response::error(id, err),
+                };
+                let _ = out_tx.send(resp.to_message() + "\n");
+            });
+        }
+        Incoming::Notification(n) => {
+            let hub = hub.clone();
+            let ctx = ctx.clone();
+            request_tasks.spawn(async move {
+                let _ = dispatcher::dispatch(&hub, &ctx, &n.method, n.params.clone()).await;
+            });
+        }
+    }
 }
 
 /// 把 hub 事件流转换为 chunk 流（测试/CLI 可用）。
@@ -157,7 +204,9 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
-    use tokio::io::{duplex, AsyncWriteExt};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{duplex, AsyncWriteExt, ReadBuf};
 
     async fn run_requests(hub: Arc<Hub>, requests: Vec<Value>) -> BTreeMap<i64, Value> {
         let (mut client_input, server_input) = duplex(32 * 1024);
@@ -317,5 +366,108 @@ mod tests {
         assert_eq!(responses[&7]["language"], "typescript");
         assert_eq!(responses[&7]["content"], "export const preview = 'rust'\n");
         assert_eq!(responses[&8]["appended"], false);
+    }
+
+    /// Simulates a stdin open-file description flipped to non-blocking mode by
+    /// an inherited-stdio child: reads succeed while data is available and fail
+    /// with `WouldBlock` at the configured byte offsets (the pipe ran empty,
+    /// more data arrives later).
+    struct WouldBlockReader {
+        data: Vec<u8>,
+        offset: usize,
+        /// Total-byte offsets at which the next read returns EAGAIN once.
+        block_points: std::collections::VecDeque<usize>,
+    }
+
+    impl tokio::io::AsyncRead for WouldBlockReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.offset >= self.data.len() {
+                return Poll::Ready(Ok(()));
+            }
+            let Some(&block_at) = self.block_points.front() else {
+                let end = (self.offset + buf.remaining()).min(self.data.len());
+                buf.put_slice(&self.data[self.offset..end]);
+                self.offset = end;
+                return Poll::Ready(Ok(()));
+            };
+            if block_at == self.offset {
+                self.block_points.pop_front();
+                return Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)));
+            }
+            let end = block_at.min(self.offset + buf.remaining()).min(self.data.len());
+            buf.put_slice(&self.data[self.offset..end]);
+            self.offset = end;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn would_block_mid_line_preserves_large_requests() {
+        use std::collections::VecDeque;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let projects = temporary.path().join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let store = Arc::new(
+            worldbase_memory::Store::open(&temporary.path().join("harness.sqlite")).unwrap(),
+        );
+        let hub = Hub::new(projects, store).unwrap();
+
+        // A small request first (like the Electron handshake), then one line
+        // padded well past the BufReader capacity (8 KiB) with WouldBlock
+        // injected mid-line three times — the read pattern of a
+        // multi-megabyte image attachment on a non-blocking stdin.
+        let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1.0","capabilities":{"platform":"desktop","features":["subprocess"],"excludes":[]}}}"#;
+        let padding = "p".repeat(20 * 1024);
+        let large_append = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"project.logs.append","params":{{"port":43123,"type":"stdout","text":"{padding}"}}}}"#
+        );
+        let mut data = Vec::new();
+        data.extend_from_slice(initialize.as_bytes());
+        data.push(b'\n');
+        data.extend_from_slice(large_append.as_bytes());
+        data.push(b'\n');
+        let reader = WouldBlockReader {
+            data,
+            offset: 0,
+            block_points: VecDeque::from(vec![5_000, 12_000, 19_000]),
+        };
+
+        let (client_input, _server_input) = duplex(32 * 1024);
+        let (server_output, client_output) = duplex(32 * 1024);
+        drop(client_input);
+        let server = tokio::spawn(run_with(
+            hub,
+            Capabilities::desktop(),
+            reader,
+            server_output,
+        ));
+
+        let mut lines = BufReader::new(client_output).lines();
+        let mut response = None;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let parsed: Value = serde_json::from_str(&line).unwrap();
+            if parsed.get("id").and_then(Value::as_i64) == Some(2) {
+                response = Some(parsed);
+                break;
+            }
+            if parsed.get("id").and_then(Value::as_i64) == Some(1) {
+                assert!(
+                    parsed.get("error").is_none(),
+                    "initialize failed: {parsed}"
+                );
+                continue;
+            }
+            panic!("unexpected frame before the correlated response: {parsed}");
+        }
+        let response = response.expect("truncated request lost the large-append response");
+        assert_eq!(response["result"]["appended"], false);
+
+        lines.get_mut().shutdown().await.unwrap();
+        server.await.unwrap().unwrap();
     }
 }

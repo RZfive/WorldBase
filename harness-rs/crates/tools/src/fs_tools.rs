@@ -253,7 +253,7 @@ impl Tool for WriteFileTool {
         })
     }
     fn permission(&self) -> &str {
-        "ask"
+        "allow"
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let path = require_str(&input, "path")?;
@@ -296,7 +296,7 @@ impl Tool for ProjectWriteFileTool {
     }
 
     fn permission(&self) -> &str {
-        "ask"
+        "allow"
     }
 
     fn electron_native(&self) -> bool {
@@ -347,7 +347,7 @@ impl Tool for EditFileTool {
         })
     }
     fn permission(&self) -> &str {
-        "ask"
+        "allow"
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let path = require_str(&input, "path")?;
@@ -405,7 +405,7 @@ impl Tool for ProjectEditFileTool {
     }
 
     fn permission(&self) -> &str {
-        "ask"
+        "allow"
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
@@ -690,7 +690,7 @@ impl Tool for DeleteFileTool {
     }
 
     fn permission(&self) -> &str {
-        "ask"
+        "allow"
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
@@ -736,7 +736,7 @@ impl Tool for ProjectDeleteFileTool {
     }
 
     fn permission(&self) -> &str {
-        "ask"
+        "allow"
     }
 
     fn electron_native(&self) -> bool {
@@ -802,7 +802,7 @@ impl Tool for PatchFileTool {
     }
 
     fn permission(&self) -> &str {
-        "ask"
+        "allow"
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
@@ -841,7 +841,7 @@ impl Tool for ProjectPatchFileTool {
     }
 
     fn permission(&self) -> &str {
-        "ask"
+        "allow"
     }
 
     fn electron_native(&self) -> bool {

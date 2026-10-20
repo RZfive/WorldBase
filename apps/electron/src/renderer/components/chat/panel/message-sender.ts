@@ -593,7 +593,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
               flushPendingStreamText()
               hadToolSinceLastThinking = true
               closeOpenThinkingBlocks(assistantMessage)
-              const toolRun = createToolRun(event.name)
+              const toolRun = createToolRun(event.name, event.filePath)
+              if (event.summary) toolRun.summary = event.summary
               toolRuns.push(toolRun)
               ensureBlocks(assistantMessage).push(createToolBlock(toolRun))
               syncAssistantToolRuns()

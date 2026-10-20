@@ -26,6 +26,10 @@ export interface ToolRun {
   name: string
   status: 'running' | 'completed' | 'failed'
   progress: ToolProgressEntry[]
+  /** Compact argument summary for the row title; absent on legacy runs. */
+  summary?: string
+  /** Full target path for file tools, used by the click-to-open affordance. */
+  filePath?: string
 }
 
 export interface WebSearchResultItem {

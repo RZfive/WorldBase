@@ -777,6 +777,7 @@ function startAdd () {
   selectedProviderId.value = id
   editing.value = true
   cancelRenameModel()
+  cancelModelDraft()
   resetRemoteModels()
 }
 
@@ -784,6 +785,7 @@ function startEdit () {
   const provider = selectedProvider.value
   if (!provider) return
   cancelRenameModel()
+  cancelModelDraft()
 
   const modelPricing: Record<string, ModelPricingEntry> = {}
   const modelCapabilities: NonNullable<AIProvider['modelCapabilities']> = {}
@@ -817,6 +819,7 @@ function cancelEdit () {
   editing.value = false
   awaitingKeyFromWeb.value = false
   clipboardKeyCandidate.value = ''
+  cancelModelDraft()
   resetRemoteModels()
 }
 
@@ -850,8 +853,8 @@ function addModelByName (model: string): boolean {
 }
 
 // In-table draft row: one blank, fully editable model row appended to the
-// table. Enter/＋ commits it (and blanks the row for the next rapid add);
-// Esc or × dismisses it.
+// table. Enter commits it (and blanks the row for the next rapid add);
+// Esc or × dismisses it; the form's save button commits a pending row.
 const modelDraftActive = ref(false)
 const modelDraftNameInputRef = ref<HTMLInputElement | null>(null)
 const modelDraft = reactive({
@@ -1225,6 +1228,13 @@ async function testEmbeddingModel (modelId: string) {
 
 async function saveEdit () {
   if (!editDraft.value) return
+
+  // A pending in-table draft row commits with the form's save button — no
+  // separate confirm press inside the row.
+  if (modelDraftActive.value) {
+    if (modelDraft.name.trim()) confirmModelDraft()
+    cancelModelDraft()
+  }
 
   const nextProvider = editDraft.value
   if (!nextProvider.name.trim()) {
@@ -1802,8 +1812,9 @@ function formatContextWindow (value: number): string {
               </div>
 
               <!-- Full in-table draft card: every field editable before the
-                   model is committed; Enter or ＋ appends and keeps the card
-                   open for rapid consecutive adds. -->
+                   model is committed. Enter appends and keeps the card open
+                   for rapid consecutive adds; the form's save button commits
+                   a pending row too. -->
               <div v-if="modelDraftActive" class="pp-model-row pp-model-draft-row">
                 <div class="pp-model-row-top">
                   <input
@@ -1826,14 +1837,6 @@ function formatContextWindow (value: number): string {
                     </span>
                   </div>
                   <div class="pp-model-row-actions">
-                    <button
-                      class="pp-row-action pp-row-action-add"
-                      type="button"
-                      :title="$t('settings.provider.addModelAction')"
-                      :aria-label="$t('settings.provider.addModelAction')"
-                      :disabled="!modelDraft.name.trim()"
-                      @click="confirmModelDraft"
-                    >＋</button>
                     <button
                       class="pp-row-action pp-row-action-danger"
                       type="button"
@@ -2850,10 +2853,6 @@ function formatContextWindow (value: number): string {
 .pp-row-action-danger:hover:not(:disabled) {
   border-color: #ff453a;
   color: #ff453a;
-}
-
-.pp-row-action-add {
-  font-weight: 700;
 }
 
 .pp-model-rename-input {

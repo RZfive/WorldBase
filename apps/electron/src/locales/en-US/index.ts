@@ -1100,6 +1100,7 @@ const enUS: MessageSchema = {
     toolStatusCompleted: 'Completed',
     toolStatusFailed: 'Failed',
     toolStatusRunning: 'Running',
+    toolFailuresCount: 'Failed {count}',
     excelColumnFallback: 'Column {index}',
     unconfiguredProvider: 'Provider not configured',
     unconfiguredModel: 'Model not configured',

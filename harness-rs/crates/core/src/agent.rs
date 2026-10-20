@@ -64,12 +64,19 @@ const ELECTRON_HOST_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::fro
 fn serialize_tool_result(result: Result<serde_json::Value>) -> (String, bool) {
     match result {
         Ok(value) => {
-            // Match Electron AgentCore: a structured result containing an
-            // `error` field is a failed tool call even when the handler chose
-            // to return it instead of throwing.
+            // A structured result is a failed tool call only when the handler
+            // actually populated `error` with content. Project tools such as
+            // rebuild_project / get_project_status legitimately include
+            // `"error": null` in successful payloads, so key presence alone
+            // would flag every successful run as failed.
             let is_error = value
                 .as_object()
-                .is_some_and(|object| object.contains_key("error"));
+                .and_then(|object| object.get("error"))
+                .is_some_and(|error| match error {
+                    serde_json::Value::Null => false,
+                    serde_json::Value::String(text) => !text.is_empty(),
+                    _ => true,
+                });
             (
                 serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
                 is_error,
@@ -3031,7 +3038,10 @@ mod tests {
     fn folder_workspace_tools_require_a_selected_workspace_for_each_run() {
         let empty = ChatRunContext::default();
         assert!(!tool_visible_for_run("list_workspace_files", &empty));
-        assert!(!tool_visible_for_run("run_workspace_command", &empty));
+        assert!(!tool_visible_for_run("read_workspace_file", &empty));
+        // The merged shell tool is not workspace-gated: it also serves
+        // managed-project conversations via its project_id argument.
+        assert!(tool_visible_for_run("run_shell_command", &empty));
         assert!(tool_visible_for_run("read_project_file", &empty));
 
         let selected = ChatRunContext {
@@ -3039,7 +3049,24 @@ mod tests {
             ..ChatRunContext::default()
         };
         assert!(tool_visible_for_run("list_workspace_files", &selected));
-        assert!(tool_visible_for_run("run_workspace_command", &selected));
+        assert!(tool_visible_for_run("run_shell_command", &selected));
+    }
+
+    #[test]
+    fn legacy_command_tool_allow_lists_authorize_the_merged_tool() {
+        let context = ChatRunContext {
+            allowed_tool_names: vec!["run_workspace_command".into()],
+            ..ChatRunContext::default()
+        };
+        let policy = run_tool_policy(&context, None);
+        assert!(tool_allowed_for_run("run_shell_command", &policy));
+
+        let denied_context = ChatRunContext {
+            denied_tool_names: vec!["run_project_command".into()],
+            ..ChatRunContext::default()
+        };
+        let policy = run_tool_policy(&denied_context, None);
+        assert!(!tool_allowed_for_run("run_shell_command", &policy));
     }
 
     #[test]
@@ -3084,6 +3111,36 @@ mod tests {
             !is_error,
             "Node treats only an explicit error field as failure"
         );
+    }
+
+    #[test]
+    fn null_or_empty_error_field_is_not_a_failure() {
+        // rebuild_project / get_project_status always emit `error: null` on
+        // success; the run must not be marked failed.
+        let (_, is_error) = serialize_tool_result(Ok(serde_json::json!({
+            "success": true,
+            "buildStatus": "built",
+            "error": null
+        })));
+        assert!(!is_error);
+
+        let (_, is_error) = serialize_tool_result(Ok(serde_json::json!({
+            "alive": true,
+            "healthy": true,
+            "error": ""
+        })));
+        assert!(!is_error);
+
+        let (_, is_error) = serialize_tool_result(Ok(serde_json::json!({
+            "buildStatus": "failed",
+            "error": "Build succeeded but restart failed: port in use"
+        })));
+        assert!(is_error);
+
+        let (_, is_error) = serialize_tool_result(Ok(serde_json::json!({
+            "error": { "code": 7, "message": "boom" }
+        })));
+        assert!(is_error);
     }
 
     #[test]
@@ -3680,16 +3737,27 @@ fn run_tool_policy(
     context: &ChatRunContext,
     agent: Option<&worldbase_protocol::types::AgentDefinition>,
 ) -> RunToolPolicy {
-    let request_allowed = optional_allow_list(&context.allowed_tool_names);
-    let agent_allowed = agent.and_then(|agent| optional_allow_list(&agent.allowed_tools));
+    // Allow/deny lists written before the command-tool merge reference the
+    // legacy names; map them onto the merged tools so existing agents keep
+    // working.
+    let canonicalize = |values: &[String]| -> Vec<String> {
+        normalized_tool_names(values)
+            .into_iter()
+            .map(|name| crate::permissions::canonical_tool_name(&name).to_string())
+            .collect()
+    };
+    let request_allowed = optional_allow_list(&canonicalize(&context.allowed_tool_names));
+    let agent_allowed = agent
+        .and_then(|agent| optional_allow_list(&canonicalize(&agent.allowed_tools)));
     let allowed = match (request_allowed, agent_allowed) {
         (Some(request), Some(agent)) => Some(request.intersection(&agent).cloned().collect()),
         (Some(allowed), None) | (None, Some(allowed)) => Some(allowed),
         (None, None) => None,
     };
-    let mut denied = normalized_tool_names(&context.denied_tool_names);
+    let mut denied: std::collections::HashSet<String> =
+        canonicalize(&context.denied_tool_names).into_iter().collect();
     if let Some(agent) = agent {
-        denied.extend(normalized_tool_names(&agent.denied_tools));
+        denied.extend(canonicalize(&agent.denied_tools));
     }
     RunToolPolicy { allowed, denied }
 }
@@ -4519,12 +4587,27 @@ async fn execute_tool_for_run(
         ))
     } else {
         let policy = worldbase_policy_for(hub.store.as_ref(), tool, custom_tool, &name);
+        // The workspace root defines the "safe zone" for command and path
+        // permissions: folder-workspace conversations use the selected folder,
+        // managed-project runs use the project root.
+        let approved_root = services.folder_workspace.clone().or_else(|| {
+            let project_id = input
+                .get("project_id")
+                .or_else(|| input.get("project"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .or_else(|| services.target_project_id.clone());
+            project_id.and_then(|id| services.projects.project_root(&id).ok())
+        });
         let allowed = crate::permissions::check(
             hub,
             stream_id,
             &policy,
             &name,
             &input,
+            approved_root.as_deref(),
             interactive,
             auto_approve,
             Some(abort),

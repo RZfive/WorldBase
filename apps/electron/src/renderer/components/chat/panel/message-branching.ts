@@ -1,6 +1,6 @@
 import { ref, type Ref } from 'vue'
 import type { ComposerTranslation } from 'vue-i18n'
-import { generateId } from './message-blocks'
+import { createContentBlock, generateId } from './message-blocks'
 import { getMessageTextContent } from './message-runtime'
 import type { PreparedUserMessage } from './message-sender'
 import type { ChatMessage, ChatMessageBlock, ConversationSummary } from './types'
@@ -147,29 +147,35 @@ export function createChatMessageBranching (options: ChatMessageBranchingOptions
     return newId
   }
 
-  /** Build the prepared resend from an edited text, preserving images/attachments. */
+  /**
+   * Build the prepared resend from an edited text, preserving images and
+   * display-only blocks. The block layout mirrors a fresh send: the edited text
+   * gets its own content block and the images get a second one. Putting the
+   * edited text into a single images-only content block used to keep the image
+   * but drop the text from the resent bubble.
+   */
   function buildPreparedFromEdited (original: ChatMessage, editedText: string): PreparedUserMessage {
     const imageParts = Array.isArray(original.content)
       ? original.content.filter(part => part.type === 'image_url' && part.image_url)
       : []
 
     const content = imageParts.length > 0
-      ? [{ type: 'text', text: editedText } as { type: string; text?: string; image_url?: { url: string } }, ...imageParts]
+      ? [{ type: 'text', text: editedText }, ...imageParts]
       : editedText
 
-    // Keep display-only blocks (attachments); refresh the text content block.
-    const preservedBlocks = (original.blocks || []).filter(block => block.kind !== 'content')
-    const displayContent = imageParts.length > 0 ? [...imageParts] : editedText
-    const contentBlock: ChatMessageBlock = {
-      id: generateId(),
-      kind: 'content',
-      content: displayContent as ChatMessage['content']
+    // Keep display-only blocks (attachments); rebuild the text + image blocks.
+    const blocks: ChatMessageBlock[] = [createContentBlock(editedText)]
+    for (const block of original.blocks || []) {
+      if (block.kind !== 'content') blocks.push(block)
+    }
+    if (imageParts.length > 0) {
+      blocks.push(createContentBlock(imageParts))
     }
 
     return {
       id: original.id || generateId(),
       content: content as ChatMessage['content'],
-      blocks: [contentBlock, ...preservedBlocks],
+      blocks,
       text: editedText
     }
   }
