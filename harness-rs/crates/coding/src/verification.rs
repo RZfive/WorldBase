@@ -6,7 +6,11 @@ use crate::model::{
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::{fs, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Component, Path, PathBuf},
+};
 
 /// Plan verification commands for a project without executing anything.
 ///
@@ -93,6 +97,287 @@ pub fn detect_profile(root: &Path) -> Result<VerificationProfile> {
         source: format!(
             "Frontend Node project detected from package.json; {manager_source}; verification scripts: {detected_scripts}."
         ),
+    })
+}
+
+/// Select the smallest safe verification profile for a set of changed files.
+///
+/// This function is pure: it never reads the filesystem. Relative paths are
+/// interpreted as project-relative, while absolute paths outside `profile.root`
+/// are ignored. Code-only non-entry changes drop the build command; entry
+/// points, config/style changes, and unrecognized non-doc files keep it
+/// conservatively. Manifest or lockfile changes always retain the full profile.
+pub fn select_minimal_profile(
+    profile: &VerificationProfile,
+    changed_files: &[PathBuf],
+) -> VerificationProfile {
+    if changed_files.is_empty() {
+        return profile.clone();
+    }
+
+    let mut normalized = BTreeSet::new();
+    for path in changed_files {
+        if let Some(relative) = normalize_changed_path(&profile.root, path) {
+            normalized.insert(relative);
+        }
+    }
+    if normalized.is_empty() {
+        return profile.clone();
+    }
+
+    let mut changes = ChangeFlags::default();
+    for path in &normalized {
+        changes.observe(path);
+    }
+    let file_count = normalized.len();
+
+    let commands = if changes.docs_only() {
+        Vec::new()
+    } else if changes.manifest {
+        profile.commands.clone()
+    } else {
+        let filtered = profile
+            .commands
+            .iter()
+            .filter(|command| changes.keeps(command.kind))
+            .cloned()
+            .collect::<Vec<_>>();
+        if filtered.is_empty() {
+            fallback_commands(profile)
+        } else {
+            filtered
+        }
+    };
+
+    let mut selected = profile.clone();
+    selected.commands = commands;
+    selected.source = minimal_source(&profile.source, file_count);
+    selected
+}
+
+#[derive(Default)]
+struct ChangeFlags {
+    docs: bool,
+    code: bool,
+    test_file: bool,
+    style: bool,
+    config: bool,
+    test_config: bool,
+    entry_point: bool,
+    manifest: bool,
+    other: bool,
+}
+
+impl ChangeFlags {
+    fn observe(&mut self, path: &Path) {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            self.other = true;
+            return;
+        };
+        let file_name = file_name.to_ascii_lowercase();
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if is_manifest(&file_name) {
+            self.manifest = true;
+            return;
+        }
+        if is_docs_or_image(&extension) {
+            self.docs = true;
+            return;
+        }
+
+        let test_file = is_test_file(path);
+        let style = is_style(&extension);
+        let config = is_config(&file_name);
+        let test_config = is_test_config(&file_name);
+        let code = is_code(&extension) && !config;
+
+        self.test_file |= test_file;
+        self.style |= style;
+        self.config |= config;
+        self.test_config |= test_config;
+        self.code |= code;
+        if code && !test_file && is_entry_point(path) {
+            self.entry_point = true;
+        }
+        if !(test_file || style || config || code) {
+            self.other = true;
+        }
+    }
+
+    fn docs_only(&self) -> bool {
+        self.docs
+            && !self.manifest
+            && !(self.code
+                || self.test_file
+                || self.style
+                || self.config
+                || self.test_config
+                || self.other)
+    }
+
+    fn keeps(&self, kind: VerificationCheckKind) -> bool {
+        match kind {
+            VerificationCheckKind::Typecheck => {
+                self.code || self.test_file || self.config || self.other
+            }
+            VerificationCheckKind::Lint => {
+                self.code || self.test_file || self.style || self.config || self.other
+            }
+            VerificationCheckKind::Test => self.code || self.test_file || self.test_config,
+            VerificationCheckKind::Build => {
+                self.style || self.config || self.other || (self.code && self.entry_point)
+            }
+            VerificationCheckKind::Format | VerificationCheckKind::Custom => true,
+        }
+    }
+}
+
+fn fallback_commands(profile: &VerificationProfile) -> Vec<VerificationCommand> {
+    profile
+        .commands
+        .iter()
+        .filter(|command| command.required)
+        .cloned()
+        .collect()
+}
+
+fn minimal_source(source: &str, file_count: usize) -> String {
+    let base = source
+        .split_once(" (minimal: ")
+        .map(|(base, _)| base)
+        .unwrap_or(source);
+    format!("{base} (minimal: {file_count} file(s))")
+}
+
+fn normalize_changed_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    let relative = if path.is_absolute() {
+        path.strip_prefix(root).ok()?.to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+    normalize_relative_path(&relative)
+}
+
+fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn is_manifest(file_name: &str) -> bool {
+    matches!(
+        file_name,
+        "package.json"
+            | "pnpm-lock.yaml"
+            | "package-lock.json"
+            | "yarn.lock"
+            | "bun.lockb"
+            | "bun.lock"
+            | "npm-shrinkwrap.json"
+    )
+}
+
+fn is_docs_or_image(extension: &str) -> bool {
+    matches!(
+        extension,
+        "md" | "mdx"
+            | "txt"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "svg"
+            | "webp"
+            | "avif"
+            | "ico"
+            | "bmp"
+            | "tiff"
+    )
+}
+
+fn is_code(extension: &str) -> bool {
+    matches!(
+        extension,
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts"
+    )
+}
+
+fn is_style(extension: &str) -> bool {
+    matches!(extension, "css" | "scss" | "less" | "sass")
+}
+
+fn is_test_file(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if file_name.contains(".test.") || file_name.contains(".spec.") {
+        return true;
+    }
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|part| part.eq_ignore_ascii_case("__tests__"))
+    })
+}
+
+fn is_config(file_name: &str) -> bool {
+    let trimmed = file_name.trim_start_matches('.');
+    (file_name.starts_with("tsconfig") && file_name.ends_with(".json"))
+        || trimmed.starts_with("vite.config.")
+        || trimmed.starts_with("next.config.")
+        || trimmed.starts_with("eslint")
+        || trimmed.starts_with("prettier")
+        || is_test_config(file_name)
+}
+
+fn is_test_config(file_name: &str) -> bool {
+    let trimmed = file_name.trim_start_matches('.');
+    trimmed.starts_with("vitest")
+        || trimmed.starts_with("jest")
+        || trimmed.starts_with("playwright")
+        || trimmed.starts_with("cypress")
+}
+
+fn is_entry_point(path: &Path) -> bool {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(
+        stem.as_str(),
+        "main" | "index" | "app" | "_app" | "server" | "client"
+    ) {
+        return true;
+    }
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|part| matches!(part, "app" | "pages"))
     })
 }
 

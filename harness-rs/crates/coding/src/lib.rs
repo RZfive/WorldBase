@@ -10,6 +10,7 @@ pub mod budget;
 pub mod error_analyzer;
 pub mod evidence;
 pub mod model;
+pub mod planner;
 pub mod repair;
 pub mod smart_editor;
 pub mod state;
@@ -27,6 +28,7 @@ pub use model::{
     PackageManager, ProjectKind, VerificationCheckKind, VerificationCommand, VerificationEvidence,
     VerificationProfile,
 };
+pub use planner::{plan_write_batches, PlannedWrite, WriteBatch};
 pub use repair::{plan_repair, RepairPlan, RepairStopReason};
 pub use state::CodingState;
-pub use verification::detect_profile;
+pub use verification::{detect_profile, select_minimal_profile};
