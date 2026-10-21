@@ -1,0 +1,2 @@
+src/features/auth/LoginForm.tsx:18:5  error  'missingValue' is not defined  no-undef
+src/features/auth/AuthProvider.tsx:15:6  warning  React Hook useMemo has a missing dependency: 'user'  react-hooks/exhaustive-deps

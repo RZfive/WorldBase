@@ -17,7 +17,7 @@
 - [x] `coding_verify` JSON evidence 解析为 `VerificationEvidence`。
 - [x] TOP 20+ 前端错误模式、结构化诊断与修复计划，并接入 core 修复门禁。
 - [x] 显式 Verify → Diagnose → Repair 状态转换与 E2E 测试（含重复失败和轮次耗尽）。
-- [x] 14 项离线前端基准：profile、符号索引、语义编辑、诊断、修复计划、格式保留。
+- [x] 39 项离线前端基准：两套 fixture（large app 含 28 个 TS/TSX 文件）、profile、符号索引、语义编辑、诊断、修复计划、格式保留。
 - [ ] 50-100 个真实项目任务基准、完整 Plan/Inspect 编排、LSP、并行写调度。
 
 ---

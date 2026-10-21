@@ -1,0 +1,4 @@
+src/app/App.tsx(12,9): error TS2322: Type 'string' is not assignable to type 'number'.
+src/app/routes.tsx(3,35): error TS2307: Cannot find module '../types/missing' or its corresponding type declarations.
+src/lib/api.ts(8,7): error TS2554: Expected 2 arguments, but got 1.
+src/hooks/useFetch.ts(14,24): error TS7006: Parameter 'response' implicitly has an 'any' type.
