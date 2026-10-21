@@ -2,12 +2,16 @@
 
 use crate::hub::{Hub, RunHandle};
 use crate::subagents::{CoreSubagentRuntime, MAX_SUBAGENT_NESTING_DEPTH};
-use serde_json::json;
 use anyhow::Result;
 use futures::{future::join_all, StreamExt};
+use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use worldbase_coding::{
+    analyze_outcomes, detect_profile, plan_repair, verification_evidence_from_value, CodingPolicy,
+    CodingState, DiagnosisReport, RepairStopReason, VerificationEvidence,
+};
 use worldbase_protocol::event::{EventFrame, EventKind, StreamChannel};
 use worldbase_protocol::types::{
     Capabilities, ChatContentPart, ChatMessage, ChatRunContext, ImageUrl as ProtocolImageUrl, Role,
@@ -30,6 +34,8 @@ const MAX_TOKENS: u32 = 8192;
 const FINISH_TASK_TOOL_NAME: &str = "finish_task";
 const FINISH_TASK_NUDGE_PREFIX: &str = "[FINISH_TASK_NUDGE]";
 const MAX_FINISH_TASK_NUDGES: usize = 2;
+const MAX_CODING_FINISH_NUDGES: usize = 2;
+const CODING_VERIFICATION_GATE_PREFIX: &str = "[CODING_VERIFICATION_GATE]";
 /// Visible fallback when the model signals completion with no usable summary
 /// (for example a malformed/empty `finish_task` input). The run must never end
 /// silently: a turn that stops with no closing message reads as data loss.
@@ -1556,6 +1562,68 @@ fn new_project_prompt(tools: &PromptToolContext<'_>, context: &ChatRunContext) -
     Some(lines.join("\n"))
 }
 
+fn coding_mode_prompt() -> String {
+    "## Coding mode\n\
+     - Treat this as implementation work on the active codebase, not as an isolated text answer.\n\
+     - Discover the target project's real toolchain from its manifests and lockfiles. Frontend/Node projects are the first-class target; do not assume `cargo` commands apply to every project.\n\
+     - After changing code, run the strongest relevant verification available for that project (typecheck, lint, tests, build, runtime probe) before calling `finish_task` with `status: \"completed\"`.\n\
+     - Prefer the native `coding_verify` tool when it is available; it runs the detected project verification profile through the managed command policy.\n\
+     - If verification cannot run in the current capability set, say exactly which check is unavailable and report the result as partial/blocked rather than claiming it was verified.\n\
+     - Never bypass permission prompts or workspace boundaries to make a verification command succeed."
+        .into()
+}
+
+fn coding_profile_prompt(profile: &worldbase_coding::VerificationProfile) -> String {
+    let commands = if profile.commands.is_empty() {
+        "- No verification command was discovered from the project manifest. Inspect the project and use the strongest available check, or report verification as unavailable."
+            .to_string()
+    } else {
+        profile
+            .commands
+            .iter()
+            .map(|command| {
+                let args = if command.args.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", command.args.join(" "))
+                };
+                format!(
+                    "- {}: `{}{}`{}",
+                    command.kind.label(),
+                    command.program,
+                    args,
+                    if command.required { " (required)" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "## Coding verification profile\n- Project kind: {:?}\n- Package manager: {:?}\n- Detection: {}\n{}",
+        profile.project_kind, profile.package_manager, profile.source, commands
+    )
+}
+
+fn coding_workspace_root(hub: &Hub, context: &ChatRunContext) -> Option<std::path::PathBuf> {
+    if let Some(project_id) = context
+        .target_project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Ok(root) = hub.projects.project_root(project_id) {
+            return Some(root);
+        }
+    }
+    context
+        .workspace_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| Some(hub.workspace.clone()))
+}
+
 fn static_system_prompt_sections(
     workspace: &Path,
     context: &ChatRunContext,
@@ -1719,10 +1787,12 @@ fn collect_user_fact_entries(
         // Category direct read: "我喜欢吃什么" reaches diet facts through the
         // category directory, not through embedding distance.
         if let Some(terms) = worldbase_memory::personal_profile_category_terms(query) {
-            if let Ok(categorized) =
-                hub.store
-                    .recall_user_scope_facts(user_scopes, terms, false, USER_FACT_CHANNEL_LIMIT)
-            {
+            if let Ok(categorized) = hub.store.recall_user_scope_facts(
+                user_scopes,
+                terms,
+                false,
+                USER_FACT_CHANNEL_LIMIT,
+            ) {
                 push_unique_memory_entry(categorized, &mut merged);
             }
         }
@@ -1823,10 +1893,7 @@ fn format_memory_prompt_sections(
         // them: an absent user_evidence_excerpt must never look like a
         // (possibly fabricated) user quote slot.
         let mut value = serde_json::Map::new();
-        value.insert(
-            "id".into(),
-            serde_json::Value::String(entry.id.clone()),
-        );
+        value.insert("id".into(), serde_json::Value::String(entry.id.clone()));
         value.insert(
             "scope".into(),
             serde_json::Value::String(format!("{}/{}", entry.scope_type, entry.scope_id)),
@@ -1985,6 +2052,19 @@ async fn system_prompt(
         ));
     }
 
+    if context.coding_mode {
+        sections.push(coding_mode_prompt());
+        if let Some(root) = coding_workspace_root(hub, context) {
+            match detect_profile(&root) {
+                Ok(profile) => sections.push(coding_profile_prompt(&profile)),
+                Err(error) => sections.push(format!(
+                    "## Coding verification profile\n- Detection failed for `{}`: {error}\n- Inspect the project manifest before choosing verification commands.",
+                    root.display()
+                )),
+            }
+        }
+    }
+
     let mut known_extra = std::collections::HashSet::new();
     for section in context
         .system_prompt_sections
@@ -2034,7 +2114,12 @@ mod tests {
         let baseline = channel.latest_seq().await;
 
         channel
-            .publish("s", EventKind::Notice { text: "定时任务触发".into() })
+            .publish(
+                "s",
+                EventKind::Notice {
+                    text: "定时任务触发".into(),
+                },
+            )
             .await;
         channel
             .publish(
@@ -2080,7 +2165,12 @@ mod tests {
 
         let quiet = StreamChannel::new();
         quiet
-            .publish("s", EventKind::Notice { text: "no assistant".into() })
+            .publish(
+                "s",
+                EventKind::Notice {
+                    text: "no assistant".into(),
+                },
+            )
             .await;
         assert_eq!(collect_scheduled_output(&quiet, -1).await, "");
     }
@@ -2239,6 +2329,14 @@ mod tests {
     }
 
     async fn run_protocol_chat(hub: Arc<Hub>, conversation_id: &str) -> Vec<EventKind> {
+        run_protocol_chat_with_context(hub, conversation_id, ChatRunContext::default()).await
+    }
+
+    async fn run_protocol_chat_with_context(
+        hub: Arc<Hub>,
+        conversation_id: &str,
+        context: ChatRunContext,
+    ) -> Vec<EventKind> {
         let mut receiver = hub.event_tx.subscribe();
         let run = start_chat(
             hub.clone(),
@@ -2250,7 +2348,7 @@ mod tests {
             None,
             None,
             None,
-            ChatRunContext::default(),
+            context,
         )
         .unwrap();
         let stream_id = run.stream_id;
@@ -2380,6 +2478,93 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![vec!["a", "b"], vec!["c"], vec!["d", "e"],]
         );
+    }
+
+    #[test]
+    fn coding_gate_classifies_mutations_and_frontend_verification() {
+        assert!(is_coding_mutation_tool("patch_project_file"));
+        assert!(is_coding_mutation_tool("write_file"));
+        assert!(is_coding_mutation_tool("coding_edit"));
+        assert!(!is_coding_mutation_tool("read_project_file"));
+
+        assert!(is_coding_verification_tool(
+            "run_project_command",
+            &json!({ "command": "pnpm run typecheck" })
+        ));
+        assert!(is_coding_verification_tool(
+            "run_project_command",
+            &json!({ "command": "npx vitest run" })
+        ));
+        assert!(is_coding_verification_tool(
+            "run_project_command",
+            &json!({ "command": "cargo test" })
+        ));
+        assert!(is_coding_verification_tool(
+            "coding_verify",
+            &json!({ "project_id": "project-1" })
+        ));
+        assert!(!is_coding_verification_tool(
+            "run_project_command",
+            &json!({ "command": "git show build.log" })
+        ));
+        assert!(!is_coding_verification_tool(
+            "run_project_command",
+            &json!({ "command": "git status" })
+        ));
+    }
+
+    #[test]
+    fn coding_gate_reads_synchronous_command_status() {
+        assert!(coding_verification_passed(
+            false,
+            r#"{"status":"completed","exitCode":0}"#
+        ));
+        assert!(coding_verification_passed(false, r#"{"success":true}"#));
+        assert!(coding_verification_passed(false, r#"{"passed":true}"#));
+        assert!(!coding_verification_passed(
+            false,
+            r#"{"status":"failed","exitCode":1}"#
+        ));
+        assert!(!coding_verification_passed(true, r#"{"success":true}"#));
+        assert!(!coding_verification_passed(false, "not json"));
+    }
+
+    #[test]
+    fn coding_gate_nudge_mentions_unverified_mutations() {
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        state.record_mutation([std::path::PathBuf::from("src/main.ts")]);
+        let nudge = coding_verification_nudge(&state, None);
+        assert!(nudge.starts_with(CODING_VERIFICATION_GATE_PREFIX));
+        assert!(nudge.contains("待验证修改数：1"));
+        assert!(nudge.contains("partial"));
+    }
+
+    #[test]
+    fn coding_gate_nudge_includes_structured_diagnosis() {
+        let report = worldbase_coding::analyze_diagnostics(&[worldbase_coding::Diagnostic {
+            severity: worldbase_coding::DiagnosticSeverity::Error,
+            message: "Cannot find name 'missingValue'.".into(),
+            code: Some("TS2304".into()),
+            file: Some(std::path::PathBuf::from("src/main.ts")),
+            line: Some(12),
+            column: Some(7),
+            confidence: 0.95,
+            raw: None,
+        }]);
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        state.record_mutation([std::path::PathBuf::from("src/main.ts")]);
+        let nudge = coding_verification_nudge(&state, Some(&report));
+        assert!(nudge.contains("## Latest verification diagnosis"));
+        assert!(nudge.contains("src/main.ts"));
+        assert!(nudge.contains("repair steps"));
     }
 
     #[test]
@@ -2724,10 +2909,8 @@ mod tests {
     // prompt text, not search-API hits, with embeddings off (no query vector).
 
     fn memory_prompt_test_hub() -> Arc<Hub> {
-        let workspace = std::env::temp_dir().join(format!(
-            "worldbase-memory-prompt-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let workspace =
+            std::env::temp_dir().join(format!("worldbase-memory-prompt-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&workspace).unwrap();
         let store = Arc::new(
             worldbase_memory::Store::open(&workspace.join("app.sqlite"))
@@ -2799,13 +2982,25 @@ mod tests {
             }),
         );
 
-        let sections = memory_prompt_sections(&hub, &memory_prompt_context("我喜欢吃什么"), None).await;
+        let sections =
+            memory_prompt_sections(&hub, &memory_prompt_context("我喜欢吃什么"), None).await;
         let prompt = sections.join("\n\n");
-        assert!(prompt.contains("## User facts memory"), "dedicated user-fact section: {prompt}");
-        assert!(prompt.contains("喜欢吃苹果"), "the fact must reach the prompt, not just the search API");
-        assert!(prompt.contains("我喜欢吃苹果"), "verbatim user evidence must be visible");
+        assert!(
+            prompt.contains("## User facts memory"),
+            "dedicated user-fact section: {prompt}"
+        );
+        assert!(
+            prompt.contains("喜欢吃苹果"),
+            "the fact must reach the prompt, not just the search API"
+        );
+        assert!(
+            prompt.contains("我喜欢吃苹果"),
+            "verbatim user evidence must be visible"
+        );
         assert!(prompt.contains("\"user_evidence_excerpt\""));
-        assert!(prompt.contains("A prior failed search is not proof that a personal fact is absent"));
+        assert!(
+            prompt.contains("A prior failed search is not proof that a personal fact is absent")
+        );
     }
 
     #[tokio::test]
@@ -2834,15 +3029,17 @@ mod tests {
             memory_prompt_sections(&hub, &memory_prompt_context("修复这个构建失败"), None)
                 .await
                 .join("\n\n");
-        assert!(unrelated.contains("简洁"), "pinned user fact stays resident: {unrelated}");
+        assert!(
+            unrelated.contains("简洁"),
+            "pinned user fact stays resident: {unrelated}"
+        );
         assert!(!unrelated.contains("苹果"));
 
         // Personal question: the category read brings the ordinary fact in
         // without any embedding work.
-        let personal =
-            memory_prompt_sections(&hub, &memory_prompt_context("我喜欢吃什么"), None)
-                .await
-                .join("\n\n");
+        let personal = memory_prompt_sections(&hub, &memory_prompt_context("我喜欢吃什么"), None)
+            .await
+            .join("\n\n");
         assert!(personal.contains("苹果"));
     }
 
@@ -2863,10 +3060,14 @@ mod tests {
             }),
         );
 
-        let prompt = memory_prompt_sections(&hub, &memory_prompt_context("我有什么忌口或过敏"), None)
-            .await
-            .join("\n\n");
-        assert!(prompt.contains("花生过敏"), "user-scope knowledge joins the personal channel: {prompt}");
+        let prompt =
+            memory_prompt_sections(&hub, &memory_prompt_context("我有什么忌口或过敏"), None)
+                .await
+                .join("\n\n");
+        assert!(
+            prompt.contains("花生过敏"),
+            "user-scope knowledge joins the personal channel: {prompt}"
+        );
         // Without sourceText the prompt must not fabricate a user quote.
         assert!(!prompt.contains("\"user_evidence_excerpt\""));
         assert!(prompt.contains("never present them as the user's own words"));
@@ -2907,9 +3108,18 @@ mod tests {
             .await
             .join("\n\n");
         assert!(first.contains("## User facts memory"));
-        assert!(first.contains("user/local-user"), "exact authorized scope id is visible");
-        assert!(!first.contains("someone-else"), "other users' facts never enter this run");
-        assert!(!first.contains("转述"), "agent-scope user_trait is not a current-user fact");
+        assert!(
+            first.contains("user/local-user"),
+            "exact authorized scope id is visible"
+        );
+        assert!(
+            !first.contains("someone-else"),
+            "other users' facts never enter this run"
+        );
+        assert!(
+            !first.contains("转述"),
+            "agent-scope user_trait is not a current-user fact"
+        );
 
         // Manual deletion takes effect on the very next model call, and a
         // newly saved fact appears then too — no cached profile text.
@@ -2929,7 +3139,10 @@ mod tests {
             memory_prompt_sections(&hub, &memory_prompt_context("我喜欢吃什么"), None)
                 .await
                 .join("\n\n");
-        assert!(!after_delete.contains("喜欢吃苹果"), "deleted fact leaves the prompt immediately: {after_delete}");
+        assert!(
+            !after_delete.contains("喜欢吃苹果"),
+            "deleted fact leaves the prompt immediately: {after_delete}"
+        );
 
         hub.store
             .ingest_workspace_memories(&serde_json::json!({
@@ -2969,16 +3182,14 @@ mod tests {
         let disabled = memory_prompt_sections(&hub, &memory_prompt_context("我喜欢吃什么"), None)
             .await
             .join("\n\n");
-        assert!(!disabled.contains("喜欢吃苹果"), "no personal injection while disabled: {disabled}");
+        assert!(
+            !disabled.contains("喜欢吃苹果"),
+            "no personal injection while disabled: {disabled}"
+        );
 
         let stored = hub
             .store
-            .recall_user_scope_facts(
-                &[authorized_local_user_scope()],
-                &["喜欢吃"],
-                false,
-                10,
-            )
+            .recall_user_scope_facts(&[authorized_local_user_scope()], &["喜欢吃"], false, 10)
             .unwrap();
         assert_eq!(stored.len(), 1, "stored data survives the rollback switch");
     }
@@ -3075,6 +3286,15 @@ mod tests {
         )
         .join("\n\n");
         assert!(unbound_prompt.contains("## New managed project workflow"));
+    }
+
+    #[test]
+    fn coding_mode_prompt_requires_project_specific_verification() {
+        let prompt = coding_mode_prompt();
+        assert!(prompt.contains("Frontend/Node projects"));
+        assert!(prompt.contains("do not assume `cargo`"));
+        assert!(prompt.contains("verification cannot run"));
+        assert!(prompt.contains("finish_task"));
     }
 
     #[test]
@@ -3436,6 +3656,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coding_mode_blocks_completed_finish_until_partial_or_verified() {
+        let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "write-1",
+                    "write_file",
+                    serde_json::json!({
+                        "path": "coding-gate.ts",
+                        "content": "export const value = 1;\n"
+                    }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-1",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({
+                        "task_summary": "Finished without verification.",
+                        "status": "completed"
+                    }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-2",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({
+                        "task_summary": "Implementation finished, verification unavailable.",
+                        "status": "blocked"
+                    }),
+                )],
+            ),
+        ]);
+
+        let context = ChatRunContext {
+            coding_mode: true,
+            workspace_root: Some(workspace.to_string_lossy().into_owned()),
+            ..ChatRunContext::default()
+        };
+        let events = run_protocol_chat_with_context(hub.clone(), &conversation_id, context).await;
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].messages.iter().any(|message| {
+            message
+                .text_view()
+                .starts_with(CODING_VERIFICATION_GATE_PREFIX)
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(event, EventKind::Notice { text } if text.contains("编码验证门禁"))
+        }));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EventKind::Error { .. })));
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
     async fn plain_text_after_a_tool_receives_exactly_two_finish_nudges() {
         let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
             protocol_assistant(
@@ -3790,15 +4075,16 @@ fn run_tool_policy(
             .collect()
     };
     let request_allowed = optional_allow_list(&canonicalize(&context.allowed_tool_names));
-    let agent_allowed = agent
-        .and_then(|agent| optional_allow_list(&canonicalize(&agent.allowed_tools)));
+    let agent_allowed =
+        agent.and_then(|agent| optional_allow_list(&canonicalize(&agent.allowed_tools)));
     let allowed = match (request_allowed, agent_allowed) {
         (Some(request), Some(agent)) => Some(request.intersection(&agent).cloned().collect()),
         (Some(allowed), None) | (None, Some(allowed)) => Some(allowed),
         (None, None) => None,
     };
-    let mut denied: std::collections::HashSet<String> =
-        canonicalize(&context.denied_tool_names).into_iter().collect();
+    let mut denied: std::collections::HashSet<String> = canonicalize(&context.denied_tool_names)
+        .into_iter()
+        .collect();
     if let Some(agent) = agent {
         denied.extend(canonicalize(&agent.denied_tools));
     }
@@ -4403,9 +4689,7 @@ async fn execute_scheduled_run(
                     ("tool_start", name.clone())
                 }
                 worldbase_protocol::event::EventKind::ToolResult {
-                    ref name,
-                    is_error,
-                    ..
+                    ref name, is_error, ..
                 } => (
                     if is_error { "tool_error" } else { "tool_end" },
                     name.clone(),
@@ -4595,6 +4879,180 @@ fn group_tool_calls(
         }
     }
     groups
+}
+
+/// Tools whose successful execution changes source or project files. The
+/// coding gate treats any successful mutation as requiring fresh verification
+/// evidence before the run may report `completed`.
+fn is_coding_mutation_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "create_project"
+            | "write_project_file"
+            | "patch_project_file"
+            | "delete_project_file"
+            | "coding_edit"
+            | "write_workspace_file"
+            | "edit_workspace_file"
+            | "patch_workspace_file"
+            | "delete_workspace_file"
+            | "write_file"
+            | "edit_file"
+            | "patch_file"
+            | "delete_file"
+            | "local_write_file"
+            | "install_dependencies"
+            | "finalize_project"
+            | "create_lightweight_app"
+    )
+}
+
+fn coding_mutation_targets(name: &str, input: &serde_json::Value) -> Vec<std::path::PathBuf> {
+    let mut targets = Vec::new();
+    for key in ["file_path", "filePath", "path", "workspace_root", "cwd"] {
+        if let Some(value) = input
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            targets.push(std::path::PathBuf::from(value));
+        }
+    }
+    if targets.is_empty() {
+        if let Some(project) = input
+            .get("project_id")
+            .or_else(|| input.get("project"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            targets.push(std::path::PathBuf::from(format!("project:{project}")));
+        }
+    }
+    if targets.is_empty() {
+        targets.push(std::path::PathBuf::from(format!("<{name}>")));
+    }
+    targets
+}
+
+fn is_coding_verification_tool(name: &str, input: &serde_json::Value) -> bool {
+    if matches!(name, "rebuild_project" | "coding_verify") {
+        return true;
+    }
+    if !matches!(
+        name,
+        "run_project_command"
+            | "run_shell_command"
+            | "execute_command"
+            | "local_run_command"
+            | "run_workspace_command"
+    ) {
+        return false;
+    }
+    let command = input
+        .get("command")
+        .or_else(|| input.get("cmd"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let command = command.trim();
+    let known_runner = [
+        "npm", "pnpm", "yarn", "bun", "npx", "cargo", "pytest", "python", "python3", "go",
+        "vitest", "jest", "eslint", "tsc", "prettier", "next", "vite", "node",
+    ]
+    .iter()
+    .any(|runner| {
+        command == *runner
+            || command.starts_with(&format!("{runner} "))
+            || command.contains(&format!(" {runner} "))
+    });
+    if !known_runner {
+        return false;
+    }
+    [
+        "typecheck",
+        "type-check",
+        "tsc",
+        "eslint",
+        "lint",
+        "vitest",
+        "jest",
+        "test",
+        "build",
+        "cargo check",
+        "cargo test",
+        "cargo clippy",
+        "pytest",
+        "go test",
+    ]
+    .iter()
+    .any(|marker| command.contains(marker))
+}
+
+fn coding_verification_passed(is_error: bool, content: &str) -> bool {
+    if is_error {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return false;
+    };
+    if let Some(exit_code) = value
+        .get("exitCode")
+        .or_else(|| value.get("exit_code"))
+        .and_then(serde_json::Value::as_i64)
+    {
+        return exit_code == 0;
+    }
+    if let Some(success) = value.get("success").and_then(serde_json::Value::as_bool) {
+        return success;
+    }
+    if let Some(passed) = value.get("passed").and_then(serde_json::Value::as_bool) {
+        return passed;
+    }
+    value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| matches!(status, "completed" | "success" | "built"))
+}
+
+fn coding_verification_nudge(state: &CodingState, diagnosis: Option<&DiagnosisReport>) -> String {
+    let stop_reason = state
+        .stop_reason
+        .map(|reason| format!("{reason:?}"))
+        .unwrap_or_else(|| "none".into());
+    let mut message = format!(
+        "{CODING_VERIFICATION_GATE_PREFIX}\n当前处于编码模式，不能把带有未验证修改的任务标记为 completed。\n- 待验证修改数：{}\n- 验证次数：{}\n- 修复轮次：{}\n- 当前停止原因：{}\n请优先调用 `coding_verify`；不可用时再执行项目相关的 typecheck、lint、test、build 或 rebuild 验证。验证通过后重新调用 `finish_task`。如果当前平台无法运行验证，必须以 `status: \"partial\"` 或 `status: \"blocked\"` 结束，并明确说明未验证的检查项。不要声称未运行的检查已经通过。",
+        state.mutations_since_verification,
+        state.verification_attempts,
+        state.repair_round,
+        stop_reason,
+    );
+
+    if let Some(diagnosis) = diagnosis {
+        message.push_str("\n\n## Latest verification diagnosis\n");
+        message.push_str(&format!("- {}\n", diagnosis.summary));
+        message.push_str(&format!(
+            "- primary category: {}\n- failure signature: {}\n",
+            diagnosis.primary_category, diagnosis.failure_signature
+        ));
+        if !diagnosis.affected_files.is_empty() {
+            let files = diagnosis
+                .affected_files
+                .iter()
+                .take(10)
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            message.push_str(&format!("- affected files: {files}\n"));
+        }
+        if !diagnosis.repair_instructions.is_empty() {
+            message.push_str("- repair steps:\n");
+            for instruction in diagnosis.repair_instructions.iter().take(8) {
+                message.push_str(&format!("  - {instruction}\n"));
+            }
+        }
+    }
+
+    message
 }
 
 struct RunToolExecution {
@@ -4927,6 +5385,17 @@ async fn run_chat_inner(
     let mut total_input_tokens = 0u64;
     let mut total_output_tokens = 0u64;
     let mut finish_task_state = FinishTaskState::default();
+    let mut coding_state = context.coding_mode.then(|| {
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        state
+    });
+    let mut coding_finish_nudges = 0usize;
+    let mut coding_last_diagnosis: Option<DiagnosisReport> = None;
+    let mut coding_failure_signatures: Vec<String> = Vec::new();
     let run_started_at = std::time::Instant::now();
     let mut segment_iterations = 0usize;
     let mut segment_index = 1usize;
@@ -5310,6 +5779,43 @@ async fn run_chat_inner(
         // call. Persist and publish only its rendered user-visible message so
         // replay never contains a tool_use without a matching tool_result.
         if let Some(finish_input) = finish_call.as_ref().filter(|_| tool_uses.is_empty()) {
+            let requested_status = finish_task_string(finish_input, &["status"]);
+            let requests_completed = requested_status.is_empty() || requested_status == "completed";
+            if requests_completed {
+                if let Some(state) = coding_state.as_ref().filter(|state| !state.can_finish()) {
+                    if coding_finish_nudges >= MAX_CODING_FINISH_NUDGES {
+                        let message = "coding run attempted to finish as completed without satisfying verification";
+                        publish(
+                            &hub,
+                            &channel,
+                            &stream_id,
+                            EventKind::Error {
+                                message: message.into(),
+                            },
+                        )
+                        .await;
+                        result = Err(anyhow::anyhow!(message));
+                        break;
+                    }
+                    coding_finish_nudges += 1;
+                    publish(
+                        &hub,
+                        &channel,
+                        &stream_id,
+                        EventKind::Notice {
+                            text: "编码验证门禁：存在未验证修改，已阻止 completed 结束信号。"
+                                .into(),
+                        },
+                    )
+                    .await;
+                    llm_messages.push(assistant_msg);
+                    llm_messages.push(LlmMessage::text(
+                        LlmRole::User,
+                        coding_verification_nudge(state, coding_last_diagnosis.as_ref()),
+                    ));
+                    continue;
+                }
+            }
             let mut finish_content =
                 build_finish_task_message(finish_input, &assistant_msg.text_view());
             if finish_content.trim().is_empty() {
@@ -5407,6 +5913,38 @@ async fn run_chat_inner(
 
         // 无工具调用 → 简单对话直接结束；工具型任务最多追问两次显式完成信号。
         if tool_uses.is_empty() {
+            if let Some(state) = coding_state.as_ref().filter(|state| !state.can_finish()) {
+                if coding_finish_nudges >= MAX_CODING_FINISH_NUDGES {
+                    let message = "coding run ended without satisfying verification";
+                    publish(
+                        &hub,
+                        &channel,
+                        &stream_id,
+                        EventKind::Error {
+                            message: message.into(),
+                        },
+                    )
+                    .await;
+                    result = Err(anyhow::anyhow!(message));
+                    break;
+                }
+                coding_finish_nudges += 1;
+                publish(
+                    &hub,
+                    &channel,
+                    &stream_id,
+                    EventKind::Notice {
+                        text: "编码验证门禁：存在未验证修改，已阻止普通文本结束。".into(),
+                    },
+                )
+                .await;
+                llm_messages.push(assistant_msg);
+                llm_messages.push(LlmMessage::text(
+                    LlmRole::User,
+                    coding_verification_nudge(state, coding_last_diagnosis.as_ref()),
+                ));
+                continue;
+            }
             if finish_task_state.should_nudge() {
                 llm_messages.push(assistant_msg);
                 finish_task_state.record_missing_finish();
@@ -5425,6 +5963,7 @@ async fn run_chat_inner(
             if abort.is_cancelled() {
                 break;
             }
+            let group_calls = group.clone();
             for (call_id, name, input) in &group {
                 publish(
                     &hub,
@@ -5479,6 +6018,80 @@ async fn run_chat_inner(
                 }))
                 .await
             };
+            if let Some(state) = coding_state.as_mut() {
+                for ((_, name, input), execution) in group_calls.iter().zip(group_results.iter()) {
+                    if !execution.is_error && is_coding_mutation_tool(name) {
+                        state.record_mutation(coding_mutation_targets(name, input));
+                    }
+                    if is_coding_verification_tool(name, input) {
+                        let passed =
+                            coding_verification_passed(execution.is_error, &execution.content);
+                        let evidence = if name == "coding_verify" && !execution.is_error {
+                            serde_json::from_str::<serde_json::Value>(&execution.content)
+                                .ok()
+                                .and_then(|value| verification_evidence_from_value(&value).ok())
+                                .unwrap_or_else(|| VerificationEvidence::command_gate(passed))
+                        } else {
+                            VerificationEvidence::command_gate(passed)
+                        };
+                        let _ = state.record_verification(&evidence);
+                        if passed {
+                            coding_last_diagnosis = None;
+                            coding_failure_signatures.clear();
+                        } else {
+                            let report = analyze_outcomes(&evidence.outcomes);
+                            if report.has_repairable_issues {
+                                let plan = plan_repair(
+                                    &report,
+                                    &coding_failure_signatures,
+                                    state.repair_round,
+                                    state.policy(),
+                                );
+                                match plan.stop_reason {
+                                    Some(RepairStopReason::RepeatedFailure) => {
+                                        state.mark_non_recoverable();
+                                    }
+                                    Some(RepairStopReason::MaxRepairRounds) => {
+                                        state.mark_repair_exhausted();
+                                    }
+                                    _ => {}
+                                }
+                                coding_failure_signatures.push(report.failure_signature.clone());
+                                coding_last_diagnosis = Some(report);
+                            } else {
+                                coding_last_diagnosis = None;
+                            }
+                        }
+                        let text = if passed {
+                            "编码验证通过。".to_string()
+                        } else if state.stop_reason
+                            == Some(worldbase_coding::CodingStopReason::MaxRepairRounds)
+                        {
+                            "编码验证失败，修复轮次已耗尽。请以 blocked/partial 结束并说明剩余错误。"
+                                .to_string()
+                        } else if state.stop_reason
+                            == Some(worldbase_coding::CodingStopReason::NonRecoverable)
+                        {
+                            "编码验证失败：同一错误重复出现，已停止自动修复。请以 blocked/partial 结束并说明剩余错误。"
+                                .to_string()
+                        } else if let Some(report) = coding_last_diagnosis.as_ref() {
+                            format!(
+                                "编码验证失败：{}。已生成修复建议，修改后重新运行 coding_verify。",
+                                report.summary
+                            )
+                        } else {
+                            "编码验证失败，继续修复后重新验证。".to_string()
+                        };
+                        publish(
+                            &hub,
+                            &channel,
+                            &stream_id,
+                            EventKind::Notice { text: text.into() },
+                        )
+                        .await;
+                    }
+                }
+            }
             for execution in group_results {
                 publish(
                     &hub,

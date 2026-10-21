@@ -873,7 +873,6 @@ mod tests {
 
     #[test]
     fn command_classifier_judges_compound_commands_by_riskiest_segment() {
-        use super::classify_command;
         assert_eq!(classify("pnpm test"), SafetyLevel::Safe);
         assert_eq!(
             classify("pnpm install && pnpm run build"),

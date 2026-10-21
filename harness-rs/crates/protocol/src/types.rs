@@ -309,6 +309,12 @@ pub struct ChatRunContext {
     /// the plan restriction.
     #[serde(default)]
     pub plan_mode_active: bool,
+    /// Enables the Rust-owned coding verification gate for this run. The
+    /// coding policy and project profiles remain in `worldbase-coding`; this
+    /// flag only selects the run mode and is intentionally optional for old
+    /// clients.
+    #[serde(default)]
+    pub coding_mode: bool,
     /// Per-run dollar (or configured currency) cap supplied by Electron.
     /// Rust checks this after every completed provider call before it starts
     /// another agent-loop iteration.

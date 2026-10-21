@@ -320,6 +320,9 @@ export class RustHarnessEngine implements AIHarness {
         customTools,
         workspaceRoot: options?.workspaceRoot,
         targetProjectId: options?.targetProjectId ?? this.defaultTargetProjectId,
+        codingMode:
+          options?.codingMode ??
+          Boolean(options?.targetProjectId || this.defaultTargetProjectId || options?.workspaceRoot),
         memoryScopes: options?.memoryScopes,
         memoryQuery: textFromContent(pending.content),
         memoryEmbedding: options?.memoryEmbedding,

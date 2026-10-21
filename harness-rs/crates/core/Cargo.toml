@@ -29,6 +29,7 @@ worldbase-skills = { path = "../skills" }
 worldbase-scheduler = { path = "../scheduler" }
 worldbase-mcp-client = { path = "../mcp-client" }
 worldbase-group = { path = "../group" }
+worldbase-coding = { path = "../coding" }
 worldbase-project-runtime = { path = "../project-runtime" }
 worldbase-exec = { path = "../exec" }
 worldbase-im-gateway = { path = "../im-gateway" }

@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use worldbase_protocol::types::ToolDescriptor;
 
+pub mod coding_edit;
+pub mod coding_verify;
 pub mod command;
 pub mod compat_tools;
 pub mod computer_use;
@@ -206,6 +208,7 @@ impl ToolServices {
                 | "write_project_file"
                 | "patch_project_file"
                 | "delete_project_file"
+                | "coding_edit"
                 | "write_workspace_file"
                 | "edit_workspace_file"
                 | "patch_workspace_file"
@@ -661,6 +664,8 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(QueryProjectDatabaseTool),
         Arc::new(AnalyzeProjectDataTool),
         Arc::new(RebuildProjectTool),
+        Arc::new(coding_verify::CodingVerifyTool),
+        Arc::new(coding_edit::CodingEditTool),
         Arc::new(FinalizeProjectTool),
         Arc::new(ClearProjectBuildFlagTool),
         Arc::new(GetProjectLogsTool),
@@ -1346,6 +1351,7 @@ let mut expected = [
         assert!(services.enter_plan_mode("inspect before editing"));
         assert!(services.plan_mode_active());
         assert!(services.is_tool_allowed_in_plan_mode("read_project_file"));
+        assert!(!services.is_tool_allowed_in_plan_mode("coding_edit"));
         assert!(!services.is_tool_allowed_in_plan_mode("write_project_file"));
         assert!(!services.is_tool_allowed_in_plan_mode("write_file"));
         assert!(!services.is_tool_allowed_in_plan_mode("computer_observe"));

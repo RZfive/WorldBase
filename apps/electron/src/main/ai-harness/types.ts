@@ -61,6 +61,8 @@ export interface AIRequestOptions {
   agentId?: string | null
   targetProjectId?: string | null
   workspaceRoot?: string | null
+  /** Enable the Rust coding verification gate for this run. */
+  codingMode?: boolean
   providerConfig?: AIConfigInput
   abortSignal?: AbortSignal
   conversationId?: string

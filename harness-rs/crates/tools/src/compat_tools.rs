@@ -195,7 +195,7 @@ fn selected_folder_workspace(services: &ToolServices) -> Result<&Path> {
         .ok_or_else(|| anyhow::anyhow!("no folder workspace is selected for this conversation"))
 }
 
-fn project_path(input: &Value, services: &ToolServices) -> Result<(String, PathBuf)> {
+pub(crate) fn project_path(input: &Value, services: &ToolServices) -> Result<(String, PathBuf)> {
     let id = input
         .get("project_id")
         .or_else(|| input.get("project"))
@@ -1180,7 +1180,7 @@ fn spill_files_note(record: &Value) -> String {
 /// allow-listed `run_workspace_command` contract, and `Shell` only blocks the
 /// destructive-command class (general `run_shell_command`).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CommandPolicy {
+pub(crate) enum CommandPolicy {
     Project,
     Workspace,
     Shell,
@@ -1192,7 +1192,7 @@ enum CommandPolicy {
 /// final exit code. Output beyond the inline caps is spilled to files under
 /// `spill_dir` (typically the tool-results directory) while the command keeps
 /// running to completion.
-async fn run_managed_command(
+pub(crate) async fn run_managed_command(
     command: &str,
     cwd: &Path,
     timeout: u64,

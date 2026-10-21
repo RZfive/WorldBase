@@ -1279,6 +1279,62 @@ test('Rust chat preserves provider thinking defaults and omits reasoning only wh
   assert.equal(captured[2].reasoningEffort, 'high')
 })
 
+test('Rust chat forwards the coding mode gate to chat.send', async () => {
+  const captured = []
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-coding-mode-test'),
+    onEvent: () => {}
+  })
+  client.start = async () => {}
+  client.syncSettings = async () => {}
+  client.ensureConversation = async () => {}
+  client.request = async (method, params) => {
+    assert.equal(method, 'chat.send')
+    captured.push(params)
+    return { streamId: `coding-stream-${captured.length}` }
+  }
+
+  await client.chatStream('session-coding', 'conversation-coding', 'edit the app', {
+    codingMode: true,
+    targetProjectId: 'project-1'
+  })
+  await client.chatStream('session-coding-off', 'conversation-coding-off', 'answer a question', {
+    codingMode: false,
+    targetProjectId: 'project-1'
+  })
+
+  assert.equal(captured[0].codingMode, true)
+  assert.equal(captured[1].codingMode, false)
+})
+
+test('Rust facade enables coding mode by default for project runs and supports opt-out', async () => {
+  const captured = []
+  const client = {
+    ...createNativeToolClient(),
+    async start () {},
+    async chatStream (_sessionId, _conversationId, _text, options, onFrame) {
+      captured.push(options)
+      onFrame({ kind: 'assistant_message', content: 'ok' })
+      onFrame({ kind: 'done' })
+      return { streamId: `coding-engine-${captured.length}` }
+    }
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  engine.setTargetProjectId('project-1')
+
+  for await (const _event of engine.chatStream([
+    { role: 'user', content: 'edit the app' }
+  ], undefined, {})) {}
+  for await (const _event of engine.chatStream([
+    { role: 'user', content: 'just answer' }
+  ], undefined, { codingMode: false })) {}
+
+  assert.equal(captured[0].codingMode, true)
+  assert.equal(captured[0].targetProjectId, 'project-1')
+  assert.equal(captured[1].codingMode, false)
+})
+
 test('Rust facade forwards scoped semantic-memory settings to chat.send', async () => {
   const captured = []
   const client = {

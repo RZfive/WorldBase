@@ -13,6 +13,7 @@ members = [
     "crates/mcp-client",
     "crates/docs",
     "crates/search",
+    "crates/coding",
     # P2/P4 接入层与桌面专属
     "crates/app-server",
     "crates/exec",
@@ -96,6 +97,11 @@ tempfile = "3"
 # 搜索
 regex = "1"
 ignore = "0.4"
+
+# 前端语言语义解析（第一批：JavaScript / TypeScript / TSX）
+tree-sitter = "0.25.10"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
 
 [profile.release]
 lto = true
