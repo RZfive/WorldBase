@@ -61,6 +61,7 @@ import {
   buildCurrentFolderWorkspaceState,
   buildOutgoingMessagesWithDocumentWorkspaceContext
 } from '../../workspace/workspace-store'
+import type { CodingDiffState, CodingStatus } from '../../../../shared/coding-status-types.js'
 import type {
   AIExecutionAuthMode,
   BackgroundStreamState,
@@ -108,6 +109,8 @@ interface ChatMessageSenderOptions {
   activeGroupSessionIds: Set<string>
   backgroundStreamMessages: Map<string, BackgroundStreamState>
   unreadConversationIds: Set<string>
+  codingStatusByConversation: Map<string, CodingStatus>
+  codingDiffByConversation: Map<string, CodingDiffState>
   setConversationTarget: (conversationId: string, projectId: string | null | undefined) => void
   resolveAssistantSpeakerName: (sourceText: string) => string
   saveConversation: (conversationId: string, messages: ChatMessage[], options?: { refreshSidebar?: boolean }) => Promise<void>
@@ -192,6 +195,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     activeGroupSessionIds,
     backgroundStreamMessages,
     unreadConversationIds,
+    codingStatusByConversation,
+    codingDiffByConversation,
     setConversationTarget,
     resolveAssistantSpeakerName,
     saveConversation: doSaveConversation,
@@ -464,6 +469,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       return created
     }
 
+    codingStatusByConversation.delete(convId)
+    codingDiffByConversation.delete(convId)
     streamingConvIds.add(convId)
     activeStreamSessionIds.set(convId, sessionId)
 
@@ -589,6 +596,10 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
             } else if (event.type === 'group_peer_message' && event.peerMessage) {
               flushPendingStreamText()
               appendGroupPeerMessageBlock(assistantMessage, event.peerMessage)
+            } else if (event.type === 'coding_status' && event.codingStatus) {
+              codingStatusByConversation.set(convId, event.codingStatus)
+            } else if (event.type === 'coding_diff' && event.codingDiff) {
+              codingDiffByConversation.set(convId, event.codingDiff)
             } else if (event.type === 'tool_start' && event.name) {
               flushPendingStreamText()
               hadToolSinceLastThinking = true

@@ -124,6 +124,7 @@ struct PreparedFile {
     edited: String,
     operation_count: usize,
     depends_on: BTreeSet<PathBuf>,
+    changes: Vec<Value>,
 }
 
 async fn execute_apply(
@@ -276,7 +277,8 @@ async fn execute_apply(
                     results.push(json!({
                         "filePath": file.file_path.to_string_lossy(),
                         "operationCount": file.operation_count,
-                        "bytesWritten": file.edited.len()
+                        "bytesWritten": file.edited.len(),
+                        "changes": file.changes
                     }));
                     written_in_batch.push(file.file_path.clone());
                 }
@@ -322,6 +324,7 @@ async fn prepare_file(group: PendingFile) -> Result<PreparedFile> {
 
     let mut edited = original.clone();
     let mut depends_on = BTreeSet::new();
+    let mut changes = Vec::new();
     for edit in &group.edits {
         let proposal =
             build_proposal(&parsed, edit.operation, &edit.query, &edit.input).map_err(|error| {
@@ -331,6 +334,13 @@ async fn prepare_file(group: PendingFile) -> Result<PreparedFile> {
                     group.file_path.display()
                 )
             })?;
+        changes.push(json!({
+            "operation": edit.operation.as_str(),
+            "before": proposal.original_snippet,
+            "after": proposal.replacement,
+            "startByte": proposal.byte_range.start,
+            "endByte": proposal.byte_range.end
+        }));
         edited = proposal.edited_source;
         parsed = reparse(&group.full_path, &edited)?;
         depends_on.extend(edit.depends_on.iter().cloned());
@@ -343,6 +353,7 @@ async fn prepare_file(group: PendingFile) -> Result<PreparedFile> {
         edited,
         operation_count: group.edits.len(),
         depends_on,
+        changes,
     })
 }
 
@@ -903,6 +914,9 @@ mod tests {
         );
         for entry in results {
             assert_eq!(entry["operationCount"], 1);
+            assert_eq!(entry["changes"].as_array().unwrap().len(), 1);
+            assert!(!entry["changes"][0]["before"].as_str().unwrap().is_empty());
+            assert!(!entry["changes"][0]["after"].as_str().unwrap().is_empty());
             let file = project.join(entry["filePath"].as_str().unwrap());
             assert_eq!(
                 entry["bytesWritten"].as_u64().unwrap() as usize,

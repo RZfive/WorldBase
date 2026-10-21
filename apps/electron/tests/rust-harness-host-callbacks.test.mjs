@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import './register-ts-hooks.mjs'
-import { RustHarnessEngine, planModeExitedAfterNativeResult, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
+import { RustHarnessEngine, codingEventsForToolResult, planModeExitedAfterNativeResult, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
 import { ElectronToolRegistry } from '../src/main/ai-harness/electron-tool-registry.ts'
 import { MCPService } from '../src/main/mcp/mcp-service.ts'
 import { RustHarnessClient } from '../electron/main-process/rust-harness-client.ts'
@@ -1789,4 +1789,98 @@ test('write tool results re-emit as file_preview events with absolute paths', as
     await fs.rm(root, { recursive: true, force: true })
     await fs.rm(harnessWorkspace, { recursive: true, force: true })
   }
+})
+
+test('coding tool results map into status and diff stream events', () => {
+  const failedVerify = codingEventsForToolResult(
+    'coding_verify',
+    JSON.stringify({
+      passed: false,
+      outcomes: [{
+        kind: 'typecheck',
+        program: 'pnpm',
+        args: ['run', 'typecheck'],
+        exitCode: 2,
+        timedOut: false,
+        cancelled: false,
+        durationMs: 1200,
+        stderr: 'src/main.ts(12,7): error TS2304: Cannot find name x.'
+      }],
+      diagnostics: [{
+        severity: 'error',
+        message: "Cannot find name 'x'.",
+        code: 'TS2304',
+        file: 'src/main.ts',
+        line: 12,
+        column: 7,
+        confidence: 0.95
+      }]
+    }),
+    null,
+    null
+  )
+  assert.equal(failedVerify.status.phase, 'diagnose')
+  assert.equal(failedVerify.status.verificationAttempts, 1)
+  assert.equal(failedVerify.status.diagnostics[0].code, 'TS2304')
+  assert.equal(failedVerify.status.commands[0].exitCode, 2)
+  assert.equal(failedVerify.status.stopReason, 'verificationFailed')
+
+  const diagnose = codingEventsForToolResult(
+    'coding_diagnose',
+    JSON.stringify({
+      diagnosis: {
+        summary: '1 error(s), 0 warning(s)',
+        matches: [{ patternId: 'ts-2304', fixHint: 'Declare the identifier.', files: ['src/main.ts'], confidence: 0.95 }],
+        repairInstructions: ['Declare the identifier.']
+      },
+      dependency: {
+        issues: [{ kind: 'missingPackage', package: 'zod', message: "Cannot find module 'zod'.", suggestedFix: { command: 'pnpm add zod' } }]
+      },
+      repair: { shouldRetry: true, instructions: ['Declare the identifier.'] }
+    }),
+    failedVerify.status,
+    null
+  )
+  assert.equal(diagnose.status.phase, 'repair')
+  assert.equal(diagnose.status.dependencyIssues[0].command, 'pnpm add zod')
+  assert.deepEqual(diagnose.status.repairInstructions, ['Declare the identifier.'])
+
+  const edit = codingEventsForToolResult(
+    'coding_edit',
+    JSON.stringify({
+      changed: true,
+      operation: 'replace',
+      filePath: 'src/main.ts',
+      byteRange: { start: 10, end: 20 },
+      before: 'const x = 1;',
+      after: 'const x = 2;'
+    }),
+    diagnose.status,
+    null
+  )
+  assert.equal(edit.status.phase, 'edit')
+  assert.deepEqual(edit.status.changedFiles, ['src/main.ts'])
+  assert.equal(edit.diff.files[0].changes[0].before, 'const x = 1;')
+  assert.equal(edit.diff.files[0].changes[0].after, 'const x = 2;')
+
+  const apply = codingEventsForToolResult(
+    'coding_apply',
+    JSON.stringify({
+      applied: true,
+      results: [{
+        filePath: 'src/a.ts',
+        operationCount: 2,
+        changes: [
+          { operation: 'replace', before: 'a', after: 'b' },
+          { operation: 'rename', before: 'foo', after: 'bar' }
+        ]
+      }]
+    }),
+    edit.status,
+    edit.diff
+  )
+  assert.equal(apply.status.changedFiles.length, 2)
+  assert.equal(apply.diff.files[0].filePath, 'src/main.ts')
+  assert.equal(apply.diff.files[1].filePath, 'src/a.ts')
+  assert.equal(apply.diff.files[1].changes.length, 2)
 })

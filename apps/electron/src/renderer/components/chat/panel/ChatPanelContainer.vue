@@ -14,6 +14,7 @@ import QuickAskPopover from '../layout/QuickAskPopover.vue'
 import { generateId } from './message-blocks'
 import WorkspacePanel from '../../workspace/WorkspacePanel.vue'
 import PinnedTodoPanel from '../layout/PinnedTodoPanel.vue'
+import CodingStatusPanel from '../layout/CodingStatusPanel.vue'
 import AskUserPanel from '../layout/AskUserPanel.vue'
 import AuthPermissionPanel from '../layout/AuthPermissionPanel.vue'
 import SudoPasswordPanel from '../layout/SudoPasswordPanel.vue'
@@ -96,6 +97,8 @@ const {
   currentAskUserRequest,
   currentAssistantIcon,
   currentAssistantName,
+  currentCodingDiff,
+  currentCodingStatus,
   currentContextDetail,
   currentContextLabel,
   currentConversationId,
@@ -384,13 +387,17 @@ const pendingAttentionPanels = computed<AttentionPanelId[]>(() => {
   if (currentSudoPasswordRequest.value) ids.push('sudo')
   if (currentAskUserRequest.value) ids.push('ask')
   if (activeTodoItems.value.length > 0) ids.push('todo')
+  if (currentCodingStatus.value) ids.push('coding')
   return ids
 })
 const attentionSignature = computed(() => [
   currentPendingAuthRequest.value?.requestId ?? '-',
   currentSudoPasswordRequest.value?.requestId ?? '-',
   currentAskUserRequest.value?.requestId ?? '-',
-  activeTodoItems.value.length > 0 ? 'todo' : '-'
+  activeTodoItems.value.length > 0 ? 'todo' : '-',
+  currentCodingStatus.value
+    ? `${currentCodingStatus.value.phase}:${currentCodingStatus.value.updatedAt}`
+    : '-'
 ].join('|'))
 const { expandedPanel: expandedAttentionPanel, togglePanel: toggleAttentionPanel } =
   createAttentionAccordion(
@@ -1030,6 +1037,18 @@ async function revealWorkspaceTab (result: ReturnType<typeof ensureWorkspaceTab>
  * Entry point for both the add-tab menu and AI `open_workspace_tab` calls;
  * a payload-less document open routes through the file picker.
  */
+function openCodingDiagnostics (): void {
+  const conversationId = currentConversationId.value
+  if (!conversationId) return
+  void openWorkspaceTab('coding', { conversationId })
+}
+
+function openCodingDiff (): void {
+  const conversationId = currentConversationId.value
+  if (!conversationId) return
+  void openWorkspaceTab('coding-diff', { conversationId })
+}
+
 async function openWorkspaceTab (kind: string, payload?: Record<string, unknown>): Promise<void> {
   if (kind === 'folder') {
     if (payload && typeof payload.rootPath === 'string' && payload.rootPath.trim()) {
@@ -1752,6 +1771,17 @@ watch(
               @toggle="toggleAttentionPanel('ask')"
               @submit="(requestId, answers) => respondToAskUserRequest(requestId, answers)"
               @cancel="(requestId) => respondToAskUserRequest(requestId, null)"
+            />
+
+            <CodingStatusPanel
+              v-if="currentCodingStatus"
+              :status="currentCodingStatus"
+              :diff-file-count="currentCodingDiff?.files.length || 0"
+              :is-loading="isLoading"
+              :expanded="expandedAttentionPanel === 'coding'"
+              @toggle="toggleAttentionPanel('coding')"
+              @open-diagnostics="openCodingDiagnostics"
+              @open-diff="openCodingDiff"
             />
 
             <PinnedTodoPanel

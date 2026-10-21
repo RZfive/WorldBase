@@ -559,6 +559,20 @@ export function setupIPC (): void {
               safe.results = []
             }
           }
+          if ('codingStatus' in event) {
+            try {
+              safe.codingStatus = JSON.parse(JSON.stringify(event.codingStatus))
+            } catch {
+              safe.codingStatus = null
+            }
+          }
+          if ('codingDiff' in event) {
+            try {
+              safe.codingDiff = JSON.parse(JSON.stringify(event.codingDiff))
+            } catch {
+              safe.codingDiff = null
+            }
+          }
           if ('result' in event) {
             try {
               safe.result = JSON.parse(JSON.stringify(event.result))

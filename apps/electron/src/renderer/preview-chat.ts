@@ -6,10 +6,12 @@ import ChatHeader from './components/chat/layout/ChatHeader.vue'
 import MessageList from './components/chat/messages/MessageList.vue'
 import ChatInput from './components/chat/layout/ChatInput.vue'
 import PinnedTodoPanel from './components/chat/layout/PinnedTodoPanel.vue'
+import CodingStatusPanel from './components/chat/layout/CodingStatusPanel.vue'
 import AuthPermissionPanel from './components/chat/layout/AuthPermissionPanel.vue'
 import AskUserPanel from './components/chat/layout/AskUserPanel.vue'
 import { createAttentionAccordion, type AttentionPanelId } from './components/chat/panel/attention-accordion'
 import type { ChatMessage } from './components/chat/types'
+import type { CodingStatus } from '../shared/coding-status-types.js'
 import type { AgentSidebarItem, ConversationSidebarItem, GroupSidebarItem, LongTermGoalSidebarItem } from './components/chat/layout/ConversationSidebar.types'
 
 document.documentElement.dataset.theme = 'light'
@@ -50,6 +52,34 @@ const messages: ChatMessage[] = [
   ] }
 ]
 
+const codingStatus: CodingStatus = {
+  phase: 'repair',
+  repairRound: 1,
+  maxRepairRounds: 3,
+  verificationAttempts: 2,
+  changedFiles: ['src/components/Table.vue', 'src/lib/virtual.ts'],
+  commands: [{
+    kind: 'typecheck',
+    program: 'pnpm',
+    args: ['run', 'typecheck'],
+    exitCode: 2,
+    timedOut: false,
+    cancelled: false,
+    durationMs: 8420,
+    stderr: "src/components/Table.vue(42,9): error TS2339: Property 'visibleRows' does not exist on type 'TableState'."
+  }],
+  diagnostics: [
+    { severity: 'error', message: "Property 'visibleRows' does not exist on type 'TableState'.", code: 'TS2339', file: 'src/components/Table.vue', line: 42, column: 9, confidence: 0.95 },
+    { severity: 'error', message: "Cannot find name 'rowHeight'.", code: 'TS2304', file: 'src/lib/virtual.ts', line: 18, column: 22, confidence: 0.95 },
+    { severity: 'warning', message: "React Hook useMemo has a missing dependency: 'rows'.", code: 'react-hooks/exhaustive-deps', file: 'src/components/Table.vue', line: 61, column: 5, confidence: 0.8 }
+  ],
+  dependencyIssues: [],
+  repairInstructions: ['Add visibleRows to TableState.', "Declare or import rowHeight in virtual.ts."],
+  stopReason: 'verificationFailed',
+  summary: '2 errors, 1 warning',
+  updatedAt: Date.now()
+}
+
 const App = defineComponent({
   setup () {
     const text = ref('')
@@ -61,6 +91,7 @@ const App = defineComponent({
     const busy = params.get('busy') === '1'
     const auth = params.get('auth') === '1'
     const ask = params.get('ask') === '1'
+    const coding = params.get('coding') === '1'
     // ?new=1 renders a brand-new conversation (interactive agent picker in
     // the header); default is a bound conversation (subdued agent badge).
     const isNew = params.get('new') === '1'
@@ -71,11 +102,12 @@ const App = defineComponent({
       if (auth) ids.push('auth')
       if (ask) ids.push('ask')
       ids.push('todo')
+      if (coding) ids.push('coding')
       return ids
     })
     const accordion = createAttentionAccordion(
       () => pendingAttentionPanels.value,
-      () => `${auth ? 'r1' : '-'}|${ask ? 'q1' : '-'}|todo`
+      () => `${auth ? 'r1' : '-'}|${ask ? 'q1' : '-'}|todo|${coding ? 'coding' : '-'}`
     )
     return () => h('div',{class:'preview-shell'},[
       h(ConversationSidebar,{agentItems,groupItems,longTermGoalItems:goalItems,conversationItems,conversationListLoaded:true,onNewConversation:()=>{},onToggleCollapse:()=>{},onSelectConversation:()=>{},onOpenAgent:()=>{},onOpenGroup:()=>{},onOpenLongTermGoal:()=>{},onNewLongTermGoal:()=>{},onDeleteLongTermGoal:()=>{},onDeleteConversation:()=>{},onRenameConversation:()=>{}}),
@@ -83,6 +115,7 @@ const App = defineComponent({
         h(ChatHeader,{contextLabel:isNew?'💬 新对话':'🤖 主 Agent',contextDetail:'',availableChannelBindings:[],selectedChannelBindingId:'',providers:[{id:'anthropic',name:'Anthropic',models:['Opus 4.8']}],activeProviderId:'anthropic',selectedModel:'Opus 4.8',showProviderSelector:true,reasoningStrength:'high',temperature:null,providerDefaultTemperature:1,isGroupConversation:false,showAgentSelector:isNew,availableAgents:[{id:'a1',name:'前端工程师',icon:'🤖'},{id:'a2',name:'文案作者',icon:'✍️'}],selectedAgentId:'',onSelectProviderModel:()=>{},'onUpdate:reasoningStrength':()=>{},'onUpdate:temperature':()=>{},'onUpdate:selectedAgentId':()=>{}}),
         h(MessageList,{messages,isLoading,filePreview:{active:false,filePath:'',lineCount:0,added:0,removed:0},assistantName:'前端工程师'}),
         h('div',{class:'preview-attention'},[
+          ...(coding ? [h(CodingStatusPanel,{status:codingStatus,diffFileCount:2,isLoading:true,expanded:accordion.expandedPanel.value==='coding',onToggle:()=>accordion.togglePanel('coding'),onOpenDiagnostics:()=>{},onOpenDiff:()=>{}})] : []),
           h(PinnedTodoPanel,{items:[{id:1,title:'定位表格渲染瓶颈',status:'completed'},{id:2,title:'实现虚拟滚动窗口',status:'in-progress'},{id:3,title:'补充性能回归数据',status:'not-started'}],isLoading:true,expanded:accordion.expandedPanel.value==='todo',onToggle:()=>accordion.togglePanel('todo')}),
           ...(auth ? [h(AuthPermissionPanel,{request:{requestId:'r1',title:'运行命令',detail:'local_run_command · 只读'},pendingCount:1,expanded:accordion.expandedPanel.value==='auth',onToggle:()=>accordion.togglePanel('auth'),onRespond:()=>{}})] : []),
           ...(ask ? [h(AskUserPanel,{request:{requestId:'q1',questions:[

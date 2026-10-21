@@ -1,5 +1,6 @@
 import { reactive, ref } from 'vue'
 import { computerUsePermissions } from '../../../utils/computer-use-permissions'
+import type { CodingDiffState, CodingStatus } from '../../../../shared/coding-status-types.js'
 import type {
   AgentDefinition,
   AgentGroupDefinition,
@@ -80,6 +81,8 @@ export const sharedChatPanelState = {
   activeCleanups: new Map<string, () => void>(),
   activeStreamSessionIds: new Map<string, string>(),
   activeGroupSessionIds: reactive(new Set<string>()),
+  codingStatusByConversation: reactive(new Map<string, CodingStatus>()),
+  codingDiffByConversation: reactive(new Map<string, CodingDiffState>()),
   conversationTargets: new Map<string, string | null>()
 }
 

@@ -34,12 +34,14 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_session_state' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'group_board' | 'group_direct_reply' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_session_state' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'group_board' | 'group_direct_reply' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'coding_status' | 'coding_diff' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: ChatMessage
   thinking?: string
   error?: string
+  codingStatus?: import('../src/shared/coding-status-types.js').CodingStatus
+  codingDiff?: import('../src/shared/coding-status-types.js').CodingDiffState
   stage?: string
   detail?: string
   items?: TodoItem[]

@@ -170,7 +170,9 @@ async fn execute_edit(
             "end": proposal.byte_range.end
         },
         "bytesWritten": proposal.edited_source.len(),
-        "preview": preview(&proposal.edited_source, proposal.byte_range.start)
+        "preview": preview(&proposal.edited_source, proposal.byte_range.start),
+        "before": proposal.original_snippet,
+        "after": proposal.replacement
     }))
 }
 
@@ -359,6 +361,8 @@ mod tests {
         assert_eq!(result["operation"], "replace");
         assert_eq!(result["filePath"], "src/math.ts");
         assert!(result["byteRange"]["start"].as_u64().unwrap() > 0);
+        assert!(result["before"].as_str().unwrap().contains("return a + b"));
+        assert!(result["after"].as_str().unwrap().contains("return a * b"));
         let written = std::fs::read_to_string(&file).unwrap();
         assert_eq!(
             result["bytesWritten"].as_u64().unwrap() as usize,

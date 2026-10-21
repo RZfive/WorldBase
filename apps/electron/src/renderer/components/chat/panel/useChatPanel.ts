@@ -77,6 +77,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     activeCleanups,
     activeStreamSessionIds,
     activeGroupSessionIds,
+    codingStatusByConversation,
+    codingDiffByConversation,
     conversationTargets
   } = sharedChatPanelState
   const isLoading = computed(() => {
@@ -132,6 +134,14 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   })
 
   const activeTodoItems = computed(() => getLatestVisibleTodoItems(messages.value, isLoading.value))
+  const currentCodingStatus = computed(() => {
+    const id = currentConversationId.value
+    return id ? codingStatusByConversation.get(id) || null : null
+  })
+  const currentCodingDiff = computed(() => {
+    const id = currentConversationId.value
+    return id ? codingDiffByConversation.get(id) || null : null
+  })
 
   const {
     agentSelectorValue,
@@ -481,6 +491,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     activeGroupSessionIds,
     backgroundStreamMessages,
     unreadConversationIds,
+    codingStatusByConversation,
+    codingDiffByConversation,
     setConversationTarget,
     resolveAssistantSpeakerName,
     saveConversation: (conversationId, chatMessages, options) => doSaveConversation(conversationId, chatMessages, options),
@@ -593,6 +605,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     currentAssistantName,
     currentContextDetail,
     currentContextLabel,
+    currentCodingDiff,
+    currentCodingStatus,
     currentConversationId,
     currentLongTermGoal,
     currentPendingAuthCount,

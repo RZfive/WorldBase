@@ -2,6 +2,7 @@ import type { AILogSessionLogger } from '../settings/ai-log-store.js'
 import type { AIExecutionAuthMode } from '../settings/settings-store.js'
 import type { ChatMessage, ToolDefinition } from './contracts.js'
 import type { MemoryEmbeddingRuntimeConfig, MemorySearchScope } from '../../shared/agent-workspace-types.js'
+import type { CodingDiffState, CodingStatus } from '../../shared/coding-status-types.js'
 
 export type { ChatMessage, MessageContent, ToolDefinition } from './contracts.js'
 
@@ -24,6 +25,8 @@ export type StreamEvent =
   | { type: 'tool_start'; name: string; summary?: string; filePath?: string }
   | { type: 'tool_end'; name: string; error?: string }
   | ProgressEvent
+  | { type: 'coding_status'; status: CodingStatus }
+  | { type: 'coding_diff'; diff: CodingDiffState }
   | { type: 'reset' }
   | { type: 'plan_mode'; active: boolean; plan?: { goal: string; summary: string; steps: Array<{ description: string; files?: string[] }>; createdAt: number } }
   | { type: 'cost_update'; totalCost: number; inputTokens: number; outputTokens: number }
