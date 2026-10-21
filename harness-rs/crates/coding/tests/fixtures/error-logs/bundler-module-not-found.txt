@@ -1,0 +1,6 @@
+vite v6.0.3 building for production...
+✓ 42 modules transformed.
+✗ Build failed in 812ms
+error during build:
+Failed to resolve import "./components/Missing" from "src/App.tsx". Does the file exist?
+file: /workspace/src/App.tsx

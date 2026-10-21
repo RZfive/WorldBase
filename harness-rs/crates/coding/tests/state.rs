@@ -220,3 +220,74 @@ fn no_mutation_run_can_finish_without_verification() {
     assert_eq!(state.verification_attempts, 0);
     assert!(state.dirty_files.is_empty());
 }
+
+#[test]
+fn diagnosis_and_repair_transitions_follow_the_legal_phase_order() {
+    let mut state = CodingState::new(policy(2));
+    state.begin();
+
+    // Plan/Inspect/Edit cannot jump directly to diagnosis.
+    assert!(!state.begin_diagnosis());
+    state.record_mutation([PathBuf::from("src/lib.rs")]);
+    assert_eq!(state.phase, CodingPhase::Edit);
+    assert!(!state.begin_diagnosis());
+    assert!(!state.begin_repair(), "repair requires diagnosis first");
+
+    assert!(state.begin_verification());
+    assert_eq!(state.phase, CodingPhase::Verify);
+    assert!(state.begin_diagnosis());
+    assert_eq!(state.phase, CodingPhase::Diagnose);
+    assert!(
+        !state.begin_diagnosis(),
+        "diagnosis advances only from Verify/Repair"
+    );
+
+    assert!(state.begin_repair());
+    assert_eq!(state.phase, CodingPhase::Repair);
+    assert!(state.begin_diagnosis());
+    assert_eq!(state.phase, CodingPhase::Diagnose);
+}
+
+#[test]
+fn diagnosis_and_repair_reject_terminal_and_empty_states() {
+    let mut terminal = CodingState::new(policy(2));
+    terminal.begin();
+    terminal.cancel();
+    assert!(!terminal.begin_diagnosis());
+    assert!(!terminal.begin_repair());
+
+    let mut complete = CodingState::new(policy(2));
+    complete.begin();
+    complete.record_mutation([PathBuf::from("src/lib.rs")]);
+    assert!(complete.record_verification(&evidence(true, false, false)));
+    assert_eq!(complete.phase, CodingPhase::Complete);
+    assert!(!complete.begin_diagnosis());
+    assert!(!complete.begin_repair());
+
+    let mut empty = CodingState::new(policy(2));
+    empty.begin();
+    empty.phase = CodingPhase::Verify;
+    assert!(!empty.begin_diagnosis(), "no pending mutation or failure");
+    empty.phase = CodingPhase::Repair;
+    assert!(
+        empty.begin_diagnosis(),
+        "a repair phase represents a failure"
+    );
+}
+
+#[test]
+fn repair_budget_exhaustion_prevents_the_repair_transition() {
+    let mut state = CodingState::new(policy(1));
+    state.begin();
+    state.record_mutation([PathBuf::from("src/lib.rs")]);
+
+    assert!(!state.record_verification(&evidence(false, false, false)));
+    assert_eq!(state.phase, CodingPhase::Repair);
+    assert_eq!(state.repair_round, 1);
+    assert_eq!(state.remaining_repair_rounds(), 0);
+
+    assert!(state.begin_diagnosis());
+    assert_eq!(state.phase, CodingPhase::Diagnose);
+    assert!(!state.begin_repair());
+    assert_eq!(state.phase, CodingPhase::Diagnose);
+}

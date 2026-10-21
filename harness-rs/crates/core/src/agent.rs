@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use worldbase_coding::{
     analyze_outcomes, detect_profile, plan_repair, verification_evidence_from_value, CodingPolicy,
-    CodingState, DiagnosisReport, RepairStopReason, VerificationEvidence,
+    CodingState, CodingStopReason, DiagnosisReport, RepairStopReason, VerificationEvidence,
 };
 use worldbase_protocol::event::{EventFrame, EventKind, StreamChannel};
 use worldbase_protocol::types::{
@@ -2096,6 +2096,7 @@ async fn system_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use worldbase_coding::CodingPhase;
     use worldbase_protocol::types::{ToolCallRecord, ToolResultRecord};
     use worldbase_providers::{ChunkStream, Provider, TokenUsage};
 
@@ -2564,6 +2565,279 @@ mod tests {
         let nudge = coding_verification_nudge(&state, Some(&report));
         assert!(nudge.contains("## Latest verification diagnosis"));
         assert!(nudge.contains("src/main.ts"));
+        assert!(nudge.contains("repair steps"));
+    }
+
+    fn coding_verify_execution(call_id: &str, passed: bool) -> RunToolExecution {
+        let content = if passed {
+            serde_json::json!({
+                "passed": true,
+                "profile": { "projectKind": "frontendNode", "commands": [] },
+                "outcomes": [],
+                "diagnostics": []
+            })
+        } else {
+            serde_json::json!({
+                "passed": false,
+                "profile": { "projectKind": "frontendNode", "commands": [] },
+                "outcomes": [{
+                    "kind": "typecheck",
+                    "program": "pnpm",
+                    "args": ["run", "typecheck"],
+                    "exitCode": 2,
+                    "timedOut": false,
+                    "cancelled": false,
+                    "durationMs": 10,
+                    "stdout": "",
+                    "stderr": "src/main.ts(12,7): error TS2304: Cannot find name 'missingValue'."
+                }],
+                "diagnostics": []
+            })
+        };
+        RunToolExecution {
+            call_id: call_id.into(),
+            name: "coding_verify".into(),
+            content: content.to_string(),
+            is_error: false,
+            images: vec![],
+        }
+    }
+
+    fn tool_execution(
+        call_id: &str,
+        name: &str,
+        content: &str,
+        is_error: bool,
+    ) -> RunToolExecution {
+        RunToolExecution {
+            call_id: call_id.into(),
+            name: name.into(),
+            content: content.into(),
+            is_error,
+            images: vec![],
+        }
+    }
+
+    #[test]
+    fn coding_tool_outcomes_record_mutations_but_ignore_read_tools() {
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        let mut signatures = Vec::new();
+
+        let write = tool_execution("write-1", "write_file", "{}", false);
+        let outcome = apply_coding_tool_outcome(
+            &mut state,
+            "write_file",
+            &json!({ "path": "src/main.ts" }),
+            &write,
+            &mut signatures,
+        )
+        .expect("write_file is a mutation tool");
+        assert!(outcome.notice.is_empty());
+        assert!(outcome.diagnosis.is_none());
+        assert_eq!(state.mutations_since_verification, 1);
+        assert_eq!(state.phase, CodingPhase::Edit);
+
+        let edit = tool_execution("edit-1", "coding_edit", "{}", false);
+        apply_coding_tool_outcome(
+            &mut state,
+            "coding_edit",
+            &json!({ "file_path": "src/main.ts" }),
+            &edit,
+            &mut signatures,
+        )
+        .expect("coding_edit is a mutation tool");
+        assert_eq!(state.mutations_since_verification, 2);
+
+        let read = tool_execution("read-1", "read_file", "{}", false);
+        assert!(apply_coding_tool_outcome(
+            &mut state,
+            "read_file",
+            &json!({ "path": "src/main.ts" }),
+            &read,
+            &mut signatures,
+        )
+        .is_none());
+        assert_eq!(state.mutations_since_verification, 2);
+
+        let failed_write = tool_execution("write-2", "write_file", "denied", true);
+        apply_coding_tool_outcome(
+            &mut state,
+            "write_file",
+            &json!({ "path": "src/main.ts" }),
+            &failed_write,
+            &mut signatures,
+        );
+        assert_eq!(state.mutations_since_verification, 2);
+    }
+
+    #[test]
+    fn failed_verification_moves_through_diagnosis_into_repair() {
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            max_repair_rounds: 2,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        state.record_mutation([std::path::PathBuf::from("src/main.ts")]);
+        assert!(state.begin_verification());
+        let mut signatures = Vec::new();
+
+        let execution = coding_verify_execution("verify-1", false);
+        let outcome = apply_coding_tool_outcome(
+            &mut state,
+            "coding_verify",
+            &json!({ "project_id": "project-1" }),
+            &execution,
+            &mut signatures,
+        )
+        .expect("coding_verify is handled");
+
+        assert!(!outcome.blocked);
+        assert!(outcome.notice.contains("编码验证失败"));
+        let report = outcome.diagnosis.expect("structured diagnosis");
+        assert_eq!(report.failure_signature, signatures[0]);
+        assert_eq!(state.phase, CodingPhase::Repair);
+        assert_eq!(state.repair_round, 1);
+        assert_eq!(signatures.len(), 1);
+        assert!(!state.can_finish());
+    }
+
+    #[test]
+    fn repeated_verification_failure_blocks_as_non_recoverable() {
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            max_repair_rounds: 3,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        state.record_mutation([std::path::PathBuf::from("src/main.ts")]);
+        let mut signatures = Vec::new();
+        let input = json!({ "project_id": "project-1" });
+
+        let first = apply_coding_tool_outcome(
+            &mut state,
+            "coding_verify",
+            &input,
+            &coding_verify_execution("verify-1", false),
+            &mut signatures,
+        )
+        .expect("first verification is handled");
+        assert!(!first.blocked);
+        assert_eq!(state.phase, CodingPhase::Repair);
+
+        let second = apply_coding_tool_outcome(
+            &mut state,
+            "coding_verify",
+            &input,
+            &coding_verify_execution("verify-2", false),
+            &mut signatures,
+        )
+        .expect("second verification is handled");
+        assert!(second.blocked);
+        assert!(second.notice.contains("同一错误重复出现"));
+        assert_eq!(state.phase, CodingPhase::Blocked);
+        assert_eq!(state.stop_reason, Some(CodingStopReason::NonRecoverable));
+        assert_eq!(signatures.len(), 2);
+    }
+
+    #[test]
+    fn exhausted_repair_rounds_block_as_max_repair_rounds() {
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            max_repair_rounds: 1,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        state.record_mutation([std::path::PathBuf::from("src/main.ts")]);
+        let mut signatures = Vec::new();
+
+        let outcome = apply_coding_tool_outcome(
+            &mut state,
+            "coding_verify",
+            &json!({ "project_id": "project-1" }),
+            &coding_verify_execution("verify-1", false),
+            &mut signatures,
+        )
+        .expect("verification is handled");
+
+        assert!(outcome.blocked);
+        assert!(outcome.notice.contains("修复轮次已耗尽"));
+        assert_eq!(state.phase, CodingPhase::Blocked);
+        assert_eq!(state.stop_reason, Some(CodingStopReason::MaxRepairRounds));
+        assert_eq!(state.remaining_repair_rounds(), 0);
+        assert!(!state.finish_successfully());
+    }
+
+    #[test]
+    fn passed_verification_clears_diagnosis_and_allows_finish() {
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            max_repair_rounds: 2,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        state.record_mutation([std::path::PathBuf::from("src/main.ts")]);
+        let mut signatures = Vec::new();
+        let input = json!({ "project_id": "project-1" });
+
+        apply_coding_tool_outcome(
+            &mut state,
+            "coding_verify",
+            &input,
+            &coding_verify_execution("verify-1", false),
+            &mut signatures,
+        )
+        .expect("failed verification is handled");
+        assert_eq!(signatures.len(), 1);
+
+        let outcome = apply_coding_tool_outcome(
+            &mut state,
+            "coding_verify",
+            &input,
+            &coding_verify_execution("verify-2", true),
+            &mut signatures,
+        )
+        .expect("passed verification is handled");
+
+        assert!(!outcome.blocked);
+        assert_eq!(outcome.notice, "编码验证通过。");
+        assert!(outcome.diagnosis.is_none());
+        assert!(signatures.is_empty());
+        assert_eq!(state.phase, CodingPhase::Complete);
+        assert!(state.can_finish());
+        assert!(state.finish_successfully());
+    }
+
+    #[test]
+    fn completed_finish_gate_uses_the_latest_diagnosis_in_its_nudge() {
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            max_repair_rounds: 2,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        state.record_mutation([std::path::PathBuf::from("src/main.ts")]);
+        let mut signatures = Vec::new();
+        let outcome = apply_coding_tool_outcome(
+            &mut state,
+            "coding_verify",
+            &json!({ "project_id": "project-1" }),
+            &coding_verify_execution("verify-1", false),
+            &mut signatures,
+        )
+        .expect("failed verification is handled");
+        let diagnosis = outcome.diagnosis.expect("structured diagnosis");
+
+        assert!(!state.can_finish());
+        let nudge = coding_verification_nudge(&state, Some(&diagnosis));
+        assert!(nudge.starts_with(CODING_VERIFICATION_GATE_PREFIX));
+        assert!(nudge.contains("## Latest verification diagnosis"));
+        assert!(nudge.contains(&diagnosis.summary));
+        assert!(nudge.contains(&diagnosis.failure_signature));
         assert!(nudge.contains("repair steps"));
     }
 
@@ -3706,6 +3980,195 @@ mod tests {
                 .text_view()
                 .starts_with(CODING_VERIFICATION_GATE_PREFIX)
         }));
+        assert!(events.iter().any(|event| {
+            matches!(event, EventKind::Notice { text } if text.contains("编码验证门禁"))
+        }));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EventKind::Error { .. })));
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    fn coding_e2e_available() -> bool {
+        ["node", "npm"].iter().all(|program| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+        })
+    }
+
+    fn coding_e2e_package_json() -> String {
+        serde_json::json!({
+            "name": "coding-e2e",
+            "private": true,
+            "scripts": {
+                "typecheck": "node -e \"if (!require('fs').existsSync('verify-ok')) { console.error('src/main.ts(12,7): error TS2304: Cannot find name missingValue.'); process.exit(2); }\""
+            }
+        })
+        .to_string()
+    }
+
+    fn coding_e2e_context(workspace: &std::path::Path) -> ChatRunContext {
+        ChatRunContext {
+            coding_mode: true,
+            workspace_root: Some(workspace.to_string_lossy().into_owned()),
+            target_project_id: Some("alpha".into()),
+            auto_approve_permissions: true,
+            ..ChatRunContext::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn scripted_provider_repairs_a_failed_verification_then_completes() {
+        if !coding_e2e_available() {
+            eprintln!("skipping coding E2E: node/npm are unavailable");
+            return;
+        }
+        let package_json = coding_e2e_package_json();
+        let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "write-package",
+                    "write_file",
+                    serde_json::json!({
+                        "path": "alpha/package.json",
+                        "content": package_json
+                    }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "verify-1",
+                    "coding_verify",
+                    serde_json::json!({ "project_id": "alpha" }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "repair-1",
+                    "write_file",
+                    serde_json::json!({
+                        "path": "alpha/verify-ok",
+                        "content": "ok"
+                    }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "verify-2",
+                    "coding_verify",
+                    serde_json::json!({ "project_id": "alpha" }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-1",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({
+                        "task_summary": "Repaired and verified.",
+                        "status": "completed"
+                    }),
+                )],
+            ),
+        ]);
+        std::fs::create_dir_all(workspace.join("alpha")).unwrap();
+        let context = coding_e2e_context(&workspace);
+        let events = run_protocol_chat_with_context(hub.clone(), &conversation_id, context).await;
+        let requests = provider.requests();
+
+        assert_eq!(requests.len(), 5);
+        assert!(events.iter().any(|event| {
+            matches!(event, EventKind::Notice { text } if text == "编码验证通过。")
+        }));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EventKind::Error { .. })));
+        assert!(workspace.join("alpha/verify-ok").is_file());
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_finish_after_failed_verification_is_blocked_with_diagnosis() {
+        if !coding_e2e_available() {
+            eprintln!("skipping coding E2E: node/npm are unavailable");
+            return;
+        }
+        let package_json = coding_e2e_package_json();
+        let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "write-package",
+                    "write_file",
+                    serde_json::json!({
+                        "path": "alpha/package.json",
+                        "content": package_json
+                    }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "verify-1",
+                    "coding_verify",
+                    serde_json::json!({ "project_id": "alpha" }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-1",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({
+                        "task_summary": "Finished without fixing verification.",
+                        "status": "completed"
+                    }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-2",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({
+                        "task_summary": "Blocked on verification.",
+                        "status": "blocked"
+                    }),
+                )],
+            ),
+        ]);
+        std::fs::create_dir_all(workspace.join("alpha")).unwrap();
+        let context = coding_e2e_context(&workspace);
+        let events = run_protocol_chat_with_context(hub.clone(), &conversation_id, context).await;
+        let requests = provider.requests();
+
+        assert_eq!(requests.len(), 4);
+        let diagnosis_nudges = requests[3]
+            .messages
+            .iter()
+            .map(LlmMessage::text_view)
+            .filter(|text| text.starts_with(CODING_VERIFICATION_GATE_PREFIX))
+            .collect::<Vec<_>>();
+        assert_eq!(diagnosis_nudges.len(), 1);
+        assert!(diagnosis_nudges[0].contains("## Latest verification diagnosis"));
+        assert!(diagnosis_nudges[0].contains("src/main.ts"));
+        assert!(diagnosis_nudges[0].contains("failure signature"));
         assert!(events.iter().any(|event| {
             matches!(event, EventKind::Notice { text } if text.contains("编码验证门禁"))
         }));
@@ -5063,6 +5526,103 @@ struct RunToolExecution {
     images: Vec<String>,
 }
 
+struct CodingToolOutcome {
+    notice: String,
+    diagnosis: Option<DiagnosisReport>,
+    blocked: bool,
+}
+
+/// Translate one executed tool result into coding-state changes and notice
+/// text. Returns `None` when the tool is neither a mutation nor a verification
+/// tool, so unrelated read tools leave the coding loop untouched.
+fn apply_coding_tool_outcome(
+    state: &mut CodingState,
+    tool_name: &str,
+    input: &serde_json::Value,
+    execution: &RunToolExecution,
+    previous_signatures: &mut Vec<String>,
+) -> Option<CodingToolOutcome> {
+    let is_mutation = is_coding_mutation_tool(tool_name);
+    let is_verification = is_coding_verification_tool(tool_name, input);
+    if !is_mutation && !is_verification {
+        return None;
+    }
+
+    if is_mutation && !execution.is_error {
+        state.record_mutation(coding_mutation_targets(tool_name, input));
+    }
+    if !is_verification {
+        return Some(CodingToolOutcome {
+            notice: String::new(),
+            diagnosis: None,
+            blocked: false,
+        });
+    }
+
+    let passed = coding_verification_passed(execution.is_error, &execution.content);
+    let evidence = if tool_name == "coding_verify" && !execution.is_error {
+        serde_json::from_str::<serde_json::Value>(&execution.content)
+            .ok()
+            .and_then(|value| verification_evidence_from_value(&value).ok())
+            .unwrap_or_else(|| VerificationEvidence::command_gate(passed))
+    } else {
+        VerificationEvidence::command_gate(passed)
+    };
+    let _ = state.record_verification(&evidence);
+
+    let mut diagnosis = None;
+    if passed {
+        previous_signatures.clear();
+    } else {
+        let _ = state.begin_diagnosis();
+        let report = analyze_outcomes(&evidence.outcomes);
+        if report.has_repairable_issues {
+            let plan = plan_repair(
+                &report,
+                previous_signatures,
+                state.repair_round,
+                state.policy(),
+            );
+            match plan.stop_reason {
+                Some(RepairStopReason::RepeatedFailure) => state.mark_non_recoverable(),
+                Some(RepairStopReason::MaxRepairRounds) => state.mark_repair_exhausted(),
+                _ => {}
+            }
+            previous_signatures.push(report.failure_signature.clone());
+            diagnosis = Some(report);
+            if plan.should_retry {
+                let _ = state.begin_repair();
+            }
+        }
+    }
+
+    let blocked = matches!(
+        state.stop_reason,
+        Some(CodingStopReason::MaxRepairRounds) | Some(CodingStopReason::NonRecoverable)
+    );
+    let notice = if passed {
+        "编码验证通过。".to_string()
+    } else if state.stop_reason == Some(CodingStopReason::MaxRepairRounds) {
+        "编码验证失败，修复轮次已耗尽。请以 blocked/partial 结束并说明剩余错误。".to_string()
+    } else if state.stop_reason == Some(CodingStopReason::NonRecoverable) {
+        "编码验证失败：同一错误重复出现，已停止自动修复。请以 blocked/partial 结束并说明剩余错误。"
+            .to_string()
+    } else if let Some(report) = diagnosis.as_ref() {
+        format!(
+            "编码验证失败：{}。已生成修复建议，修改后重新运行 coding_verify。",
+            report.summary
+        )
+    } else {
+        "编码验证失败，继续修复后重新验证。".to_string()
+    };
+
+    Some(CodingToolOutcome {
+        notice,
+        diagnosis,
+        blocked,
+    })
+}
+
 async fn execute_tool_for_run(
     hub: &Arc<Hub>,
     services: &worldbase_tools::ToolServices,
@@ -6020,76 +6580,37 @@ async fn run_chat_inner(
             };
             if let Some(state) = coding_state.as_mut() {
                 for ((_, name, input), execution) in group_calls.iter().zip(group_results.iter()) {
-                    if !execution.is_error && is_coding_mutation_tool(name) {
-                        state.record_mutation(coding_mutation_targets(name, input));
+                    let Some(outcome) = apply_coding_tool_outcome(
+                        state,
+                        name,
+                        input,
+                        execution,
+                        &mut coding_failure_signatures,
+                    ) else {
+                        continue;
+                    };
+                    let CodingToolOutcome {
+                        notice,
+                        diagnosis,
+                        blocked,
+                    } = outcome;
+                    if blocked {
+                        tracing::debug!(
+                            tool = %name,
+                            "coding verification stopped automatic repair"
+                        );
                     }
-                    if is_coding_verification_tool(name, input) {
-                        let passed =
-                            coding_verification_passed(execution.is_error, &execution.content);
-                        let evidence = if name == "coding_verify" && !execution.is_error {
-                            serde_json::from_str::<serde_json::Value>(&execution.content)
-                                .ok()
-                                .and_then(|value| verification_evidence_from_value(&value).ok())
-                                .unwrap_or_else(|| VerificationEvidence::command_gate(passed))
-                        } else {
-                            VerificationEvidence::command_gate(passed)
-                        };
-                        let _ = state.record_verification(&evidence);
-                        if passed {
-                            coding_last_diagnosis = None;
-                            coding_failure_signatures.clear();
-                        } else {
-                            let report = analyze_outcomes(&evidence.outcomes);
-                            if report.has_repairable_issues {
-                                let plan = plan_repair(
-                                    &report,
-                                    &coding_failure_signatures,
-                                    state.repair_round,
-                                    state.policy(),
-                                );
-                                match plan.stop_reason {
-                                    Some(RepairStopReason::RepeatedFailure) => {
-                                        state.mark_non_recoverable();
-                                    }
-                                    Some(RepairStopReason::MaxRepairRounds) => {
-                                        state.mark_repair_exhausted();
-                                    }
-                                    _ => {}
-                                }
-                                coding_failure_signatures.push(report.failure_signature.clone());
-                                coding_last_diagnosis = Some(report);
-                            } else {
-                                coding_last_diagnosis = None;
-                            }
-                        }
-                        let text = if passed {
-                            "编码验证通过。".to_string()
-                        } else if state.stop_reason
-                            == Some(worldbase_coding::CodingStopReason::MaxRepairRounds)
-                        {
-                            "编码验证失败，修复轮次已耗尽。请以 blocked/partial 结束并说明剩余错误。"
-                                .to_string()
-                        } else if state.stop_reason
-                            == Some(worldbase_coding::CodingStopReason::NonRecoverable)
-                        {
-                            "编码验证失败：同一错误重复出现，已停止自动修复。请以 blocked/partial 结束并说明剩余错误。"
-                                .to_string()
-                        } else if let Some(report) = coding_last_diagnosis.as_ref() {
-                            format!(
-                                "编码验证失败：{}。已生成修复建议，修改后重新运行 coding_verify。",
-                                report.summary
-                            )
-                        } else {
-                            "编码验证失败，继续修复后重新验证。".to_string()
-                        };
-                        publish(
-                            &hub,
-                            &channel,
-                            &stream_id,
-                            EventKind::Notice { text: text.into() },
-                        )
-                        .await;
+                    if notice.is_empty() {
+                        continue;
                     }
+                    coding_last_diagnosis = diagnosis;
+                    publish(
+                        &hub,
+                        &channel,
+                        &stream_id,
+                        EventKind::Notice { text: notice },
+                    )
+                    .await;
                 }
             }
             for execution in group_results {

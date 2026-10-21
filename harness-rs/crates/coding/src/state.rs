@@ -100,6 +100,43 @@ impl CodingState {
         true
     }
 
+    /// Enter the diagnosis phase after a failed verification.
+    ///
+    /// Returns `false` when the run is terminal or there is no pending
+    /// mutation/failure to diagnose. Diagnosis is only reachable from
+    /// `Verify` or `Repair`, so a stray call cannot skip earlier phases.
+    pub fn begin_diagnosis(&mut self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        let has_pending_failure = self.phase == CodingPhase::Repair;
+        if !self.has_unverified_mutations() && !has_pending_failure {
+            return false;
+        }
+        if !matches!(self.phase, CodingPhase::Verify | CodingPhase::Repair) {
+            return false;
+        }
+
+        self.phase = CodingPhase::Diagnose;
+        true
+    }
+
+    /// Enter the repair phase from diagnosis while repair budget remains.
+    ///
+    /// Returns `false` when the run is terminal, the repair budget is
+    /// exhausted, or the current phase is not `Diagnose`.
+    pub fn begin_repair(&mut self) -> bool {
+        if self.is_terminal() || self.remaining_repair_rounds() == 0 {
+            return false;
+        }
+        if self.phase != CodingPhase::Diagnose {
+            return false;
+        }
+
+        self.phase = CodingPhase::Repair;
+        true
+    }
+
     /// Record verification evidence.
     ///
     /// Cancellation and timeout take precedence over the evidence's `passed`
