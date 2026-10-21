@@ -14,11 +14,15 @@
 - [x] Rust 原生 `coding_verify` 工具：按 profile 顺序执行并返回结构化 evidence。
 - [x] TS/JS/TSX tree-sitter 解析、唯一节点定位和语法错误检测。
 - [x] 语义替换提案与符号索引；`coding_edit` 支持 replace/insert_after/delete/rename，落盘前校验文件未变化。
-- [x] `coding_verify` JSON evidence 解析为 `VerificationEvidence`。
+- [x] `coding_verify` JSON evidence 解析为 `VerificationEvidence`；支持 `changed_files` 最小验证集，core 自动注入 dirty files。
+- [x] `coding_apply` 批量语义编辑工具：按依赖分批、批内并发、同文件串行、写入前 stale 检查。
+- [x] `coding_diagnose` 统一诊断工具：合并编译器日志、LSP publishDiagnostics、包管理器输出与修复计划。
+- [x] 依赖诊断：package.json 四类依赖、packageManager/lockfile 检测、缺失包/@types/peer/版本冲突/lockfile 修复命令建议。
 - [x] TOP 20+ 前端错误模式、结构化诊断与修复计划，并接入 core 修复门禁。
 - [x] 显式 Verify → Diagnose → Repair 状态转换与 E2E 测试（含重复失败和轮次耗尽）。
 - [x] 50 项离线前端基准：两套 fixture + 真实仓库 TS/TSX 文件，覆盖符号、编辑、诊断、修复、格式与延迟指标。
-- [ ] 50-100 个真实项目任务基准、完整 Plan/Inspect 编排、LSP、并行写调度。
+- [x] P2 能力层：LSP publishDiagnostics/符号/定义解析、依赖诊断与修复命令建议；live LSP server 生命周期仍属后续工程化。
+- [ ] 50-100 个真实项目任务基准、完整 Plan/Inspect 编排、live LSP、通用并行写调度。
 
 ---
 
@@ -105,7 +109,7 @@
 
 ### 验证门禁
 - [x] 定义项目验证配置：格式、构建、测试、lint、类型检查。
-- [x] 支持按改动范围选择最小验证集（`select_minimal_profile` 已实现；`coding_verify` 自动接入待下一步）。
+- [x] 支持按改动范围选择最小验证集（已接入 `coding_verify`，core 自动注入 dirty files）。
 - [x] 全部验证命令通过 `run_project_command` 或现有命令工具执行。
 - [x] 记录每条命令、退出码、耗时和关键输出。
 - [x] 验证失败时生成结构化诊断，而不是只拼接日志。
@@ -191,6 +195,13 @@
 - [x] 低置信度建议只展示，不自动应用。
 - [ ] 为规则库建立版本和回归用例。
 
+### 依赖诊断
+- [x] 解析 package.json 的 dependencies/devDependencies/peerDependencies/optionalDependencies。
+- [x] 识别 packageManager 字段与 pnpm/npm/yarn/bun lockfile。
+- [x] 从包管理器输出识别缺失包、缺失 @types、peer 依赖、版本冲突和 lockfile 过期。
+- [x] 生成安装、更新、重建 lockfile 的命令建议，不自动执行。
+- [ ] 依赖修复命令的自动执行与回滚（保持人工确认）。
+
 ### 修复建议
 - [ ] 将建议转换为 `EditPlan` 或明确的人工步骤（当前输出 `RepairPlan` 文本建议）。
 - [x] 修复前评估影响范围（`targeted_files`）；验证命令由 `coding_verify` profile 决定。
@@ -217,16 +228,16 @@
 
 ### 模块集成
 - [ ] 将 `coding_loop` 接入现有 Agent 循环的编码任务入口。
-- [ ] 将 tree-sitter 定位接入编辑计划生成。
-- [ ] 将 Error Analyzer 接入验证失败流程。
-- [ ] 将 LSP 诊断作为可选输入接入 Error Analyzer（若已立项）。
+- [x] 将 tree-sitter 定位接入编辑计划生成（`coding_edit` / `coding_apply`）。
+- [x] 将 Error Analyzer 接入验证失败流程。
+- [x] 将 LSP 诊断作为可选输入接入 Error Analyzer（`coding_diagnose` + `analyze_lsp_diagnostics`）。
 - [ ] 保持各模块可独立关闭。
 
 ### 并行调度
 - [ ] 回归当前只读工具并行行为。
 - [ ] 回归 `spawn_subagents` 并行行为。
-- [x] 为写任务构建文件级依赖图（`plan_write_batches` 已实现；执行层接入待下一步）。
-- [ ] 仅允许无依赖、无写冲突的任务并行。
+- [x] 为写任务构建文件级依赖图并接入 `coding_apply` 执行层。
+- [x] `coding_apply` 仅允许无依赖、无写冲突的文件并行；通用工具调度仍保持串行。
 - [ ] 未知依赖默认串行。
 - [ ] 并行失败时停止依赖任务并保留已完成结果。
 - [ ] 对并发上限、取消和超时做压力测试。

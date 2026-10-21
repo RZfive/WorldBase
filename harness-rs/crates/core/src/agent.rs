@@ -1568,6 +1568,8 @@ fn coding_mode_prompt() -> String {
      - Discover the target project's real toolchain from its manifests and lockfiles. Frontend/Node projects are the first-class target; do not assume `cargo` commands apply to every project.\n\
      - After changing code, run the strongest relevant verification available for that project (typecheck, lint, tests, build, runtime probe) before calling `finish_task` with `status: \"completed\"`.\n\
      - Prefer the native `coding_verify` tool when it is available; it runs the detected project verification profile through the managed command policy.\n\
+     - `coding_verify` accepts optional `changed_files` and the harness fills it automatically in coding mode.\n\
+     - Use the native `coding_diagnose` tool to combine compiler output, LSP diagnostics, and package-manager errors into one structured report.\n\
      - If verification cannot run in the current capability set, say exactly which check is unavailable and report the result as partial/blocked rather than claiming it was verified.\n\
      - Never bypass permission prompts or workspace boundaries to make a verification command succeed."
         .into()
@@ -2674,6 +2676,107 @@ mod tests {
         assert_eq!(state.mutations_since_verification, 2);
     }
 
+    fn dirty_files(paths: &[&str]) -> std::collections::BTreeSet<std::path::PathBuf> {
+        paths
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect::<std::collections::BTreeSet<_>>()
+    }
+
+    #[test]
+    fn coding_verify_dirty_files_are_injected_when_the_model_omits_them() {
+        let input = json!({ "project_id": "project-1" });
+        let output = coding_verify_input_with_dirty_files(
+            input,
+            &dirty_files(&["src/App.tsx", "src/lib/math.ts"]),
+            Path::new("/workspace"),
+        );
+        assert_eq!(
+            output["changed_files"],
+            json!(["src/App.tsx", "src/lib/math.ts"])
+        );
+    }
+
+    #[test]
+    fn explicit_coding_verify_changed_files_win_over_dirty_injection() {
+        let direct = coding_verify_input_with_dirty_files(
+            json!({
+                "project_id": "project-1",
+                "changed_files": ["src/model-choice.ts"]
+            }),
+            &dirty_files(&["src/App.tsx"]),
+            Path::new("/workspace"),
+        );
+        assert_eq!(direct["changed_files"], json!(["src/model-choice.ts"]));
+
+        let alias = coding_verify_input_with_dirty_files(
+            json!({
+                "project_id": "project-1",
+                "files": ["src/model-alias.ts"]
+            }),
+            &dirty_files(&["src/App.tsx"]),
+            Path::new("/workspace"),
+        );
+        assert_eq!(alias["files"], json!(["src/model-alias.ts"]));
+        assert!(alias.get("changed_files").is_none());
+    }
+
+    #[test]
+    fn coding_verify_dirty_paths_are_workspace_relative_and_sorted() {
+        let output = coding_verify_input_with_dirty_files(
+            json!({ "project_id": "project-1" }),
+            &dirty_files(&[
+                "/workspace/src/z.ts",
+                "src/a.ts",
+                "/workspace/src/nested/m.ts",
+            ]),
+            Path::new("/workspace"),
+        );
+        assert_eq!(
+            output["changed_files"],
+            json!(["src/a.ts", "src/nested/m.ts", "src/z.ts"])
+        );
+    }
+
+    #[test]
+    fn non_coding_mode_does_not_inject_dirty_files() {
+        let input = json!({ "project_id": "project-1" });
+        let output = prepare_coding_verify_input(
+            "coding_verify",
+            input.clone(),
+            None,
+            Path::new("/workspace"),
+        );
+        assert_eq!(output, input);
+
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        state.record_mutation([std::path::PathBuf::from("src/App.tsx")]);
+        let unrelated = prepare_coding_verify_input(
+            "read_project_file",
+            json!({ "project_id": "project-1", "file_path": "src/App.tsx" }),
+            Some(&state),
+            Path::new("/workspace"),
+        );
+        assert!(unrelated.get("changed_files").is_none());
+    }
+
+    #[test]
+    fn dirty_file_outside_the_workspace_is_preserved() {
+        let output = coding_verify_input_with_dirty_files(
+            json!({ "project_id": "project-1" }),
+            &dirty_files(&["/tmp/external/file.ts", "src/App.tsx"]),
+            Path::new("/workspace"),
+        );
+        assert_eq!(
+            output["changed_files"],
+            json!(["/tmp/external/file.ts", "src/App.tsx"])
+        );
+    }
+
     #[test]
     fn failed_verification_moves_through_diagnosis_into_repair() {
         let mut state = CodingState::new(CodingPolicy {
@@ -3569,6 +3672,7 @@ mod tests {
         assert!(prompt.contains("do not assume `cargo`"));
         assert!(prompt.contains("verification cannot run"));
         assert!(prompt.contains("finish_task"));
+        assert!(prompt.contains("changed_files"));
     }
 
     #[test]
@@ -5518,6 +5622,57 @@ fn coding_verification_nudge(state: &CodingState, diagnosis: Option<&DiagnosisRe
     message
 }
 
+/// Attach the run's dirty files to an explicit `coding_verify` call.
+///
+/// A model-supplied `changed_files` or compatibility `files` array always
+/// wins. Otherwise paths are deduplicated and sorted, and absolute paths under
+/// the workspace are converted to workspace-relative form. An empty dirty set
+/// leaves the input untouched.
+fn coding_verify_input_with_dirty_files(
+    input: serde_json::Value,
+    dirty_files: &std::collections::BTreeSet<std::path::PathBuf>,
+    workspace: &Path,
+) -> serde_json::Value {
+    let mut input = input;
+    if let Some(object) = input.as_object_mut() {
+        let explicitly_provided =
+            object.contains_key("changed_files") || object.contains_key("files");
+        if !explicitly_provided && !dirty_files.is_empty() {
+            let mut paths = std::collections::BTreeSet::new();
+            for path in dirty_files {
+                let relative = path.strip_prefix(workspace).unwrap_or(path);
+                let value = relative.to_string_lossy();
+                if !value.is_empty() {
+                    paths.insert(value.into_owned());
+                }
+            }
+            if !paths.is_empty() {
+                object.insert(
+                    "changed_files".into(),
+                    serde_json::json!(paths.into_iter().collect::<Vec<_>>()),
+                );
+            }
+        }
+    }
+    input
+}
+
+/// Coding-mode wrapper around dirty-file injection. Non-coding runs and tools
+/// other than `coding_verify` pass their input through unchanged.
+fn prepare_coding_verify_input(
+    tool_name: &str,
+    input: serde_json::Value,
+    coding_state: Option<&CodingState>,
+    workspace: &Path,
+) -> serde_json::Value {
+    match coding_state {
+        Some(state) if tool_name == "coding_verify" => {
+            coding_verify_input_with_dirty_files(input, &state.dirty_files, workspace)
+        }
+        _ => input,
+    }
+}
+
 struct RunToolExecution {
     call_id: String,
     name: String,
@@ -6519,11 +6674,10 @@ async fn run_chat_inner(
         llm_messages.push(assistant_msg);
         let iteration_calls = tool_uses.clone();
         let mut tool_results_for_llm = Vec::new();
-        for group in group_tool_calls(&tool_uses) {
+        for mut group in group_tool_calls(&tool_uses) {
             if abort.is_cancelled() {
                 break;
             }
-            let group_calls = group.clone();
             for (call_id, name, input) in &group {
                 publish(
                     &hub,
@@ -6537,6 +6691,16 @@ async fn run_chat_inner(
                 )
                 .await;
             }
+            for (_, name, input) in &mut group {
+                let original = std::mem::take(input);
+                *input = prepare_coding_verify_input(
+                    name,
+                    original,
+                    coding_state.as_ref(),
+                    services.folder_workspace_root(),
+                );
+            }
+            let group_calls = group.clone();
 
             let group_results = if group.len() == 1 {
                 let (call_id, name, input) = group.into_iter().next().expect("single call");

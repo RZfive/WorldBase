@@ -10,14 +10,14 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::Path;
 use worldbase_coding::smart_editor::{
-    delete_symbol, insert_after, parse_file, rename_symbol, replace_symbol, LanguageId, SymbolKind,
-    SymbolQuery,
+    delete_symbol, insert_after, parse_file, rename_symbol, replace_symbol, LanguageId,
+    SemanticEdit, SymbolKind, SymbolQuery,
 };
 
 const PREVIEW_CHARS: usize = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditOperation {
+pub(crate) enum EditOperation {
     Replace,
     InsertAfter,
     Delete,
@@ -25,7 +25,7 @@ enum EditOperation {
 }
 
 impl EditOperation {
-    fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         match value.trim() {
             "replace" => Ok(Self::Replace),
             "insert_after" => Ok(Self::InsertAfter),
@@ -37,7 +37,7 @@ impl EditOperation {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Replace => "replace",
             Self::InsertAfter => "insert_after",
@@ -150,33 +150,13 @@ async fn execute_edit(
         file_path
     );
 
-    let proposal = match operation {
-        EditOperation::Replace => {
-            let replacement = require_replacement(&input, operation)?;
-            replace_symbol(&parsed, &query, replacement)?
-        }
-        EditOperation::InsertAfter => {
-            let replacement = require_replacement(&input, operation)?;
-            insert_after(&parsed, &query, replacement)?
-        }
-        EditOperation::Delete => delete_symbol(&parsed, &query)?,
-        EditOperation::Rename => {
-            let new_name = require_str(&input, "new_name")?;
-            rename_symbol(&parsed, &query, new_name)?
-        }
-    };
+    let proposal = build_proposal(&parsed, operation, &query, &input)?;
 
     before_write();
 
     // Re-read immediately before the write so a concurrent edit is never
     // overwritten silently.
-    let latest = tokio::fs::read_to_string(&full)
-        .await
-        .with_context(|| format!("re-read {}", full.display()))?;
-    anyhow::ensure!(
-        latest == original,
-        "stale file rejected: {file_path} changed on disk after it was read; re-read it and retry"
-    );
+    read_source_unchanged(&full, &original, &file_path).await?;
 
     tokio::fs::write(&full, proposal.edited_source.as_bytes()).await?;
     services.mark_file_read(&full.canonicalize().unwrap_or_else(|_| full.clone()));
@@ -194,6 +174,44 @@ async fn execute_edit(
     }))
 }
 
+pub(crate) fn build_proposal(
+    parsed: &worldbase_coding::smart_editor::ParsedFile,
+    operation: EditOperation,
+    query: &SymbolQuery,
+    input: &Value,
+) -> Result<SemanticEdit> {
+    match operation {
+        EditOperation::Replace => {
+            let replacement = require_replacement(input, operation)?;
+            replace_symbol(parsed, query, replacement)
+        }
+        EditOperation::InsertAfter => {
+            let replacement = require_replacement(input, operation)?;
+            insert_after(parsed, query, replacement)
+        }
+        EditOperation::Delete => delete_symbol(parsed, query),
+        EditOperation::Rename => {
+            let new_name = require_str(input, "new_name")?;
+            rename_symbol(parsed, query, new_name)
+        }
+    }
+}
+
+pub(crate) async fn read_source_unchanged(
+    full: &Path,
+    original: &str,
+    file_path: &str,
+) -> Result<String> {
+    let latest = tokio::fs::read_to_string(full)
+        .await
+        .with_context(|| format!("re-read {}", full.display()))?;
+    anyhow::ensure!(
+        latest == original,
+        "stale file rejected: {file_path} changed on disk after it was read; re-read it and retry"
+    );
+    Ok(latest)
+}
+
 fn require_replacement(input: &Value, operation: EditOperation) -> Result<String> {
     debug_assert!(operation.requires_replacement());
     let replacement = require_str(input, "replacement")?;
@@ -205,7 +223,7 @@ fn require_replacement(input: &Value, operation: EditOperation) -> Result<String
     Ok(replacement.to_string())
 }
 
-fn parse_query(input: &Value) -> Result<SymbolQuery> {
+pub(crate) fn parse_query(input: &Value) -> Result<SymbolQuery> {
     let selector = input
         .get("selector")
         .and_then(Value::as_object)

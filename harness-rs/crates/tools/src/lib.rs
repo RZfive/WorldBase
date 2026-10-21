@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use worldbase_protocol::types::ToolDescriptor;
 
+pub mod coding_apply;
+pub mod coding_diagnose;
 pub mod coding_edit;
 pub mod coding_verify;
 pub mod command;
@@ -74,8 +76,7 @@ pub use mcp_tools::{
 pub use memory_tools::{MemoryAddTool, MemoryDeleteTool, MemorySearchTool};
 pub use project_tools::{
     ProjectCreateTool, ProjectDevRestartTool, ProjectDevStartTool, ProjectDevStopTool,
-    ProjectRestartServerTool, ProjectStartServerTool,
-    ProjectListTool, ProjectStatusTool,
+    ProjectListTool, ProjectRestartServerTool, ProjectStartServerTool, ProjectStatusTool,
 };
 pub use schedule_tools::{ScheduleCreateTool, ScheduleDeleteTool, ScheduleListTool};
 pub use skill_tools::{SkillListTool, SkillRunTool};
@@ -209,6 +210,7 @@ impl ToolServices {
                 | "patch_project_file"
                 | "delete_project_file"
                 | "coding_edit"
+                | "coding_apply"
                 | "write_workspace_file"
                 | "edit_workspace_file"
                 | "patch_workspace_file"
@@ -666,6 +668,8 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(RebuildProjectTool),
         Arc::new(coding_verify::CodingVerifyTool),
         Arc::new(coding_edit::CodingEditTool),
+        Arc::new(coding_apply::CodingApplyTool),
+        Arc::new(coding_diagnose::CodingDiagnoseTool),
         Arc::new(FinalizeProjectTool),
         Arc::new(ClearProjectBuildFlagTool),
         Arc::new(GetProjectLogsTool),
@@ -1054,7 +1058,7 @@ mod tests {
             .collect::<Vec<_>>();
         actual.sort();
 
-let mut expected = [
+        let mut expected = [
             "ask_user",
             "create_agent",
             "create_agent_group",
