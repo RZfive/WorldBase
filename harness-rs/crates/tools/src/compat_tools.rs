@@ -195,6 +195,22 @@ fn selected_folder_workspace(services: &ToolServices) -> Result<&Path> {
         .ok_or_else(|| anyhow::anyhow!("no folder workspace is selected for this conversation"))
 }
 
+/// Resolve the managed project selected by the conversation. Command tools use
+/// this as a fallback when the conversation has no folder workspace, so a
+/// project conversation still runs in its project root.
+fn target_project_workspace(services: &ToolServices) -> Result<Option<(String, PathBuf)>> {
+    let Some(project_id) = services
+        .target_project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let root = services.projects.project_root(project_id)?;
+    Ok(Some((project_id.to_string(), root)))
+}
+
 pub(crate) fn project_path(input: &Value, services: &ToolServices) -> Result<(String, PathBuf)> {
     let id = input
         .get("project_id")
@@ -221,7 +237,6 @@ fn shell_program(command: &str) -> (String, Vec<String>) {
         ("sh".into(), vec!["-c".into(), command.into()])
     }
 }
-
 
 #[derive(Debug, Clone)]
 struct ParsedCommand {
@@ -1666,23 +1681,32 @@ fn output_mode_name(mode: worldbase_search::GrepOutputMode) -> &'static str {
 
 const WORKSPACE_PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
 const WORKSPACE_BINARY_PREVIEW_EXTENSIONS: &[&str] = &[
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".avif",
-    ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    ".zip", ".tar", ".gz", ".bz2", ".rar", ".7z",
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-    ".mp3", ".mp4", ".avi", ".mov", ".wav", ".flac",
-    ".exe", ".dll", ".so", ".dylib", ".o",
-    ".sqlite", ".db",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".avif", ".woff", ".woff2", ".ttf",
+    ".eot", ".otf", ".zip", ".tar", ".gz", ".bz2", ".rar", ".7z", ".pdf", ".doc", ".docx", ".xls",
+    ".xlsx", ".ppt", ".pptx", ".mp3", ".mp4", ".avi", ".mov", ".wav", ".flac", ".exe", ".dll",
+    ".so", ".dylib", ".o", ".sqlite", ".db",
 ];
 const WORKSPACE_GLOB_IGNORED_DIRS: &[&str] = &[
-    "node_modules", ".next", ".git", "dist", "build", ".cache",
-    ".turbo", "coverage", ".output", "__pycache__", ".venv",
+    "node_modules",
+    ".next",
+    ".git",
+    "dist",
+    "build",
+    ".cache",
+    ".turbo",
+    "coverage",
+    ".output",
+    "__pycache__",
+    ".venv",
 ];
 
 /// Normalize a workspace-relative path exactly like the Electron host:
 /// trim, convert backslashes, and strip leading slashes.
 fn normalize_workspace_rel(rel: &str) -> String {
-    rel.trim().replace('\\', "/").trim_start_matches('/').to_string()
+    rel.trim()
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_string()
 }
 
 fn workspace_preview_extension_is_binary(path: &Path) -> bool {
@@ -1690,7 +1714,9 @@ fn workspace_preview_extension_is_binary(path: &Path) -> bool {
         return false;
     };
     let lower = name.to_lowercase();
-    WORKSPACE_BINARY_PREVIEW_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+    WORKSPACE_BINARY_PREVIEW_EXTENSIONS
+        .iter()
+        .any(|ext| lower.ends_with(ext))
 }
 
 /// Durable temp-file-then-rename write, same as the Electron host's folder
@@ -1720,7 +1746,10 @@ async fn write_workspace_file_atomic(path: &Path, content: &str) -> Result<()> {
 }
 
 fn workspace_glob_escape_char(ch: char) -> String {
-    if matches!(ch, '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '\\') {
+    if matches!(
+        ch,
+        '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '\\'
+    ) {
         format!("\\{ch}")
     } else {
         ch.to_string()
@@ -1828,12 +1857,15 @@ fn walk_workspace_glob(
             if WORKSPACE_GLOB_IGNORED_DIRS.contains(&name.as_str()) {
                 continue;
             }
-            if matcher.is_match(&entry_relative) || matcher.is_match(&format!("{entry_relative}/")) {
+            if matcher.is_match(&entry_relative) || matcher.is_match(&format!("{entry_relative}/"))
+            {
                 results.push(json!({ "path": entry_relative, "size": 0, "type": "directory" }));
             }
             walk_workspace_glob(base, &entry_relative, matcher, results, cap)?;
         } else if matcher.is_match(&entry_relative) {
-            let size = std::fs::metadata(entry.path()).map(|meta| meta.len()).unwrap_or(0);
+            let size = std::fs::metadata(entry.path())
+                .map(|meta| meta.len())
+                .unwrap_or(0);
             results.push(json!({ "path": entry_relative, "size": size, "type": "file" }));
         }
     }
@@ -1856,9 +1888,8 @@ impl Tool for WorkspaceListFilesTool {
         true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let rel = normalize_workspace_rel(
-            input.get("dir_path").and_then(Value::as_str).unwrap_or(""),
-        );
+        let rel =
+            normalize_workspace_rel(input.get("dir_path").and_then(Value::as_str).unwrap_or(""));
         let root = selected_folder_workspace(services)?;
         let mut total = 0;
         let mut truncated = false;
@@ -2017,14 +2048,11 @@ impl Tool for WorkspaceReadFileTool {
             head_end -= 1;
         }
         let mut tail_start = numbered_content.len() - EDGE_RETURN_CHARS;
-        while tail_start < numbered_content.len()
-            && !numbered_content.is_char_boundary(tail_start)
+        while tail_start < numbered_content.len() && !numbered_content.is_char_boundary(tail_start)
         {
             tail_start += 1;
         }
-        let truncated_chars = numbered_content
-            .len()
-            .saturating_sub(EDGE_RETURN_CHARS * 2);
+        let truncated_chars = numbered_content.len().saturating_sub(EDGE_RETURN_CHARS * 2);
         Ok(json!({
             "file_path": rel,
             "content": format!(
@@ -2164,8 +2192,7 @@ fn workspace_patch_number(value: Option<&Value>) -> Option<f64> {
 }
 
 fn normalize_workspace_patches(raw: Option<&Value>) -> Result<Vec<WorkspacePatchEntry>> {
-    const SHAPE: &str =
-        "patches must be an array of { start_line, end_line, content } objects.";
+    const SHAPE: &str = "patches must be an array of { start_line, end_line, content } objects.";
     let Some(value) = raw else {
         anyhow::bail!("{SHAPE}");
     };
@@ -2183,10 +2210,13 @@ fn normalize_workspace_patches(raw: Option<&Value>) -> Result<Vec<WorkspacePatch
     let mut patches = Vec::with_capacity(array.len());
     for (index, entry) in array.iter().enumerate() {
         let Some(object) = entry.as_object() else {
-            anyhow::bail!("patches[{index}] must be an object with start_line, end_line, and content.");
+            anyhow::bail!(
+                "patches[{index}] must be an object with start_line, end_line, and content."
+            );
         };
-        let start_line = workspace_patch_number(object.get("start_line"))
-            .ok_or_else(|| anyhow::anyhow!("patches[{index}].start_line must be a positive integer."))?;
+        let start_line = workspace_patch_number(object.get("start_line")).ok_or_else(|| {
+            anyhow::anyhow!("patches[{index}].start_line must be a positive integer.")
+        })?;
         let end_line = workspace_patch_number(object.get("end_line"))
             .ok_or_else(|| anyhow::anyhow!("patches[{index}].end_line must be an integer."))?;
         let Some(content) = object.get("content").and_then(Value::as_str) else {
@@ -2340,9 +2370,8 @@ impl Tool for WorkspaceGlobTool {
         const DEFAULT_GLOB_RESULTS: usize = 100;
         const MAX_GLOB_RESULTS: usize = 500;
         let pattern = require_str(&input, "pattern")?.to_string();
-        let rel = normalize_workspace_rel(
-            input.get("dir_path").and_then(Value::as_str).unwrap_or(""),
-        );
+        let rel =
+            normalize_workspace_rel(input.get("dir_path").and_then(Value::as_str).unwrap_or(""));
         let root = selected_folder_workspace(services)?;
         let base = if rel.is_empty() {
             root.to_path_buf()
@@ -2363,15 +2392,13 @@ impl Tool for WorkspaceGlobTool {
         if truncated {
             matches.truncate(limit);
         }
-        Ok(
-            json!({
-                "pattern": pattern,
-                "dir_path": if rel.is_empty() { Value::from(".") } else { Value::from(rel) },
-                "matches": matches,
-                "total_matches": if truncated { limit + 1 } else { matches.len() },
-                "truncated": truncated,
-            }),
-        )
+        Ok(json!({
+            "pattern": pattern,
+            "dir_path": if rel.is_empty() { Value::from(".") } else { Value::from(rel) },
+            "matches": matches,
+            "total_matches": if truncated { limit + 1 } else { matches.len() },
+            "truncated": truncated,
+        }))
     }
 }
 
@@ -2392,9 +2419,8 @@ impl Tool for WorkspaceGrepTool {
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let pattern = require_str(&input, "pattern")?.to_string();
-        let rel = normalize_workspace_rel(
-            input.get("dir_path").and_then(Value::as_str).unwrap_or(""),
-        );
+        let rel =
+            normalize_workspace_rel(input.get("dir_path").and_then(Value::as_str).unwrap_or(""));
         let root = selected_folder_workspace(services)?;
         let base = if rel.is_empty() {
             root.to_path_buf()
@@ -2468,10 +2494,10 @@ impl Tool for WorkspaceCommandTool {
         "run_workspace_command"
     }
     fn description(&self) -> &str {
-        "Run a short-lived install, build, test, lint, type-check, or diagnostic command inside the selected folder workspace. Do not start long-lived dev servers. Allowed commands: npm / npx / pnpm / yarn / bun / node / tsx, the tsc / eslint / prettier / vitest / jest / playwright runners, read-only git (status, diff, log, show, rev-parse, branch), and read-only shell utilities (cat, ls, pwd, which, head, tail, wc, find, grep, sort, uniq, echo, env, date). Other interpreters such as python or sqlite3 are rejected — do the equivalent with `node`. Run ONE command per call: shell chaining (&& | ;), redirections and newlines are rejected unless developer command mode (THE_WORLD_DEV_COMMANDS=1) is enabled, and backticks / $() command substitution are always rejected. For chained commands, pipes, redirections, other interpreters, or git write operations use run_shell_command instead. Output is captured inline up to 20k chars of stdout / 10k of stderr plus their last few thousand chars (tail fields); when the cap is exceeded the command keeps running and the full output is saved to files listed in stdoutFile / stderrFile. grep exit code 1 just means no matches. If the foreground wait times out the command keeps running in the background and returns a command_id; poll it with get_workspace_command_status instead of retrying."
+        "Run a short-lived install, build, test, lint, type-check, or diagnostic command inside the selected folder workspace, or inside the conversation's active managed project when no folder workspace is selected. Project fallback uses the stricter project command policy. Do not start long-lived dev servers. Allowed commands: npm / npx / pnpm / yarn / bun / node / tsx, the tsc / eslint / prettier / vitest / jest / playwright runners, read-only git (status, diff, log, show, rev-parse, branch), and read-only shell utilities (cat, ls, pwd, which, head, tail, wc, find, grep, sort, uniq, echo, env, date). Other interpreters such as python or sqlite3 are rejected — do the equivalent with `node`. Run ONE command per call: shell chaining (&& | ;), redirections and newlines are rejected unless developer command mode (THE_WORLD_DEV_COMMANDS=1) is enabled, and backticks / $() command substitution are always rejected. For chained commands, pipes, redirections, other interpreters, or git write operations use run_shell_command instead. Output is captured inline up to 20k chars of stdout / 10k of stderr plus their last few thousand chars (tail fields); when the cap is exceeded the command keeps running and the full output is saved to files listed in stdoutFile / stderrFile. grep exit code 1 just means no matches. If the foreground wait times out the command keeps running in the background and returns a command_id; poll it with get_workspace_command_status instead of retrying."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"command":{"type":"string","description":"The command to run, e.g. \"npm test\", \"pnpm build\", \"npx tsc --noEmit\"."},"cwd":{"type":"string","description":"Working subdirectory relative to the workspace root."},"timeout_seconds":{"type":"integer","description":"Foreground wait timeout. Default 90, max 180."}},"required":["command"]})
+        json!({"type":"object","properties":{"command":{"type":"string","description":"The command to run, e.g. \"npm test\", \"pnpm build\", \"npx tsc --noEmit\"."},"cwd":{"type":"string","description":"Working subdirectory relative to the workspace root, or relative to the active managed project root when no folder workspace is selected."},"timeout_seconds":{"type":"integer","description":"Foreground wait timeout. Default 90, max 180."}},"required":["command"]})
     }
     fn domain(&self) -> &str {
         "desktop"
@@ -2484,25 +2510,49 @@ impl Tool for WorkspaceCommandTool {
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let command = require_str(&input, "command")?;
-        let root = selected_folder_workspace(services)?;
-        let cwd = input
-            .get("cwd")
-            .and_then(Value::as_str)
-            .map(|value| services.folder_workspace_path(value))
-            .unwrap_or_else(|| root.to_path_buf());
-        services.ensure_folder_workspace_path(&cwd)?;
         // Node's handlers never sandboxed these commands, and package
         // managers legitimately write caches under $HOME — keep parity.
         let spill_dir = services.store.data_dir().join("tool-results");
+        if let Some(root) = services.folder_workspace.as_deref() {
+            let cwd = input
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(|value| services.folder_workspace_path(value))
+                .unwrap_or_else(|| root.to_path_buf());
+            services.ensure_folder_workspace_path(&cwd)?;
+            return run_managed_command(
+                command,
+                &cwd,
+                timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
+                None,
+                false,
+                Some(root),
+                None,
+                CommandPolicy::Workspace,
+                Some(&spill_dir),
+            )
+            .await;
+        }
+        let Some((project_id, root)) = target_project_workspace(services)? else {
+            return Err(anyhow::anyhow!(
+                "no folder workspace is selected for this conversation"
+            ));
+        };
+        let cwd = input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(|value| project_relative_path(services, &project_id, value))
+            .transpose()?
+            .unwrap_or_else(|| root.clone());
         run_managed_command(
             command,
             &cwd,
             timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
-            None,
+            Some(&project_id),
             false,
             Some(&root),
-            None,
-            CommandPolicy::Workspace,
+            Some(Arc::clone(&services.projects)),
+            CommandPolicy::Project,
             Some(&spill_dir),
         )
         .await
@@ -2516,10 +2566,10 @@ impl Tool for WorkspaceShellCommandTool {
         "run_shell_command"
     }
     fn description(&self) -> &str {
-        "Run a short-lived shell command with normal shell semantics: chaining (&& || ;), pipes, redirections, newlines, and $()/backtick substitution are all allowed, and any interpreter (node, python, go, sqlite3, …) may be used. The command runs inside the selected folder workspace, or inside a managed project when project_id is provided. Destructive commands (rm -rf /, sudo, mkfs, fork bombs, curl | bash) are blocked; `cd` targets outside the workspace and a `cwd` outside it require user approval. Do not start long-lived dev servers. Output is captured inline up to 20k chars of stdout / 10k of stderr plus their last few thousand chars (tail fields); when the cap is exceeded the command keeps running and the full output is saved to files listed in stdoutFile / stderrFile. If the foreground wait times out (default 90s, max 180) the command keeps running in the background and returns a command_id; poll it with get_command_status instead of retrying."
+        "Run a short-lived shell command with normal shell semantics: chaining (&& || ;), pipes, redirections, newlines, and $()/backtick substitution are all allowed, and any interpreter (node, python, go, sqlite3, …) may be used. The command runs inside the selected folder workspace, or inside a managed project when project_id is provided. When no folder workspace is selected and the conversation has an active managed project, the command runs in that project root with project-scoped ownership while keeping normal shell semantics. Destructive commands (rm -rf /, sudo, mkfs, fork bombs, curl | bash) are blocked; `cd` targets outside the workspace and a `cwd` outside it require user approval. Do not start long-lived dev servers. Output is captured inline up to 20k chars of stdout / 10k of stderr plus their last few thousand chars (tail fields); when the cap is exceeded the command keeps running and the full output is saved to files listed in stdoutFile / stderrFile. If the foreground wait times out (default 90s, max 180) the command keeps running in the background and returns a command_id; poll it with get_command_status instead of retrying."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to run, e.g. \"pnpm test\", \"git add -A && git commit -m 'msg'\", \"python3 script.py\", \"ls -la | head -50\"."},"cwd":{"type":"string","description":"Working subdirectory relative to the workspace or project root."},"timeout_seconds":{"type":"integer","description":"Foreground wait timeout. Default 90, max 180."},"project_id":{"type":"string","description":"Run inside this managed project instead of the selected folder workspace."}},"required":["command"]})
+        json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to run, e.g. \"pnpm test\", \"git add -A && git commit -m 'msg'\", \"python3 script.py\", \"ls -la | head -50\"."},"cwd":{"type":"string","description":"Working subdirectory relative to the workspace root or the project root."},"timeout_seconds":{"type":"integer","description":"Foreground wait timeout. Default 90, max 180."},"project_id":{"type":"string","description":"Run inside this managed project instead of the selected folder workspace or the conversation's active managed project."}},"required":["command"]})
     }
     fn domain(&self) -> &str {
         "desktop"
@@ -2547,7 +2597,7 @@ impl Tool for WorkspaceShellCommandTool {
                 .map(|value| project_relative_path(services, &project_id, value))
                 .transpose()?
                 .unwrap_or_else(|| root.clone());
-            run_managed_command(
+            return run_managed_command(
                 command,
                 &cwd,
                 timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
@@ -2558,28 +2608,51 @@ impl Tool for WorkspaceShellCommandTool {
                 CommandPolicy::Shell,
                 Some(&spill_dir),
             )
-            .await
-        } else {
-            let root = selected_folder_workspace(services)?;
+            .await;
+        }
+        if let Some(root) = services.folder_workspace.as_deref() {
             let cwd = input
                 .get("cwd")
                 .and_then(Value::as_str)
                 .map(|value| services.folder_workspace_path(value))
                 .unwrap_or_else(|| root.to_path_buf());
             services.ensure_folder_workspace_path(&cwd)?;
-            run_managed_command(
+            return run_managed_command(
                 command,
                 &cwd,
                 timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
                 None,
                 false,
-                Some(&root),
+                Some(root),
                 None,
                 CommandPolicy::Shell,
                 Some(&spill_dir),
             )
-            .await
+            .await;
         }
+        let Some((project_id, root)) = target_project_workspace(services)? else {
+            return Err(anyhow::anyhow!(
+                "no folder workspace is selected for this conversation"
+            ));
+        };
+        let cwd = input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(|value| project_relative_path(services, &project_id, value))
+            .transpose()?
+            .unwrap_or_else(|| root.clone());
+        run_managed_command(
+            command,
+            &cwd,
+            timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
+            Some(&project_id),
+            false,
+            Some(&root),
+            Some(Arc::clone(&services.projects)),
+            CommandPolicy::Shell,
+            Some(&spill_dir),
+        )
+        .await
     }
 }
 
@@ -3034,10 +3107,10 @@ impl Tool for LocalReadFileTool {
         let content = decode_local_file_bytes(&bytes, encoding)?;
         let content: String = content.chars().take(100_000).collect();
         Ok(json!({"file_path": path, "size": meta.len(), "content": content}))
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct LocalWriteFileTool;
@@ -3230,10 +3303,10 @@ impl Tool for LocalWriteFileTool {
             "size": content.len(),
             "message": format!("File saved: {}", path.display())
         }))
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 fn value_to_cell(value: &Value) -> String {
@@ -3482,10 +3555,10 @@ impl Tool for LocalCommandTool {
         };
         local_command_output(&mut result);
         Ok(result)
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct GlobSearchTool;
@@ -3728,7 +3801,8 @@ impl Tool for CallProjectApiTool {
                                 if c.is_ascii_alphanumeric() || "-_.~".contains(c) {
                                     c.to_string().into_bytes()
                                 } else {
-                                    c.to_string().into_bytes()
+                                    c.to_string()
+                                        .into_bytes()
                                         .iter()
                                         .flat_map(|b| format!("%{:02X}", b).into_bytes())
                                         .collect()
@@ -4095,11 +4169,11 @@ impl Tool for AnalyzeProjectDataTool {
             "required": ["project_id", "analysis_type"]
         })
     }
-        fn electron_native(&self) -> bool {
+    fn electron_native(&self) -> bool {
         true
     }
 
-async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let analysis_type = supported_project_analysis_type(&input)?;
         let (id, _root) = project_path(&input, services)?;
         let requested_database = input.get("database_path").and_then(Value::as_str);
@@ -4883,7 +4957,9 @@ impl Tool for ManageWorkspaceTabsTool {
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let action = require_str(&input, "action")?;
         if action != "list" && action != "activate" && action != "close" {
-            anyhow::bail!("manage_workspace_tabs: action must be \"list\", \"activate\" or \"close\"");
+            anyhow::bail!(
+                "manage_workspace_tabs: action must be \"list\", \"activate\" or \"close\""
+            );
         }
         let optional_field = |key: &str| {
             input
@@ -5031,8 +5107,11 @@ impl Tool for ManageTodoListTool {
         // every call error out and the todo UI never received a list to show.
         let normalize_status = |status: Option<&str>| -> &'static str {
             match status.map(str::trim).filter(|value| !value.is_empty()) {
-                Some("completed") | Some("complete") | Some("done") | Some("finished") => "completed",
-                Some("in-progress") | Some("in_progress") | Some("inprogress") | Some("doing") | Some("active") => "in-progress",
+                Some("completed") | Some("complete") | Some("done") | Some("finished") => {
+                    "completed"
+                }
+                Some("in-progress") | Some("in_progress") | Some("inprogress") | Some("doing")
+                | Some("active") => "in-progress",
                 _ => "not-started",
             }
         };
@@ -5923,7 +6002,6 @@ impl Tool for CreateScheduledTaskTool {
     fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 #[cfg(test)]
@@ -5968,7 +6046,6 @@ impl Tool for ListScheduledTasksTool {
     fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct InstallMcpServerTool;
@@ -6241,7 +6318,6 @@ impl Tool for InstallMcpServerTool {
     fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 #[cfg(test)]
@@ -7460,10 +7536,10 @@ impl Tool for StartAsyncTaskTool {
             trim_async_task_history(&mut map);
         });
         Ok(snapshot)
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct GetTaskStatusTool;
@@ -7486,10 +7562,10 @@ impl Tool for GetTaskStatusTool {
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Async task not found: {id}"))
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct SpawnSubagentsTool;
@@ -7757,10 +7833,10 @@ impl Tool for DocumentListTool {
     }
     async fn execute(&self, _input: Value, services: &ToolServices) -> Result<Value> {
         crate::document_artifacts::list_documents_result(&services.workspace)
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct DocumentReadTool;
@@ -7803,10 +7879,10 @@ impl Tool for DocumentReadTool {
             max_chars,
             &region_ids,
         )
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 fn optional_document_number(input: &Value, key: &str) -> Result<Option<f64>> {
@@ -8759,8 +8835,8 @@ fn _keep_types_linked(_: Option<Duration>) {}
 #[cfg(test)]
 mod workspace_native_parity_tests {
     use super::{
-        WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool,
-        WorkspacePatchFileTool, WorkspaceReadFileTool, WorkspaceWriteFileTool,
+        WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool, WorkspacePatchFileTool,
+        WorkspaceReadFileTool, WorkspaceWriteFileTool,
     };
     use crate::{Tool, ToolServices};
     use serde_json::json;
@@ -8790,7 +8866,9 @@ mod workspace_native_parity_tests {
             skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
             scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
             mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
-            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(root.join("projects"))),
+            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(
+                root.join("projects"),
+            )),
             group_collaboration: None,
             subagent_runtime: None,
         }
@@ -8807,7 +8885,10 @@ mod workspace_native_parity_tests {
             .execute(json!({ "file_path": "empty.md" }), &service)
             .await
             .unwrap();
-        assert_eq!(empty["content"], "(This file exists but is empty - 0 lines.)");
+        assert_eq!(
+            empty["content"],
+            "(This file exists but is empty - 0 lines.)"
+        );
         assert_eq!(empty["total_lines"], 0);
 
         let segment = WorkspaceReadFileTool
@@ -8963,13 +9044,19 @@ mod workspace_native_parity_tests {
         let service = services(temp.path());
 
         let created = WorkspaceWriteFileTool
-            .execute(json!({ "file_path": "app.txt", "content": "one" }), &service)
+            .execute(
+                json!({ "file_path": "app.txt", "content": "one" }),
+                &service,
+            )
             .await
             .unwrap();
         assert_eq!(created["overwritten"], false);
 
         let updated = WorkspaceWriteFileTool
-            .execute(json!({ "file_path": "app.txt", "content": "two" }), &service)
+            .execute(
+                json!({ "file_path": "app.txt", "content": "two" }),
+                &service,
+            )
             .await
             .unwrap();
         assert_eq!(updated["overwritten"], true);
