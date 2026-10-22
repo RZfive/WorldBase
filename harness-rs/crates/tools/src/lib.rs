@@ -18,6 +18,7 @@ pub mod coding_diagnose;
 pub mod coding_edit;
 pub mod coding_fix;
 pub mod coding_lsp;
+pub mod coding_project;
 pub mod coding_verify;
 pub mod command;
 pub mod compat_tools;
@@ -674,6 +675,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(coding_apply::CodingApplyTool),
         Arc::new(coding_diagnose::CodingDiagnoseTool),
         Arc::new(coding_lsp::CodingLspTool),
+        Arc::new(coding_project::CodingProjectTool),
         Arc::new(coding_fix::CodingFixDependenciesTool),
         Arc::new(FinalizeProjectTool),
         Arc::new(ClearProjectBuildFlagTool),
