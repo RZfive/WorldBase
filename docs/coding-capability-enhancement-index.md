@@ -55,10 +55,10 @@ graph LR
 | 文本增量修改 | ✅ 已实现 | `patch_project_file` 支持定向修改，但仍以文本匹配为主 |
 | 移动端 FFI | ✅ 已实现 | 手写 `dart:ffi` 绑定，调用 `worldbase_start` 等 C ABI |
 | `coding_loop` 专用编排 | 🧩 提案 | 在现有通用循环之上增加编码任务状态、验证门禁和修复策略 |
-| tree-sitter 语义编辑 | ✅ 已实现（MVP） | 符号索引、语义定位、replace/insert/delete/rename 与 `coding_edit` 工具 |
+| 多语言 tree-sitter 语义编辑 | ✅ 已实现（MVP） | TS/JS/TSX、Python、Go、Rust、Java：符号索引、语义定位、replace/insert/delete/rename |
 | Error Analyzer | ✅ 已实现（MVP） | 28 个错误模式、结构化诊断、稳定失败签名与 `RepairPlan` |
-| LSP 集成 | 🧩 提案 | 复用语言服务器获得诊断、符号与快速修复信息 |
-| 依赖问题诊断 | 🧩 提案 | 解析 manifest/lockfile 与包管理输出，生成依赖修复计划 |
+| LSP 集成 | ✅ 已实现（MVP） | publishDiagnostics、符号、定义、hover 数据解析；live server 生命周期待接入 |
+| 依赖问题诊断 | ✅ 已实现（MVP） | 解析 manifest/lockfile 与包管理输出，生成安装/更新/重建 lockfile 建议 |
 
 **关键结论**：当前已经有循环、压缩和并行基础，不需要从零实现；真正需要补的是编码任务专用策略、语义编辑、结构化错误诊断和验证闭环。
 

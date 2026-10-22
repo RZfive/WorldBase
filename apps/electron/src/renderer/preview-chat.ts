@@ -114,6 +114,7 @@ const App = defineComponent({
       h('main',{class:'preview-chat'},[
         h(ChatHeader,{contextLabel:isNew?'💬 新对话':'🤖 主 Agent',contextDetail:'',availableChannelBindings:[],selectedChannelBindingId:'',providers:[{id:'anthropic',name:'Anthropic',models:['Opus 4.8']}],activeProviderId:'anthropic',selectedModel:'Opus 4.8',showProviderSelector:true,reasoningStrength:'high',temperature:null,providerDefaultTemperature:1,isGroupConversation:false,showAgentSelector:isNew,availableAgents:[{id:'a1',name:'前端工程师',icon:'🤖'},{id:'a2',name:'文案作者',icon:'✍️'}],selectedAgentId:'',onSelectProviderModel:()=>{},'onUpdate:reasoningStrength':()=>{},'onUpdate:temperature':()=>{},'onUpdate:selectedAgentId':()=>{}}),
         h(MessageList,{messages,isLoading,filePreview:{active:false,filePath:'',lineCount:0,added:0,removed:0},assistantName:'前端工程师'}),
+        h('div',{class:'preview-dock'},[
         h('div',{class:'preview-attention'},[
           ...(coding ? [h(CodingStatusPanel,{status:codingStatus,diffFileCount:2,isLoading:true,expanded:accordion.expandedPanel.value==='coding',onToggle:()=>accordion.togglePanel('coding'),onOpenDiagnostics:()=>{},onOpenDiff:()=>{}})] : []),
           h(PinnedTodoPanel,{items:[{id:1,title:'定位表格渲染瓶颈',status:'completed'},{id:2,title:'实现虚拟滚动窗口',status:'in-progress'},{id:3,title:'补充性能回归数据',status:'not-started'}],isLoading:true,expanded:accordion.expandedPanel.value==='todo',onToggle:()=>accordion.togglePanel('todo')}),
@@ -127,6 +128,7 @@ const App = defineComponent({
         h(ChatInput,{
           modelValue:text.value,'onUpdate:modelValue':(v:string)=>text.value=v,isLoading,pendingAuthCount:auth?1:0,pendingImages:[],pendingFiles:[],isUploadingFiles:false,uploadFeedback:'',workspaceVisible:false,authMode:'strict',planModeActive:false,computerUseEnabled:false,computerUsePermissionGranted:true,availableSkills:[{id:'s1',name:'网页开发'},{id:'s2',name:'代码审查'}],activeSkillIds:new Set(['s1']),showSkillPicker:false,isGroupConversation:false,onSend:()=>{},onStop:()=>{},onAddAttachments:()=>{},onRemoveImage:()=>{},onRemoveFile:()=>{},onToggleWorkspace:()=>{},'onUpdate:authMode':()=>{},onTogglePlanMode:()=>{},onToggleComputerUse:()=>{},onToggleSkillPicker:()=>{},onSelectAllSkills:()=>{},onClearSkills:()=>{},onToggleSkill:()=>{}
         })
+        ])
       ])
     ])
   }
@@ -134,5 +136,5 @@ const App = defineComponent({
 const app=createApp(App); app.use(i18n); app.mount('#app')
 
 const style=document.createElement('style'); style.textContent=`
-html,body,#app{height:100%;overflow:hidden}.preview-shell{display:flex;height:100%;background:var(--app-main-surface)}.preview-shell>.conv-sidebar{width:224px;flex:0 0 224px}.preview-chat{--chat-message-gutter:clamp(24px,4vw,64px);--chat-message-track-max:980px;--chat-user-message-max:680px;--chat-user-bubble-max:540px;--chat-event-card-max:100%;--chat-input-gutter:16px;position:relative;display:flex;flex:1;min-width:640px;min-height:0;flex-direction:column;overflow:hidden;background:var(--app-chat-canvas)}.preview-attention{flex:0 0 auto;width:calc(100% - 32px);margin:0 auto;padding:0 0 6px;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:auto}.preview-attention>*{flex:0 0 auto;width:100%}
+html,body,#app{height:100%;overflow:hidden}.preview-shell{display:flex;height:100%;background:var(--app-main-surface)}.preview-shell>.conv-sidebar{width:224px;flex:0 0 224px}.preview-chat{--chat-message-gutter:clamp(24px,4vw,64px);--chat-message-track-max:980px;--chat-user-message-max:680px;--chat-user-bubble-max:540px;--chat-event-card-max:100%;--chat-input-gutter:16px;position:relative;display:flex;flex:1;min-width:640px;min-height:0;flex-direction:column;overflow:hidden;background:var(--app-chat-canvas)}.preview-dock{position:absolute;left:0;right:0;bottom:0;z-index:7;display:flex;flex-direction:column;width:100%;pointer-events:none}.preview-attention{position:relative;width:calc(100% - 32px);max-height:min(42vh,360px);overflow-y:auto;margin:0 auto 8px;padding:0;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:none}.preview-attention>*{flex:0 0 auto;width:100%;pointer-events:auto}
 `; document.head.appendChild(style)

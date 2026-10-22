@@ -360,6 +360,10 @@ const CONVERSATION_SIDEBAR_COLLAPSE_STORAGE_KEY = 'chat-conversation-sidebar-col
 // The composer ref is also used by the shell to focus the textarea when a
 // workspace surface asks for input. Keep the ref at the component boundary;
 // layout sizing is intentionally handled by normal flex flow below.
+const messageListRef = ref<{ scrollToBottom?: () => void } | null>(null)
+const bottomDockRef = ref<HTMLElement | null>(null)
+const inputCardInset = ref(0)
+let bottomDockObserver: ResizeObserver | null = null
 const chatInputRef = ref<{ $el?: HTMLElement } | null>(null)
 let offPlanModeChanged: (() => void) | null = null
 
@@ -405,7 +409,31 @@ const { expandedPanel: expandedAttentionPanel, togglePanel: toggleAttentionPanel
     () => attentionSignature.value
   )
 
+
+
+watch(
+  bottomDockRef,
+  (element) => {
+    bottomDockObserver?.disconnect()
+    bottomDockObserver = null
+    if (!element || typeof ResizeObserver === 'undefined') return
+    const measureInset = (): void => {
+      const dockRect = element.getBoundingClientRect()
+      const card = chatInputRef.value?.$el?.querySelector<HTMLElement>('.input-container')
+      inputCardInset.value = card
+        ? Math.max(0, Math.round(dockRect.bottom - card.getBoundingClientRect().top))
+        : Math.round(dockRect.height)
+    }
+    measureInset()
+    bottomDockObserver = new ResizeObserver(() => measureInset())
+    bottomDockObserver.observe(element)
+  },
+  { flush: 'post' }
+)
+
 onBeforeUnmount(() => {
+  bottomDockObserver?.disconnect()
+  bottomDockObserver = null
   window.removeEventListener('keydown', onSidebarShortcut)
   offPlanModeChanged?.()
   offPlanModeChanged = null
@@ -1630,7 +1658,10 @@ watch(
       :class="['chat-panel', { 'chat-panel-with-workspace': workspaceStore.visible.value }]"
       :style="{ '--chat-main-protected-min-width': `${MIN_CHAT_MAIN_WIDTH}px` }"
     >
-      <div class="chat-main">
+      <div
+        class="chat-main"
+        :style="{ '--chat-input-card-inset': `${inputCardInset}px` }"
+      >
         <LongTermGoalPanel
           v-if="currentLongTermGoal || longTermGoalWorkspaceActive"
           :goal="currentLongTermGoal"
@@ -1704,6 +1735,7 @@ watch(
           </div>
           <MessageList
             v-else
+            ref="messageListRef"
             :key="currentConversationId || 'draft'"
             :messages="messages"
             :is-loading="isLoading"
@@ -1744,7 +1776,8 @@ watch(
             </template>
           </MessageList>
 
-          <div class="chat-attention-zone" aria-live="polite">
+          <div ref="bottomDockRef" class="chat-bottom-dock">
+            <div class="chat-attention-zone" aria-live="polite">
             <!-- design v1.7 stacking priority: auth > ask > todo (auth on top). -->
             <AuthPermissionPanel
               v-if="currentPendingAuthRequest"
@@ -1828,6 +1861,7 @@ watch(
             @clear-skills="clearSkills"
             @toggle-skill="toggleSkill"
           />
+          </div>
 
           <QuickAskPopover
             :state="quickAskState"
@@ -2272,6 +2306,23 @@ watch(
 }
 
 
+.chat-bottom-dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  pointer-events: none;
+}
+
+.chat-bottom-dock > * {
+  pointer-events: auto;
+}
+
 .chat-attention-zone {
   /*
    * Attention panels used to be absolutely positioned above the composer.
@@ -2280,20 +2331,28 @@ watch(
    * Keep the zone in normal flow so an expanded request always consumes real
    * vertical space.
    */
-  flex: 0 0 auto;
+  /* Attached to the composer: the whole bottom dock floats over the message
+     list, and the list reserves the dock height as bottom padding. */
+  position: relative;
   width: calc(100% - (var(--chat-input-gutter, 16px) * 2));
-  margin: 0 auto;
-  padding: 0 0 6px;
+  max-height: min(42vh, 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-scrollbar) transparent;
+  margin: 0 auto 8px;
+  padding: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .chat-attention-zone > * {
   flex: 0 0 auto;
   width: 100%;
+  pointer-events: auto;
 }
 
 .conversation-detail-state {

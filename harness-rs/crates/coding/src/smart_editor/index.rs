@@ -1,6 +1,6 @@
-//! Symbol index for JavaScript, TypeScript, and TSX syntax trees.
+//! Symbol index for JavaScript, TypeScript, TSX, Python, Go, Rust, and Java syntax trees.
 
-use super::{field_text, ParsedFile};
+use super::{field_text, languages, LanguageId, ParsedFile};
 use anyhow::Result;
 use std::ops::Range;
 use tree_sitter::Node;
@@ -256,15 +256,91 @@ impl ParsedFile {
 
 fn collect_symbols(parsed: &ParsedFile) -> Vec<SymbolEntry> {
     let mut entries = Vec::new();
-    visit(
-        parsed.tree.root_node(),
-        &[],
-        false,
-        &mut entries,
-        &parsed.source,
-    );
+    if matches!(
+        parsed.language,
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx
+    ) {
+        visit(
+            parsed.tree.root_node(),
+            &[],
+            false,
+            &mut entries,
+            &parsed.source,
+        );
+    } else {
+        visit_generic(
+            parsed.tree.root_node(),
+            &[],
+            false,
+            &mut entries,
+            &parsed.source,
+            parsed.language,
+        );
+    }
     entries.sort_by_key(|entry| entry.start_byte);
     entries
+}
+
+fn visit_generic(
+    node: Node<'_>,
+    parents: &[String],
+    _exported: bool,
+    entries: &mut Vec<SymbolEntry>,
+    source: &str,
+    language: LanguageId,
+) {
+    let profile = languages::profile(language);
+    let mut child_parents = parents.to_vec();
+    if let Some(kind) = (profile.kind_for_node)(node.kind()) {
+        let name = (profile.symbol_name)(node, source)
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                (profile.is_import)(node.kind())
+                    .then(|| import_name(node, source))
+                    .flatten()
+            });
+        if let Some(name) = name {
+            let start = node.start_position();
+            let end = node.end_position();
+            let exported = match profile.export_scope {
+                languages::ExportScope::TopLevel if !parents.is_empty() => false,
+                _ => (profile.is_exported)(node, source),
+            };
+            entries.push(SymbolEntry {
+                name: name.clone(),
+                kind,
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+                start_row: start.row,
+                start_column: start.column,
+                end_row: end.row,
+                end_column: end.column,
+                parent_path: parents.to_vec(),
+                exported,
+            });
+            child_parents.push(name);
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        visit_generic(child, &child_parents, false, entries, source, language);
+    }
+}
+
+fn import_name(node: Node<'_>, source: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        let text = source.get(child.byte_range())?.trim();
+        if !text.is_empty() {
+            return Some(text.to_string());
+        }
+    }
+    source
+        .get(node.byte_range())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn visit(

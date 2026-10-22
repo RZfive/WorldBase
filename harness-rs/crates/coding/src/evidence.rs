@@ -265,6 +265,7 @@ fn parse_project_kind(value: &str) -> Result<ProjectKind> {
         "rust" => Ok(ProjectKind::Rust),
         "python" => Ok(ProjectKind::Python),
         "go" => Ok(ProjectKind::Go),
+        "java" => Ok(ProjectKind::Java),
         "unknown" => Ok(ProjectKind::Unknown),
         _ => Err(anyhow!("unsupported projectKind `{value}`")),
     }

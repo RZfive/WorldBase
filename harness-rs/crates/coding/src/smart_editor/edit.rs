@@ -5,8 +5,8 @@
 
 use super::index::{SymbolEntry, SymbolKind, SymbolQuery};
 use super::{
-    detect_newline, leading_indentation, parse_file, preserve_multiline_formatting, ParsedFile,
-    SemanticEdit,
+    detect_newline, languages, leading_indentation, parse_file, preserve_multiline_formatting,
+    LanguageId, ParsedFile, SemanticEdit,
 };
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -128,7 +128,7 @@ pub fn insert_after(
     let entry = parsed.find_symbol(query)?;
     let node = node_for_entry(parsed, &entry)
         .with_context(|| format!("resolve indexed symbol `{}`", entry.name))?;
-    let container = insertion_container(node)?;
+    let container = insertion_container_for(parsed.language, node)?;
     let insert_at = insertion_offset(&parsed.source, declaration_end(&parsed.source, container));
     let indentation = leading_indentation(&parsed.source, entry.start_byte);
     let insertion = format_insertion(&parsed.source, &indentation, &text.into())?;
@@ -154,7 +154,7 @@ pub fn delete_symbol(parsed: &ParsedFile, query: &SymbolQuery) -> Result<Semanti
     let entry = parsed.find_symbol(query)?;
     let node = node_for_entry(parsed, &entry)
         .with_context(|| format!("resolve indexed symbol `{}`", entry.name))?;
-    let container = deletion_container(node)?;
+    let container = deletion_container_for(parsed.language, node)?;
     let byte_range = deletion_span(&parsed.source, container);
     let original_snippet = parsed
         .source
@@ -192,7 +192,7 @@ pub fn rename_symbol(
 ) -> Result<SemanticEdit> {
     ensure_supported(parsed)?;
     let new_name = new_name.as_ref().trim();
-    validate_identifier(new_name)?;
+    validate_identifier_for(parsed.language, new_name)?;
     let entry = parsed.find_symbol(query)?;
     if !is_identifier(&entry.name) {
         anyhow::bail!(
@@ -204,9 +204,10 @@ pub fn rename_symbol(
         anyhow::bail!("rename rejected: `{new_name}` is already the selected symbol's name");
     }
 
-    let declaration_name = declaration_name_node(parsed, &entry);
+    let declaration_name = declaration_name_node_for(parsed.language, parsed, &entry);
     let mut ranges = Vec::new();
-    collect_reference_ranges(
+    collect_reference_ranges_for(
+        parsed.language,
         parsed.tree.root_node(),
         &parsed.source,
         &entry.name,
@@ -318,6 +319,43 @@ fn node_for_entry<'tree>(parsed: &'tree ParsedFile, entry: &SymbolEntry) -> Opti
         stack.extend(node.named_children(&mut cursor));
     }
     None
+}
+
+fn insertion_container_for(language: LanguageId, node: Node<'_>) -> Result<Node<'_>> {
+    if matches!(
+        language,
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx
+    ) {
+        insertion_container(node)
+    } else {
+        generic_declaration_container(language, node, "insert_after")
+    }
+}
+
+fn deletion_container_for(language: LanguageId, node: Node<'_>) -> Result<Node<'_>> {
+    if matches!(
+        language,
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx
+    ) {
+        deletion_container(node)
+    } else {
+        generic_declaration_container(language, node, "delete")
+    }
+}
+
+fn generic_declaration_container<'tree>(
+    language: LanguageId,
+    node: Node<'tree>,
+    operation: &str,
+) -> Result<Node<'tree>> {
+    let profile = languages::profile(language);
+    let mut container = node;
+    while (profile.is_declarator)(container.kind()) {
+        container = container.parent().with_context(|| {
+            format!("{operation} rejected: selected declarator has no enclosing declaration")
+        })?;
+    }
+    Ok(container)
 }
 
 fn insertion_container(node: Node<'_>) -> Result<Node<'_>> {
@@ -486,6 +524,42 @@ fn format_insertion(source: &str, indentation: &str, text: &str) -> Result<Strin
     Ok(insertion)
 }
 
+fn declaration_name_node_for<'tree>(
+    language: LanguageId,
+    parsed: &'tree ParsedFile,
+    entry: &SymbolEntry,
+) -> Option<Node<'tree>> {
+    if matches!(
+        language,
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx
+    ) {
+        return declaration_name_node(parsed, entry);
+    }
+    let node = node_for_entry(parsed, entry)?;
+    find_identifier_with_text_generic(language, node, &parsed.source, &entry.name)
+}
+
+fn find_identifier_with_text_generic<'tree>(
+    language: LanguageId,
+    node: Node<'tree>,
+    source: &str,
+    name: &str,
+) -> Option<Node<'tree>> {
+    let profile = languages::profile(language);
+    if profile.identifier_kinds.contains(&node.kind())
+        && source.get(node.byte_range()) == Some(name)
+    {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = find_identifier_with_text_generic(language, child, source, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn declaration_name_node<'tree>(
     parsed: &'tree ParsedFile,
     entry: &SymbolEntry,
@@ -531,6 +605,33 @@ fn named_child_of_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tre
     found
 }
 
+fn collect_reference_ranges_for(
+    language: LanguageId,
+    node: Node<'_>,
+    source: &str,
+    name: &str,
+    kind: SymbolKind,
+    ranges: &mut Vec<Range<usize>>,
+) {
+    if matches!(
+        language,
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx
+    ) {
+        collect_reference_ranges(node, source, name, kind, ranges);
+        return;
+    }
+    let profile = languages::profile(language);
+    if profile.identifier_kinds.contains(&node.kind())
+        && source.get(node.byte_range()) == Some(name)
+    {
+        ranges.push(node.byte_range());
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_reference_ranges_for(language, child, source, name, kind, ranges);
+    }
+}
+
 fn collect_reference_ranges(
     node: Node<'_>,
     source: &str,
@@ -566,6 +667,26 @@ fn is_identifier(value: &str) -> bool {
     identifier_pattern().is_match(value) && !RESERVED_WORDS.contains(&value)
 }
 
+fn validate_identifier_for(language: LanguageId, value: &str) -> Result<()> {
+    if matches!(
+        language,
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx
+    ) {
+        return validate_identifier(value);
+    }
+    if value.is_empty() {
+        anyhow::bail!("identifier must not be empty");
+    }
+    let profile = languages::profile(language);
+    if profile.reserved_words.contains(&value) {
+        anyhow::bail!("`{value}` is a reserved word and cannot be used as an identifier");
+    }
+    if !language_identifier_pattern().is_match(value) {
+        anyhow::bail!("`{value}` is not a valid identifier");
+    }
+    Ok(())
+}
+
 fn validate_identifier(value: &str) -> Result<()> {
     if value.is_empty() {
         anyhow::bail!("identifier must not be empty");
@@ -584,5 +705,12 @@ fn identifier_pattern() -> &'static Regex {
     PATTERN.get_or_init(|| {
         Regex::new(r"^[$_\p{XID_Start}][$_\p{XID_Continue}\u{200C}\u{200D}]*$")
             .expect("valid identifier pattern")
+    })
+}
+
+fn language_identifier_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(r"^[_\p{XID_Start}][_\p{XID_Continue}]*$").expect("valid identifier pattern")
     })
 }

@@ -1,13 +1,14 @@
-//! Frontend-first semantic parsing for JavaScript, TypeScript, and TSX.
+//! Multi-language semantic parsing and editing.
 
 mod edit;
 mod index;
+pub(crate) mod languages;
 
 pub use edit::{delete_symbol, insert_after, rename_symbol, replace_symbol};
 pub use index::{SymbolEntry, SymbolKind, SymbolQuery};
 
 use anyhow::{Context, Result};
-use std::{ops::Range, path::Path};
+use std::{ops::Range, path::Path, str::FromStr};
 use tree_sitter::{Language, Node, Parser, Tree};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +16,10 @@ pub enum LanguageId {
     JavaScript,
     TypeScript,
     Tsx,
+    Python,
+    Go,
+    Rust,
+    Java,
 }
 
 impl LanguageId {
@@ -29,14 +34,15 @@ impl LanguageId {
             Some("js" | "jsx" | "mjs" | "cjs") => Ok(Self::JavaScript),
             Some("ts" | "mts" | "cts") => Ok(Self::TypeScript),
             Some("tsx") => Ok(Self::Tsx),
+            Some("py" | "pyi") => Ok(Self::Python),
+            Some("go") => Ok(Self::Go),
+            Some("rs") => Ok(Self::Rust),
+            Some("java") => Ok(Self::Java),
             Some(extension) => anyhow::bail!(
-                "unsupported frontend source extension .{extension}: {}",
+                "unsupported source extension .{extension}: {}",
                 path.display()
             ),
-            None => anyhow::bail!(
-                "frontend source path has no file extension: {}",
-                path.display()
-            ),
+            None => anyhow::bail!("source path has no file extension: {}", path.display()),
         }
     }
 
@@ -45,6 +51,9 @@ impl LanguageId {
             Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Self::Python | Self::Go | Self::Rust | Self::Java => {
+                (languages::profile(self).grammar)()
+            }
         }
     }
 }
@@ -69,7 +78,7 @@ impl ParsedFile {
         let mut stack = vec![self.tree.root_node()];
 
         while let Some(node) = stack.pop() {
-            if selector.matches(node, &self.source) {
+            if selector.matches(node, &self.source, self.language) {
                 ranges.push(NodeRange::from_node(node));
             }
 
@@ -133,12 +142,18 @@ impl NodeSelector {
         self
     }
 
-    fn matches(&self, node: Node<'_>, source: &str) -> bool {
-        if node.kind() != self.kind {
+    fn matches(&self, node: Node<'_>, source: &str, language: LanguageId) -> bool {
+        let kind_matches = node.kind() == self.kind
+            || SymbolKind::from_str(&self.kind)
+                .ok()
+                .is_some_and(|kind| kind_for_node(language, node.kind()) == Some(kind));
+        if !kind_matches {
             return false;
         }
         match &self.name {
-            Some(expected) => node_name(node, source) == Some(expected.as_str()),
+            Some(expected) => {
+                node_name(node, source, language).as_deref() == Some(expected.as_str())
+            }
             None => true,
         }
     }
@@ -265,9 +280,25 @@ pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
     })
 }
 
-fn node_name<'source>(node: Node<'_>, source: &'source str) -> Option<&'source str> {
+fn kind_for_node(language: LanguageId, node_kind: &str) -> Option<crate::smart_editor::SymbolKind> {
+    if matches!(
+        language,
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx
+    ) {
+        return None;
+    }
+    (languages::profile(language).kind_for_node)(node_kind)
+}
+
+fn node_name(node: Node<'_>, source: &str, language: LanguageId) -> Option<String> {
+    if !matches!(
+        language,
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx
+    ) {
+        return (languages::profile(language).symbol_name)(node, source);
+    }
     if let Some(name) = field_text(node, source, "name") {
-        return Some(name);
+        return Some(name.to_string());
     }
 
     if !matches!(
@@ -279,9 +310,9 @@ fn node_name<'source>(node: Node<'_>, source: &'source str) -> Option<&'source s
 
     let parent = node.parent()?;
     match parent.kind() {
-        "variable_declarator" => field_text(parent, source, "name"),
-        "pair" | "property" => field_text(parent, source, "key"),
-        "assignment_expression" => field_text(parent, source, "left"),
+        "variable_declarator" => field_text(parent, source, "name").map(ToOwned::to_owned),
+        "pair" | "property" => field_text(parent, source, "key").map(ToOwned::to_owned),
+        "assignment_expression" => field_text(parent, source, "left").map(ToOwned::to_owned),
         _ => None,
     }
 }

@@ -118,7 +118,7 @@ fn missing_package_json_is_an_unknown_profile_not_an_error() {
     assert_eq!(profile.package_manager, None);
     assert!(profile.commands.is_empty());
     assert_eq!(profile.root, root.path());
-    assert!(profile.source.contains("package.json"));
+    assert!(profile.source.contains("No supported project manifest"));
 }
 
 #[test]

@@ -77,7 +77,7 @@ fn rejects_unsupported_extensions() {
     let error = parse_file(Path::new("README.md"), "# not frontend source").unwrap_err();
     assert!(error
         .to_string()
-        .contains("unsupported frontend source extension"));
+        .contains("unsupported source extension"));
 }
 
 #[test]
@@ -552,6 +552,6 @@ fn rejects_invalid_noop_and_unsupported_edits() {
     ] {
         assert!(error
             .to_string()
-            .contains("unsupported frontend source extension"));
+            .contains("unsupported source extension"));
     }
 }

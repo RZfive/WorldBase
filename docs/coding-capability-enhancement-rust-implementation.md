@@ -19,11 +19,11 @@
 | 并行只读工具 | ✅ 已实现 | 相互独立的只读工具调用可并行执行 |
 | 并行子代理 | ✅ 已实现 | `spawn_subagents` 可并行分派独立子任务，并回收各自结果 |
 | Coding 验证门禁 | ✅ 已实现（MVP） | `chat.send.codingMode` 跟踪未验证修改，阻止带修改的 `finish_task: completed` 或普通文本绕过验证 |
-| 前端验证 profile | ✅ 已实现（MVP） | 识别 `package.json`、pnpm/npm/yarn/bun 和 typecheck/lint/test/build scripts |
-| 前端诊断归一化 | ✅ 已实现（MVP） | 解析 TypeScript、ESLint、Jest/Vitest 输出为结构化 diagnostic |
+| 多语言验证 profile | ✅ 已实现（MVP） | 前端 Node、Rust/Cargo、Go modules、Python（pyproject/requirements/uv/poetry）、Java（Maven/Gradle） |
+| 多语言诊断归一化 | ✅ 已实现（MVP） | TypeScript/ESLint/Jest/Vitest、Python、Go、Rust、Java 编译与测试输出 |
 | 错误模式与修复计划 | ✅ 已实现（MVP） | 28 个前端错误模式、稳定失败签名、重复失败检测与 `RepairPlan` |
 | `coding_verify` 工具 | ✅ 已实现（MVP） | Rust 原生工具按 profile 顺序执行验证命令并返回结构化 evidence |
-| TS/JS/TSX tree-sitter 解析 | ✅ 已实现（MVP） | 文件语言识别、语法树解析、唯一节点定位和语法错误检测 |
+| 多语言 tree-sitter 解析 | ✅ 已实现（MVP） | TS/JS/TSX、Python、Go、Rust、Java：语法树、唯一节点定位、语法错误检测 |
 | 语义编辑与符号索引 | ✅ 已实现（MVP） | `coding_edit` 支持 replace/insert_after/delete/rename，写入前校验文件未变化 |
 | Coding Loop 完整编排 | 🧭 提案 | 验证门禁、修复轮次与诊断已接入；跨阶段编排和 LSP 仍待实现 |
 | LSP 集成 | 🧭 提案 | 诊断、跳转和符号信息尚未接入 |
@@ -60,7 +60,7 @@ harness-rs/（唯一运行时）
 ├── crates/mobile-ffi/           # 已实现：进程内 native 启动边界
 └── crates/coding/               # 增量实现：纯编码策略层，不依赖 core
     ├── state.rs                 # 已实现：验证门禁与修复轮次状态机
-    ├── verification.rs          # 已实现：前端验证 profile 检测
+    ├── verification/            # 已实现：前端、Rust、Go、Python、Java 验证 profile
     ├── verification_runner.rs   # 已实现：顺序验证与 evidence 汇总
     ├── error_analyzer/          # 已实现：前端诊断归一化、错误模式与修复报告
     └── smart_editor/            # 已实现：符号索引、语义定位与编辑提案
@@ -514,7 +514,7 @@ impl SmartEditor {
 - 语法节点适配器必须与具体 grammar 版本绑定，并通过 fixture 测试。
 - 如果目标语言没有可用 grammar，只能使用纯文本补丁，并在结果中明确说明无法执行 AST 编辑的原因；不要伪造 AST 保证。
 - 写回前仍要经过现有 patch 工具与工作区权限检查。
-- 当前已实现 TS/JS/TSX 解析、符号索引、语义编辑、前端诊断归一化、错误模式与修复计划，以及 `coding_verify`；完整 Coding Loop 编排、模型辅助诊断和 LSP 仍属增量提案。
+- 当前已实现 TS/JS/TSX、Python、Go、Rust、Java 解析、符号索引、语义编辑、多语言诊断归一化、错误模式与修复计划，以及 `coding_verify`；完整 Coding Loop 编排、live LSP 和更深的语言语义分析仍属增量提案。
 
 ---
 
@@ -599,7 +599,7 @@ int startInProcessHarness(String dataDir) {
 |------|------|------|--------|
 | 1 | Week 1-2 | Rust crate、数据结构、协议能力声明 | `crates/coding` 骨架 + `cargo test` 基线 |
 | 2 | Week 3-6 | 编码门禁、验证 profile、修复状态 | 复用现有循环的 `codingMode` + `coding_verify` |
-| 3 | Week 7-10 | TS/JS/TSX tree-sitter 与语义编辑 | 语法节点定位、最小补丁、格式测试；Rust/Python/Go 后续扩展 |
+| 3 | Week 7-10 | 多语言 tree-sitter 与语义编辑 | TS/JS/TSX、Python、Go、Rust、Java 的节点定位、最小补丁、格式测试 |
 | 4 | Week 11-13 | Error Analyzer 与模型辅助诊断 | 错误归一化、修复建议、限流与审计 |
 | 5 | Week 14-15 | Desktop/CLI/Mobile 集成 | JSON-RPC 联调、手写 FFI 回归测试 |
 | 6 | Week 16 | UI 状态与 Alpha 验证 | 进度事件、诊断展示、基准报告 |

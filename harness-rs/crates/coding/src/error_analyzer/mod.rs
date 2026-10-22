@@ -8,6 +8,11 @@ pub mod patterns;
 
 pub use patterns::{matching_pattern, ErrorCategory, ErrorPattern};
 
+mod go;
+mod java;
+mod python;
+mod rust;
+
 use crate::model::{CommandOutcome, Diagnostic, DiagnosticSeverity};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -312,6 +317,18 @@ fn parse_stream(stream: &str, diagnostics: &mut Vec<Diagnostic>) {
         }
         if let Some(diagnostic) = parse_test_failure(text, raw) {
             diagnostics.push(diagnostic);
+            continue;
+        }
+        for parser in [
+            python::parse_line,
+            go::parse_line,
+            rust::parse_line,
+            java::parse_line,
+        ] {
+            if let Some(diagnostic) = parser(text, raw) {
+                diagnostics.push(diagnostic);
+                break;
+            }
         }
     }
 }
@@ -406,6 +423,11 @@ fn parse_test_failure(text: &str, raw: &str) -> Option<Diagnostic> {
     });
     let captures = test_failure.captures(text)?;
     let body = captures.name("body")?.as_str().trim();
+    // Go's `FAIL	pkg	0.123s` summary also starts with FAIL; leave it for the
+    // Go parser instead of misclassifying it as a Jest/Vitest failure header.
+    if body.contains('\t') {
+        return None;
+    }
     let (file, message) = match body.split_once(" > ") {
         Some((file, test_name)) => (file.trim(), format!("Test failed: {}", test_name.trim())),
         None => (body, format!("Test suite failed: {body}")),

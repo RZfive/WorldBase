@@ -270,6 +270,10 @@ function togglePanel(): void {
 
 <style scoped>
 .coding-status-shell {
+  /* The phase strip is the primary status surface; keep it above the
+     passive todo capsule if an older layout ever overlaps them. */
+  position: relative;
+  z-index: 2;
   width: 100%;
   max-width: 100%;
   margin: 0;

@@ -624,7 +624,7 @@ fn profile_missing_manifest() {
     assert_eq!(profile.project_kind, ProjectKind::Unknown);
     assert!(profile.package_manager.is_none());
     assert!(profile.commands.is_empty());
-    assert!(profile.source.contains("No package.json"));
+    assert!(profile.source.contains("No supported project manifest"));
 }
 
 fn real_symbol_types_interfaces() {

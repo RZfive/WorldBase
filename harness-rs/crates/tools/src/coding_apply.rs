@@ -790,7 +790,7 @@ mod tests {
         .unwrap_err();
         assert!(unsupported
             .to_string()
-            .contains("unsupported frontend source extension"));
+            .contains("unsupported source extension"));
     }
 
     #[tokio::test]

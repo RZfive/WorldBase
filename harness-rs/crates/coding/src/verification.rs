@@ -1,5 +1,13 @@
 //! Project verification profile detection and command execution planning.
-//! Frontend/Node profiles are the first implementation target.
+
+#[path = "verification/go.rs"]
+mod go;
+#[path = "verification/java.rs"]
+mod java;
+#[path = "verification/python.rs"]
+mod python;
+#[path = "verification/rust.rs"]
+mod rust;
 
 use crate::model::{
     PackageManager, ProjectKind, VerificationCheckKind, VerificationCommand, VerificationProfile,
@@ -19,13 +27,19 @@ use std::{
 pub fn detect_profile(root: &Path) -> Result<VerificationProfile> {
     let package_json_path = root.join("package.json");
     if !package_json_path.is_file() {
+        for detector in [rust::detect, go::detect, python::detect, java::detect] {
+            if let Some(profile) = detector(root)? {
+                return Ok(profile);
+            }
+        }
         return Ok(VerificationProfile {
             project_kind: ProjectKind::Unknown,
             package_manager: None,
             root: root.to_path_buf(),
             commands: Vec::new(),
-            source: "No package.json found at package.json; no verification commands were planned."
-                .to_string(),
+            source:
+                "No supported project manifest was found; no verification commands were planned."
+                    .to_string(),
         });
     }
 
@@ -159,6 +173,7 @@ pub fn select_minimal_profile(
 struct ChangeFlags {
     docs: bool,
     code: bool,
+    compiled: bool,
     test_file: bool,
     style: bool,
     config: bool,
@@ -195,12 +210,14 @@ impl ChangeFlags {
         let config = is_config(&file_name);
         let test_config = is_test_config(&file_name);
         let code = is_code(&extension) && !config;
+        let compiled = is_compiled_code(&extension);
 
         self.test_file |= test_file;
         self.style |= style;
         self.config |= config;
         self.test_config |= test_config;
         self.code |= code;
+        self.compiled |= compiled;
         if code && !test_file && is_entry_point(path) {
             self.entry_point = true;
         }
@@ -230,7 +247,11 @@ impl ChangeFlags {
             }
             VerificationCheckKind::Test => self.code || self.test_file || self.test_config,
             VerificationCheckKind::Build => {
-                self.style || self.config || self.other || (self.code && self.entry_point)
+                self.style
+                    || self.config
+                    || self.other
+                    || self.compiled
+                    || (self.code && self.entry_point)
             }
             VerificationCheckKind::Format | VerificationCheckKind::Custom => true,
         }
@@ -288,6 +309,23 @@ fn is_manifest(file_name: &str) -> bool {
     matches!(
         file_name,
         "package.json"
+            | "Cargo.toml"
+            | "Cargo.lock"
+            | "go.mod"
+            | "go.sum"
+            | "go.work"
+            | "pyproject.toml"
+            | "setup.py"
+            | "setup.cfg"
+            | "requirements.txt"
+            | "uv.lock"
+            | "poetry.lock"
+            | "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "settings.gradle"
+            | "settings.gradle.kts"
+            | "gradle.properties"
             | "pnpm-lock.yaml"
             | "package-lock.json"
             | "yarn.lock"
@@ -318,8 +356,23 @@ fn is_docs_or_image(extension: &str) -> bool {
 fn is_code(extension: &str) -> bool {
     matches!(
         extension,
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts"
+        "ts" | "tsx"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "mts"
+            | "cts"
+            | "py"
+            | "pyi"
+            | "go"
+            | "rs"
+            | "java"
     )
+}
+
+fn is_compiled_code(extension: &str) -> bool {
+    matches!(extension, "go" | "rs" | "java")
 }
 
 fn is_style(extension: &str) -> bool {
@@ -335,11 +388,18 @@ fn is_test_file(path: &Path) -> bool {
     if file_name.contains(".test.") || file_name.contains(".spec.") {
         return true;
     }
+    if (file_name.starts_with("test_") && file_name.ends_with(".py"))
+        || file_name.ends_with("_test.py")
+        || file_name.ends_with("_test.go")
+    {
+        return true;
+    }
     path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .is_some_and(|part| part.eq_ignore_ascii_case("__tests__"))
+        component.as_os_str().to_str().is_some_and(|part| {
+            part.eq_ignore_ascii_case("__tests__")
+                || part.eq_ignore_ascii_case("tests")
+                || part.eq_ignore_ascii_case("test")
+        })
     })
 }
 

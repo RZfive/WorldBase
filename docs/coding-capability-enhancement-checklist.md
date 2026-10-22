@@ -12,7 +12,9 @@
 - [x] 前端验证 profile：pnpm/npm/yarn/bun、typecheck/lint/test/build。
 - [x] 前端诊断归一化：TypeScript、ESLint、Jest/Vitest。
 - [x] Rust 原生 `coding_verify` 工具：按 profile 顺序执行并返回结构化 evidence。
-- [x] TS/JS/TSX tree-sitter 解析、唯一节点定位和语法错误检测。
+- [x] 多语言 tree-sitter 解析：TS/JS/TSX、Python、Go、Rust、Java；唯一节点定位与语法错误检测。
+- [x] 多语言验证 profile：Cargo、Go modules、pyproject/requirements/uv/poetry、Maven/Gradle。
+- [x] 多语言错误归一化：Python（ruff/mypy/pytest）、Go（go test/vet）、Rust（rustc/cargo test）、Java（javac/Maven/Gradle/JUnit）。
 - [x] 语义替换提案与符号索引；`coding_edit` 支持 replace/insert_after/delete/rename，落盘前校验文件未变化。
 - [x] `coding_verify` JSON evidence 解析为 `VerificationEvidence`；支持 `changed_files` 最小验证集，core 自动注入 dirty files。
 - [x] `coding_apply` 批量语义编辑工具：按依赖分批、批内并发、同文件串行、写入前 stale 检查。
@@ -139,10 +141,10 @@
 
 ## 阶段 3：🧩 tree-sitter 语义编辑提案（Week 7-10）
 
-> 第一批只支持 TypeScript、JavaScript 和 TSX；Rust、Python、Go grammar 在后续阶段按真实项目收益扩展。
+> 当前支持 TypeScript、JavaScript、TSX、Python、Go、Rust、Java；更多语言按真实项目收益继续扩展。
 
 ### 解析与索引
-- [x] 在 `worldbase-coding` 中引入 tree-sitter 与 TS/JS/TSX grammar。
+- [x] 在 `worldbase-coding` 中引入 tree-sitter 与 TS/JS/TSX/Python/Go/Rust/Java grammar。
 - [x] 解析文件并记录语法错误节点。
 - [x] 实现按节点 kind + name 的唯一匹配。
 - [x] 建立声明符号索引：模块、类型、函数、方法、导入、导出（引用索引尚未实现）。
