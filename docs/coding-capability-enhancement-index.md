@@ -1,12 +1,12 @@
 # WorldBase 编码能力升级 - 文档索引
 
-**版本**：2.1
-**最后更新**：2026-10-21
+**版本**：2.2
+**最后更新**：2026-10-22
 **目标**：在 Rust Harness 单一后端上，将 WorldBase 的编码能力提升至行业一流水平
 
 > **基线约定**：本文档集只描述 `harness-rs/` 的 Rust 实现，不引入第二语言后端，也不设计并行运行时。移动端通过手写 `dart:ffi` 调用 Rust 导出的 C ABI。
 >
-> **状态标记**：✅ 已实现；🧩 提案（尚未实现）。tree-sitter 语义索引、语义编辑、Error Analyzer 与 `RepairPlan` 已落地 MVP；完整 `coding_loop` 编排与 LSP 仍为 🧩 提案。
+> **状态标记**：✅ 已实现；🧩 提案（尚未实现）。tree-sitter 语义索引、语义编辑、Error Analyzer、`RepairPlan`、live LSP 客户端与 `coding_lsp`、并行写调度、依赖修复工具和 100 任务离线基准已落地 MVP；完整 `coding_loop` 跨阶段编排、live server CI 覆盖、真实包管理器变更测试和真实模型 E2E 仍待补齐。
 
 ---
 
@@ -54,13 +54,30 @@ graph LR
 | 并行子智能体 | ✅ 已实现 | `spawn_subagents` 可并行运行独立子任务，并汇总结果 |
 | 文本增量修改 | ✅ 已实现 | `patch_project_file` 支持定向修改，但仍以文本匹配为主 |
 | 移动端 FFI | ✅ 已实现 | 手写 `dart:ffi` 绑定，调用 `worldbase_start` 等 C ABI |
-| `coding_loop` 专用编排 | 🧩 提案 | 在现有通用循环之上增加编码任务状态、验证门禁和修复策略 |
+| `coding_loop` 专用编排 | 🧩 提案 | 验证门禁、修复轮次与诊断已接入；跨阶段 Plan/Inspect 编排仍为提案 |
 | 多语言 tree-sitter 语义编辑 | ✅ 已实现（MVP） | TS/JS/TSX、Python、Go、Rust、Java：符号索引、语义定位、replace/insert/delete/rename |
 | Error Analyzer | ✅ 已实现（MVP） | 28 个错误模式、结构化诊断、稳定失败签名与 `RepairPlan` |
-| LSP 集成 | ✅ 已实现（MVP） | publishDiagnostics、符号、定义、hover 数据解析；live server 生命周期待接入 |
+| LSP 数据解析与 live 客户端 | ✅ 已实现（MVP） | publishDiagnostics、符号、定义、hover 解析；`LspClient` 管理真实 server 生命周期；`coding_lsp` 已注册，真实 server 测试需手动启用 |
 | 依赖问题诊断 | ✅ 已实现（MVP） | 解析 manifest/lockfile 与包管理输出，生成安装/更新/重建 lockfile 建议 |
+| 依赖修复工具 | ✅ 已实现（MVP） | `coding_fix_dependencies` 默认 dry-run，`confirm=true` 才执行；只允许包管理器 add/install，拒绝 remove、lifecycle、path/URL/git spec |
+| 并行写调度 | ✅ 已实现（MVP） | core `tool_scheduler` 与 `plan_write_batches`：独立文件并行、同文件串行、依赖先写、权限提示回退串行，结果恢复调用顺序 |
+| 100 任务基准 | ✅ 已实现（离线） | `benchmark_100.rs` 固定 100 个确定性任务，含 20+ 真实仓库文件读取和逐任务延迟；不等同于真实模型 E2E |
 
-**关键结论**：当前已经有循环、压缩和并行基础，不需要从零实现；真正需要补的是编码任务专用策略、语义编辑、结构化错误诊断和验证闭环。
+**关键结论**：当前已经有循环、压缩、并行写调度、语义编辑、结构化诊断、live LSP 工具和验证门禁；真正需要补的是跨阶段 `coding_loop` 编排、live server CI 覆盖、真实包管理器变更测试和真实模型 E2E。
+
+### 当前已知缺口
+
+- **live server CI 覆盖**：`coding_lsp` 单测覆盖 server 解析和错误路径；真实语言服务器往返测试默认 `#[ignore]`，CI 未安装语言服务器。
+- **真实包管理器变更测试**：`coding_fix_dependencies` 的执行路径使用受控命令和 fake executor 测试，尚未在 CI 中对真实 pnpm/npm 项目做写入式验证。
+- **真实模型 E2E**：100 任务基准是确定性离线策略测试，不调用真实模型，也不衡量端到端修复成功率。
+
+### 质量门禁
+
+```bash
+pnpm coding:check
+```
+
+`pnpm coding:check` 会执行 `scripts/verify-coding.sh`，包含 `worldbase-coding` / `worldbase-core` / `worldbase-tools` 测试、`worldbase-coding` clippy、Electron typecheck，以及 `test:rust-harness-host-callbacks`、`test:message-render-blocks`、`test:message-segments`、`test:renderer-navigation`。
 
 ---
 
@@ -105,7 +122,7 @@ graph LR
 - 🧩 `coding_loop` 编排器
 - ✅ Smart Editor（tree-sitter 语义编辑，MVP）
 - ✅ Error Analyzer（MVP）
-- 🧩 LSP 适配层
+- ✅ LSP 客户端与 `coding_lsp`（MVP）
 - 数据模型、接口与测试策略
 
 **适合**：开发工程师、架构师（实施参考）
@@ -142,7 +159,7 @@ graph LR
 
 - 当前真实基线
 - 通用循环与编码专用循环的差异
-- 语义编辑、错误诊断、LSP 等缺口
+- live server CI、真实包管理器变更与真实模型 E2E 等缺口
 - 改进方案与优先级
 
 **适合**：决策者、产品经理
@@ -193,7 +210,7 @@ cargo test -p worldbase-core
 - 确认只修改 Rust Harness。
 - 确认移动端继续使用手写 `dart:ffi`。
 - 为现有 128 步循环、上下文压缩、只读并行和子智能体补充回归测试。
-- 再评审 🧩 `coding_loop`、tree-sitter、Error Analyzer 与 LSP 的提案范围。
+- 再评审仍待完成的 `coding_loop` 跨阶段编排、live server CI 与真实模型 E2E 范围。
 
 ### 场景 2：开发过程
 
@@ -222,38 +239,33 @@ cargo test -p worldbase-core
 | 错误诊断 | 原始命令输出 | 规范化诊断 + 修复建议 | Error Analyzer 提案 |
 | 并行效率 | 只读工具与子任务可并行 | 在安全边界内增加依赖感知调度 | 调度提案 |
 | 上下文效率 | 通用压缩已实现 | 编码感知的摘要与片段选择 | 压缩增强提案 |
-| 实时诊断 | 命令执行后反馈 | LSP 诊断接入 | LSP 提案 |
+| 实时诊断 | 命令执行后反馈；`coding_lsp` 可按文件拉起 live server | live server CI 覆盖与默认循环自动接入 | 待补测试与集成 |
 
 > 上表是目标，不是当前完成度。评分与收益均为估算，需用内部基准验证。
 
 ### 实施计划
 
-- **P0（Week 1-6）**：基线观测 + 🧩 `coding_loop` 编码任务编排。
-- **P0（Week 7-10）**：🧩 tree-sitter 语义索引与增量编辑。
+- **P0（Week 1-6）**：基线观测 + 🧩 `coding_loop` 编码任务编排（验证门禁与修复轮次已落地，跨阶段编排待补）。
+- **P0（Week 7-10）**：✅ tree-sitter 语义索引与增量编辑（MVP 已落地，继续补真实项目覆盖）。
 - **P1（Week 11-13）**：✅ Error Analyzer（MVP 已落地，继续补真实日志回归）。
-- **P1（Week 14-15）**：集成、回归与依赖感知调度。
-- **P2（Week 16+）**：🧩 LSP、依赖诊断与体验优化。
+- **P1（Week 14-15）**：✅ 并行写调度与依赖修复工具已落地 MVP；继续补集成、回归与真实包管理器变更测试。
+- **P2（Week 16+）**：✅ live LSP 客户端、`coding_lsp`、依赖修复工具与并行写调度已落地 MVP；剩余 live server CI 覆盖、真实包管理器变更测试和真实模型 E2E。
 - **推荐人力**：2 名 Rust 工程师 + 1 名测试/评估工程师（可兼职）。
 
 ### 技术栈
 
-**当前**：
+**当前（编码能力相关）**：
 ```text
 Rust 2021 + Cargo
-Tokio                 异步运行时与任务调度
+Tokio                 异步运行时、任务调度与 LSP 子进程
 rusqlite              SQLite 持久化
-serde / serde_json    协议与数据序列化
+serde / serde_json    协议、数据序列化与 LSP JSON-RPC
 anyhow / thiserror    错误处理
+tree-sitter           多语言语法树解析与语义定位
 dart:ffi              移动端手写 C ABI 绑定
 ```
 
-**提案新增**：
-```text
-tree-sitter           语法树解析与语义定位（🧩）
-lsp-types / lsp-server  LSP 消息与适配（🧩）
-```
-
-依赖在对应提案获批后再加入 `harness-rs/Cargo.toml`，不提前作为现有能力宣传。
+未引入独立的 `lsp-types` / `lsp-server` 依赖；live LSP 客户端复用 `serde_json` 与 Tokio 子进程。若后续需要完整协议类型，再单独评估依赖与许可证。
 
 ---
 
@@ -261,6 +273,7 @@ lsp-types / lsp-server  LSP 消息与适配（🧩）
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-10-22 | 2.2 | 补充 live LSP/`coding_lsp`、并行写调度、依赖修复工具和 100 任务基准；列出 CI 与真实 E2E 缺口 |
 | 2026-10-21 | 2.1 | 校正当前能力基线；明确 Rust-only、手写 `dart:ffi` 和提案边界 |
 | 2026-10-21 | 2.0 | 改为 Rust Harness 方案 |
 | 2026-10-21 | 1.0 | 初始版本 |
@@ -282,7 +295,7 @@ A: 是。每个执行段最多 128 步；通用循环能力不等于 `coding_loo
 A: 是。通用压缩已存在；提案关注编码场景下的摘要质量和文件片段选择。
 
 **Q: 当前是否已经支持并行？**
-A: 只读工具调用和子智能体已经可以并行；写操作与依赖任务仍应保持串行，除非后续提案明确证明安全。
+A: 只读工具、子智能体，以及 allow-list 内的独立文件写操作可以并行；同文件写、依赖写、命令执行、`coding_apply`、删除和未知工具仍保持串行。权限提示可能出现的写批次会回退为串行。
 
 **Q: 为什么先补观测和回归测试？**
 A: 已有循环、压缩和并行能力必须保持稳定，任何提案都不能破坏现有运行时语义。
@@ -314,5 +327,5 @@ cargo test -p worldbase-core
 ---
 
 **维护者**：WorldBase AI 团队
-**版本**：2.1
-**最后更新**：2026-10-21
+**版本**：2.2
+**最后更新**：2026-10-22

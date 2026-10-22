@@ -10,9 +10,10 @@ import { createLongTermGoalState } from './long-term-goal-state'
 import { createChatMessageSender } from './message-sender'
 import { createChatMessageBranching } from './message-branching'
 import { createChatProviderState } from './provider-state'
+import { clearCodingState } from './coding-status-storage'
 import { getLatestVisibleTodoItems } from './message-runtime'
 import { addSelectionQuote } from './selection-quote-state'
-import { sharedChatPanelState } from './shared-state'
+import { hydrateCodingStateForConversation, sharedChatPanelState } from './shared-state'
 import { createChatSidebarState } from './sidebar-state'
 import { createChatWorkspaceOptionsState } from './workspace-options-state'
 import { buildActiveCodeViewContext } from '../../workspace/workspace-store'
@@ -130,8 +131,11 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   // Whenever the user navigates into a conversation (via load, open, etc.) we clear
   // any unread badge. Hooked here as a backstop for code paths that bypass loadConversation.
   watch(currentConversationId, (id) => {
-    if (id) clearConversationUnread(id)
-  })
+    if (id) {
+      clearConversationUnread(id)
+      hydrateCodingStateForConversation(id)
+    }
+  }, { immediate: true })
 
   const activeTodoItems = computed(() => getLatestVisibleTodoItems(messages.value, isLoading.value))
   const currentCodingStatus = computed(() => {
@@ -367,7 +371,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const {
     conversationDetailError,
     conversationDetailState,
-    deleteConversation,
+    deleteConversation: deleteConversationRecord,
     loadConversation,
     newConversation,
     startBlankConversation,
@@ -416,6 +420,13 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     setConversationProject,
     resetTransientStreamState
   })
+
+  async function deleteConversation (conversationId: string): Promise<void> {
+    await deleteConversationRecord(conversationId)
+    clearCodingState(conversationId)
+    codingStatusByConversation.delete(conversationId)
+    codingDiffByConversation.delete(conversationId)
+  }
 
   const {
     answerLongTermGoalIntervention,

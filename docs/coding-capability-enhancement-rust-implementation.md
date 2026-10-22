@@ -1,8 +1,8 @@
 # WorldBase 编码能力升级 - Rust Harness 实施方案（修订版）
 
-**版本**：2.1  
+**版本**：2.2
 **实施边界**：编码能力只在 `harness-rs/` 内实现，Rust 是唯一运行时  
-**日期**：2026-10-21
+**日期**：2026-10-22
 
 ---
 
@@ -25,8 +25,11 @@
 | `coding_verify` 工具 | ✅ 已实现（MVP） | Rust 原生工具按 profile 顺序执行验证命令并返回结构化 evidence |
 | 多语言 tree-sitter 解析 | ✅ 已实现（MVP） | TS/JS/TSX、Python、Go、Rust、Java：语法树、唯一节点定位、语法错误检测 |
 | 语义编辑与符号索引 | ✅ 已实现（MVP） | `coding_edit` 支持 replace/insert_after/delete/rename，写入前校验文件未变化 |
-| Coding Loop 完整编排 | 🧭 提案 | 验证门禁、修复轮次与诊断已接入；跨阶段编排和 LSP 仍待实现 |
-| LSP 集成 | 🧭 提案 | 诊断、跳转和符号信息尚未接入 |
+| Coding Loop 完整编排 | 🧭 提案 | 验证门禁、修复轮次、诊断和并行写调度已接入；跨阶段 Plan/Inspect 编排与真实模型 E2E 仍待实现 |
+| LSP 集成 | ✅ 已实现（MVP） | 数据解析 + live `LspClient` + `coding_lsp`；真实 server 测试默认 `#[ignore]`，CI 未安装语言服务器 |
+| 并行写调度 | ✅ 已实现（MVP） | core `tool_scheduler` 与 `coding_apply` 使用文件级依赖批次；同文件串行、权限回退、结果恢复调用顺序 |
+| 依赖修复工具 | ✅ 已实现（MVP） | `coding_fix_dependencies` 默认 dry-run，`confirm=true` 后执行 allow-list 包管理器命令 |
+| 100 任务基准 | ✅ 已实现（离线） | `tests/benchmark_100.rs` 固定 100 个确定性任务，含 20+ 真实仓库文件读取与逐任务延迟；非真实模型 E2E |
 
 **硬约束**：
 
@@ -34,7 +37,7 @@
 - Desktop、CLI、Mobile 都是客户端；编码计划、工具调度、验证和状态管理统一在 Rust harness 内完成。
 - 客户端与 harness 复用现有 JSON-RPC 2.0 协议；Mobile 使用手写 `dart:ffi` 绑定加载并启动 native harness，不使用代码生成桥接框架。
 - 依赖方向固定为 `protocol/tools/coding → core → app-server/mobile-ffi/cli`；`coding` 不得依赖 `core`，避免形成 Cargo 循环依赖。
-- “Rust-only Harness”只描述运行时实现语言，不限制被管理项目的技术栈。前端项目仍需执行 pnpm/npm/yarn/bun 验证；Rust/Python/Go profile 是后续扩展。
+- “Rust-only Harness”只描述运行时实现语言，不限制被管理项目的技术栈。前端项目执行 pnpm/npm/yarn/bun 验证；Rust/Cargo、Python、Go 和 Java profile 已作为 MVP 支持。
 - 下文除“已实现”明确标注外，模块、文件路径、配置项和指标均为待实施设计。
 
 ### 调整前（v1.0 方案）
@@ -55,16 +58,22 @@
                                          ▼
 harness-rs/（唯一运行时）
 ├── crates/core/                 # 已实现：分段 128 步循环、压缩、并行调度、coding gate
-├── crates/tools/                # 已实现：文件、搜索、命令、子代理等工具
+├── crates/tools/                # 已实现：文件、搜索、命令、子代理、coding 工具
 ├── crates/protocol/             # 已实现：JSON-RPC 与能力协商
 ├── crates/mobile-ffi/           # 已实现：进程内 native 启动边界
 └── crates/coding/               # 增量实现：纯编码策略层，不依赖 core
     ├── state.rs                 # 已实现：验证门禁与修复轮次状态机
+    ├── planner.rs               # 已实现：文件级依赖分批与并行写计划
+    ├── lsp.rs                   # 已实现：LSP 数据解析与诊断归一化
+    ├── lsp_client.rs            # 已实现：live LSP 子进程与 JSON-RPC 生命周期
+    ├── dependency.rs            # 已实现：依赖诊断与修复命令建议
     ├── verification/            # 已实现：前端、Rust、Go、Python、Java 验证 profile
     ├── verification_runner.rs   # 已实现：顺序验证与 evidence 汇总
     ├── error_analyzer/          # 已实现：前端诊断归一化、错误模式与修复报告
     └── smart_editor/            # 已实现：符号索引、语义定位与编辑提案
 ```
+
+`crates/tools` 已注册 `coding_verify`、`coding_edit`、`coding_apply`、`coding_diagnose`、`coding_fix_dependencies` 和 `coding_lsp`。`crates/coding/tests/benchmark_100.rs` 提供 100 个确定性离线任务及逐任务延迟。
 
 **优势**：
 
@@ -191,29 +200,34 @@ async fn coding_workflow(task: CodingTask) -> Result<CodingOutcome> {
 
 ### 目录结构
 
+> 注：以下为目标目录设计。标注“已实现”的模块已落地；`orchestrator.rs`、`context.rs` 与更细的 parser/query 拆分仍是提案。
+
 ```text
 harness-rs/
 ├── Cargo.toml
 └── crates/
-    ├── core/                      # 已实现：通用 Agent 循环、压缩、子代理
-    ├── tools/                     # 已实现：工具注册、权限和并行只读调用
+    ├── core/                      # 已实现：通用 Agent 循环、压缩、子代理、并行写调度
+    ├── tools/                     # 已实现：工具注册、权限、并行只读调用与 coding 工具
     ├── protocol/                  # 已实现：JSON-RPC、事件和能力协商
     ├── mobile-ffi/                # 已实现：进程内 native 启动入口
-    └── coding/                    # 提案：编码增强 crate
+    └── coding/                    # 已实现（MVP）：编码增强 crate
         ├── Cargo.toml
         └── src/
             ├── lib.rs
-            ├── orchestrator.rs    # 编码计划与修复轮次
-            ├── context.rs         # 上下文收集、压缩与预算控制
-            ├── verification.rs    # 构建、测试、差异与格式检查
+            ├── orchestrator.rs    # 提案：编码计划与修复轮次
+            ├── context.rs         # 提案：上下文收集、压缩与预算控制
+            ├── verification.rs    # 已实现：构建、测试、差异与格式检查
+            ├── planner.rs         # 已实现：文件级依赖分批与并行写计划
+            ├── lsp.rs             # 已实现：LSP 数据解析
+            ├── lsp_client.rs      # 已实现：live server 生命周期
             ├── smart_editor/
             │   ├── mod.rs
-            │   ├── parser.rs      # tree-sitter 语言注册（提案）
-            │   ├── query.rs       # 节点选择器（提案）
+            │   ├── parser.rs      # tree-sitter 语言注册（已实现 MVP）
+            │   ├── query.rs       # 节点选择器（已实现 MVP）
             │   └── semantic_edit.rs
             └── error_analyzer/
                 ├── mod.rs
-                ├── pattern.rs     # 编译/测试错误模式（提案）
+                ├── pattern.rs     # 编译/测试错误模式（已实现 MVP）
                 └── diagnosis.rs   # 模型辅助诊断（提案）
 ```
 
@@ -514,7 +528,7 @@ impl SmartEditor {
 - 语法节点适配器必须与具体 grammar 版本绑定，并通过 fixture 测试。
 - 如果目标语言没有可用 grammar，只能使用纯文本补丁，并在结果中明确说明无法执行 AST 编辑的原因；不要伪造 AST 保证。
 - 写回前仍要经过现有 patch 工具与工作区权限检查。
-- 当前已实现 TS/JS/TSX、Python、Go、Rust、Java 解析、符号索引、语义编辑、多语言诊断归一化、错误模式与修复计划，以及 `coding_verify`；完整 Coding Loop 编排、live LSP 和更深的语言语义分析仍属增量提案。
+- 当前已实现 TS/JS/TSX、Python、Go、Rust、Java 解析、符号索引、语义编辑、多语言诊断归一化、错误模式与修复计划、`coding_verify`、live LSP 客户端与 `coding_lsp`、并行写调度、`coding_fix_dependencies` 和 100 任务离线基准；完整 Coding Loop 编排、live server CI 覆盖、真实包管理器变更测试、真实模型 E2E 和更深的语言语义分析仍属增量工作。
 
 ---
 
@@ -591,6 +605,34 @@ int startInProcessHarness(String dataDir) {
 
 ---
 
+## 🧪 质量门禁
+
+```bash
+pnpm coding:check
+```
+
+该命令调用 `scripts/verify-coding.sh`，依次执行：
+
+```bash
+cargo test --manifest-path harness-rs/Cargo.toml -p worldbase-coding
+cargo test --manifest-path harness-rs/Cargo.toml -p worldbase-core
+cargo test --manifest-path harness-rs/Cargo.toml -p worldbase-tools
+cargo clippy --manifest-path harness-rs/Cargo.toml -p worldbase-coding --all-targets --no-deps -- -D warnings
+pnpm --dir apps/electron typecheck
+pnpm --dir apps/electron test:rust-harness-host-callbacks
+pnpm --dir apps/electron test:message-render-blocks
+pnpm --dir apps/electron test:message-segments
+pnpm --dir apps/electron test:renderer-navigation
+```
+
+## 🚧 当前已知缺口
+
+- **live server CI 覆盖**：`coding_lsp` 单测覆盖 server 解析、路径边界、缺少 server 和输出归一化；真实语言服务器往返测试默认 `#[ignore]`，需要 `WORLDBASE_LSP_TEST_PROGRAM` 手动启用。
+- **真实包管理器变更测试**：`coding_fix_dependencies` 默认 dry-run，执行路径通过受控命令与 fake executor 测试；CI 尚未在真实 pnpm/npm 项目上做写入式验证。
+- **真实模型 E2E**：100 任务基准验证确定性策略、编辑、诊断和 LSP 数据解析，不调用真实模型，也不衡量端到端任务成功率。
+
+---
+
 ## 📅 实施计划（提案）
 
 ### 时间线（16 周）
@@ -603,6 +645,8 @@ int startInProcessHarness(String dataDir) {
 | 4 | Week 11-13 | Error Analyzer 与模型辅助诊断 | 错误归一化、修复建议、限流与审计 |
 | 5 | Week 14-15 | Desktop/CLI/Mobile 集成 | JSON-RPC 联调、手写 FFI 回归测试 |
 | 6 | Week 16 | UI 状态与 Alpha 验证 | 进度事件、诊断展示、基准报告 |
+
+> **现状补充**：编码门禁、验证 profile、语义编辑、Error Analyzer、live LSP 客户端/`coding_lsp`、并行写调度、依赖修复工具和 100 任务离线基准已落地 MVP。上表保留为剩余工程化工作的规划参考。
 
 ### 人员分工（推荐 2 人）
 
@@ -641,9 +685,9 @@ int startInProcessHarness(String dataDir) {
 
 1. 已完成 `crates/coding` 与 `core`、`tools`、`protocol` 的第一版接口边界。
 2. 已建立 MVP：`codingMode` 门禁、前端验证 profile、`coding_verify`、TS/JS/TSX 解析。
-3. 下一步完善跨阶段 Coding Loop 编排、真实项目基准与 LSP。
+3. 下一步完善跨阶段 Coding Loop 编排、真实模型 E2E 与 live server CI 覆盖。
 4. 保持 `chat.abort` 作为编码任务取消入口，补齐验证命令取消和超时测试。
-5. 用 `cargo test --workspace` 与 Electron 契约测试验证不改变现有行为。
+5. 用 `pnpm coding:check` 验证 Rust 测试、clippy、Electron typecheck 与渲染测试不改变现有行为。
 
 ### 参考资料
 
@@ -653,6 +697,6 @@ int startInProcessHarness(String dataDir) {
 
 ---
 
-**版本**：2.1  
+**版本**：2.2
 **维护者**：WorldBase AI 团队  
-**最后更新**：2026-10-21
+**最后更新**：2026-10-22

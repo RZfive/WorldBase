@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type {
   CodingDiffChange,
@@ -7,6 +7,7 @@ import type {
   CodingDiffState
 } from '../../../../shared/coding-status-types.js'
 import { sharedChatPanelState } from '../../chat/panel/shared-state'
+import { ensureWorkspaceTab, workspaceStore } from '../workspace-store'
 
 const props = defineProps<{
   conversationId: string
@@ -22,13 +23,141 @@ const files = computed<CodingDiffFile[]>(() => diff.value?.files ?? [])
 const activeIndex = ref(0)
 const activeFile = computed<CodingDiffFile | null>(() => files.value[activeIndex.value] ?? null)
 
+const focusFilePath = computed(() => {
+  const activeTab = workspaceStore.tabs.value.find(tab => tab.id === workspaceStore.activeTabId.value)
+  if (!activeTab || activeTab.kind !== 'coding-diff') return ''
+  if (activeTab.state?.conversationId !== props.conversationId) return ''
+  const value = activeTab.state?.focusFilePath
+  return typeof value === 'string' ? value.trim() : ''
+})
+
+const focusRequestId = computed(() => {
+  const activeTab = workspaceStore.tabs.value.find(tab => tab.id === workspaceStore.activeTabId.value)
+  if (!activeTab || activeTab.kind !== 'coding-diff') return ''
+  if (activeTab.state?.conversationId !== props.conversationId) return ''
+  const value = activeTab.state?.focusRequestId
+  return typeof value === 'string' ? value : ''
+})
+
+function normalizePath (value: string): string {
+  return value.trim().replace(/\\/g, '/').replace(/^\.\//, '')
+}
+
+function pathsMatch (left: string, right: string): boolean {
+  const normalizedLeft = normalizePath(left)
+  const normalizedRight = normalizePath(right)
+  if (!normalizedLeft || !normalizedRight) return false
+  return normalizedLeft === normalizedRight ||
+    normalizedLeft.endsWith(`/${normalizedRight}`) ||
+    normalizedRight.endsWith(`/${normalizedLeft}`)
+}
+
+function applyFocusFilePath (): void {
+  const target = focusFilePath.value
+  if (!target) return
+  const index = files.value.findIndex(file => pathsMatch(file.filePath, target))
+  if (index >= 0) activeIndex.value = index
+}
+
 watch(
   () => files.value.length,
   (length) => {
     if (length === 0) activeIndex.value = 0
     else if (activeIndex.value >= length) activeIndex.value = length - 1
+    applyFocusFilePath()
   }
 )
+
+watch([focusFilePath, focusRequestId], () => {
+  applyFocusFilePath()
+}, { immediate: true })
+
+function isAbsolutePath (filePath: string): boolean {
+  return /^(?:[A-Za-z]:[\\/]|\/)/.test(filePath)
+}
+
+/** Relative harness paths resolve against the conversation's folder root. */
+function resolveFilePath (filePath: string): string {
+  const trimmed = filePath.trim()
+  if (!trimmed) return ''
+  if (isAbsolutePath(trimmed)) return trimmed
+  const root = workspaceStore.folderRootPath.value?.trim()
+  if (!root) return ''
+  return `${root.replace(/[\\/]+$/, '')}/${trimmed.replace(/^[\\/]+/, '')}`
+}
+
+const canOpenActiveFile = computed(() => Boolean(activeFile.value && resolveFilePath(activeFile.value.filePath)))
+
+function getFileName (filePath: string): string {
+  const segments = filePath.split(/[\\/]/).filter(Boolean)
+  return segments[segments.length - 1] || filePath
+}
+
+function openActiveFile (): void {
+  if (!activeFile.value) return
+  const filePath = resolveFilePath(activeFile.value.filePath)
+  if (!filePath) return
+  ensureWorkspaceTab('document', { filePath, fileName: getFileName(filePath) })
+  workspaceStore.visible.value = true
+}
+
+function buildDiffText (file: CodingDiffFile): string {
+  const lines = [file.filePath]
+  for (const change of file.changes) {
+    lines.push('')
+    lines.push(`# ${change.operation}`)
+    lines.push(`--- ${t('chatUi.codingDiffBefore')}`)
+    lines.push(change.before)
+    lines.push(`+++ ${t('chatUi.codingDiffAfter')}`)
+    lines.push(change.after)
+  }
+  return lines.join('\n')
+}
+
+const copiedToken = ref('')
+let copiedTimer: ReturnType<typeof setTimeout> | null = null
+
+function isCopied (token: string): boolean {
+  return copiedToken.value === token
+}
+
+async function copyText (text: string, token: string): Promise<void> {
+  if (!text.trim()) return
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const area = document.createElement('textarea')
+      area.value = text
+      area.setAttribute('readonly', '')
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      document.execCommand('copy')
+      document.body.removeChild(area)
+    }
+    copiedToken.value = token
+    if (copiedTimer) clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => { copiedToken.value = '' }, 1600)
+  } catch {
+    copiedToken.value = ''
+  }
+}
+
+function copyActivePath (): void {
+  if (!activeFile.value) return
+  void copyText(activeFile.value.filePath, 'path')
+}
+
+function copyActiveDiff (): void {
+  if (!activeFile.value) return
+  void copyText(buildDiffText(activeFile.value), 'diff')
+}
+
+onBeforeUnmount(() => {
+  if (copiedTimer) clearTimeout(copiedTimer)
+})
 
 interface DisplayLine {
   number: number
@@ -82,7 +211,35 @@ function changeKey (change: CodingDiffChange, index: number): string {
       <main v-if="activeFile" class="diff-main">
         <header class="active-file-header">
           <h2>{{ activeFile.filePath }}</h2>
-          <span class="change-count">{{ activeFile.changes.length }}</span>
+          <div class="active-file-actions">
+            <span class="change-count">{{ activeFile.changes.length }}</span>
+            <button
+              type="button"
+              class="file-action"
+              :disabled="!canOpenActiveFile"
+              :title="canOpenActiveFile ? t('chatUi.codingOpenFile') : t('chatUi.codingOpenFileUnavailable')"
+              :aria-label="t('chatUi.codingOpenFile')"
+              @click="openActiveFile"
+            >
+              {{ t('chatUi.codingOpenFile') }}
+            </button>
+            <button
+              type="button"
+              class="file-action"
+              :aria-label="t('chatUi.codingCopyPath')"
+              @click="copyActivePath"
+            >
+              {{ isCopied('path') ? t('chatUi.codingCopied') : t('chatUi.codingCopyPath') }}
+            </button>
+            <button
+              type="button"
+              class="file-action"
+              :aria-label="t('chatUi.codingCopyDiff')"
+              @click="copyActiveDiff"
+            >
+              {{ isCopied('diff') ? t('chatUi.codingCopied') : t('chatUi.codingCopyDiff') }}
+            </button>
+          </div>
         </header>
 
         <p v-if="activeFile.changes.length === 0" class="diff-empty inline">
@@ -197,6 +354,7 @@ function changeKey (change: CodingDiffChange, index: number): string {
 .file-rail {
   min-width: 0;
   min-height: 0;
+  max-width: 100%;
   padding: 8px;
   overflow: auto;
   border-right: 1px solid var(--app-border);
@@ -263,14 +421,56 @@ function changeKey (change: CodingDiffChange, index: number): string {
 
 .active-file-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
+  min-width: 0;
   padding-bottom: 9px;
   border-bottom: 1px solid var(--app-border);
 }
 
+.active-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.file-action {
+  appearance: none;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--app-accent);
+  font: inherit;
+  font-size: 0.66rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.file-action:hover:not(:disabled) {
+  color: var(--app-accent-strong);
+  text-decoration: underline;
+}
+
+.file-action:disabled {
+  color: var(--app-text-muted);
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.file-action:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 .active-file-header h2 {
+  flex: 1 1 220px;
   min-width: 0;
   margin: 0;
   overflow: hidden;
@@ -420,10 +620,14 @@ function changeKey (change: CodingDiffChange, index: number): string {
   }
 }
 
-@media (max-width: 779px) {
+@media (max-width: 899px) {
   .diff-body {
     grid-template-columns: minmax(0, 1fr);
     overflow: auto;
+  }
+
+  .active-file-actions {
+    justify-content: flex-start;
   }
 
   .file-rail {

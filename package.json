@@ -33,6 +33,7 @@
     "harness:test:android-build": "bash scripts/build_rust_android.sh",
     "test:rust": "cargo test --manifest-path harness-rs/Cargo.toml --workspace",
     "harness:check": "cargo fmt --manifest-path harness-rs/Cargo.toml --all -- --check && cargo test --manifest-path harness-rs/Cargo.toml --workspace && pnpm electron:typecheck && pnpm electron:test",
+    "coding:check": "bash scripts/verify-coding.sh",
     "test:flutter": "cargo build --manifest-path harness-rs/Cargo.toml -p worldbase-mobile-ffi --no-default-features && cd apps/mobile && flutter test",
     "test:e2e:macos": "cd apps/mobile && flutter test integration_test/app_e2e.dart -d macos"
   }

@@ -1,11 +1,12 @@
 # WorldBase 编码能力升级 - 实施检查清单
 
-**版本**：2.1
+**版本**：2.2
+**最后更新**：2026-10-22
 **使用说明**：逐项勾选，并把 ✅ 当前能力回归与 🧩 提案交付分开验收。
 
 > **文档导航**：[索引](./coding-capability-enhancement-index.md) · [快速开始](./coding-capability-enhancement-quick-start.md) · [Rust 实施](./coding-capability-enhancement-rust-implementation.md) · [架构](./coding-capability-enhancement-architecture.md) · [算法](./coding-capability-enhancement-algorithms.md) · [检查清单](./coding-capability-enhancement-checklist.md) · [缺口分析](./coding-capability-enhancement-gap-analysis.md) · [详细对标](./coding-capability-enhancement-benchmark-detailed.md) · [执行摘要](./coding-capability-enhancement-executive-summary.md)
 
-## MVP 实施状态（2026-10-21）
+## MVP 实施状态（2026-10-22）
 
 - [x] 新增 `worldbase-coding` 纯策略 crate，依赖方向为 `protocol/tools/coding → core`。
 - [x] `chat.send` 增加 `codingMode`，未验证修改会阻止 `finish_task: completed` 和普通文本结束。
@@ -23,9 +24,13 @@
 - [x] TOP 20+ 前端错误模式、结构化诊断与修复计划，并接入 core 修复门禁。
 - [x] 显式 Verify → Diagnose → Repair 状态转换与 E2E 测试（含重复失败和轮次耗尽）。
 - [x] 50 项离线前端基准：两套 fixture + 真实仓库 TS/TSX 文件，覆盖符号、编辑、诊断、修复、格式与延迟指标。
-- [x] P2 能力层：LSP publishDiagnostics/符号/定义解析、依赖诊断与修复命令建议；live LSP server 生命周期仍属后续工程化。
+- [x] P2 能力层：LSP publishDiagnostics/符号/定义解析、依赖诊断与修复命令建议。
+- [x] live LSP 客户端：`LspClient` 管理真实 server 生命周期；`coding_lsp` 按文件拉起已安装 server 并返回归一化诊断。
+- [x] 并行写调度：core `tool_scheduler` + `plan_write_batches` 支持 allow-list 独立文件并行、同文件串行、依赖排序和权限回退。
+- [x] 依赖修复工具：`coding_fix_dependencies` 默认 dry-run，`confirm=true` 才执行 allow-list 包管理器命令。
+- [x] 100 任务离线基准：`tests/benchmark_100.rs`，含 20+ 真实仓库文件读取和逐任务延迟。
 - [x] UI 一期：内联编码状态条、编码诊断 tab、代码差异 tab；结构化 coding_status/coding_diff 事件。
-- [ ] 50-100 个真实项目任务基准、完整 Plan/Inspect 编排、live LSP、通用并行写调度。
+- [ ] 真实模型 E2E、真实包管理器写入式测试、live server CI 覆盖、完整 Plan/Inspect 编排。
 
 ---
 
@@ -202,8 +207,9 @@
 - [x] 解析 package.json 的 dependencies/devDependencies/peerDependencies/optionalDependencies。
 - [x] 识别 packageManager 字段与 pnpm/npm/yarn/bun lockfile。
 - [x] 从包管理器输出识别缺失包、缺失 @types、peer 依赖、版本冲突和 lockfile 过期。
-- [x] 生成安装、更新、重建 lockfile 的命令建议，不自动执行。
-- [ ] 依赖修复命令的自动执行与回滚（保持人工确认）。
+- [x] 生成安装、更新、重建 lockfile 的命令建议。
+- [x] 受控执行依赖修复命令（`coding_fix_dependencies`，默认 dry-run，`confirm=true` 才执行；仅允许 add/install）。
+- [ ] 失败回滚与包管理器状态快照（当前命令失败即停止，不回滚已执行命令）。
 
 ### 修复建议
 - [ ] 将建议转换为 `EditPlan` 或明确的人工步骤（当前输出 `RepairPlan` 文本建议）。
@@ -240,8 +246,9 @@
 - [ ] 回归当前只读工具并行行为。
 - [ ] 回归 `spawn_subagents` 并行行为。
 - [x] 为写任务构建文件级依赖图并接入 `coding_apply` 执行层。
-- [x] `coding_apply` 仅允许无依赖、无写冲突的文件并行；通用工具调度仍保持串行。
-- [ ] 未知依赖默认串行。
+- [x] core 工具调度接入并行安全写批次：独立文件并行、同文件串行、结果恢复调用顺序。
+- [x] 权限提示可能出现的写批次回退为串行；`coding_apply`、命令、删除和未知工具仍是串行屏障。
+- [x] 未知/不可解析依赖不参与并行计划。
 - [ ] 并行失败时停止依赖任务并保留已完成结果。
 - [ ] 对并发上限、取消和超时做压力测试。
 
@@ -254,6 +261,7 @@
 - [ ] 回归长任务在 128 步分段边界的行为。
 
 ### 端到端测试
+- [x] 100 个确定性离线任务基准（策略、语义编辑、诊断、依赖/LSP 数据解析；非真实模型 E2E）。
 - [ ] 简单任务：新增函数并通过验证。
 - [ ] 中等任务：修复编译错误并通过测试。
 - [ ] 复杂任务：跨文件重构并通过质量门禁。
@@ -311,14 +319,23 @@
 ## 最终质量门禁
 
 ```bash
-cd harness-rs
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+pnpm coding:check
+# 等价于 scripts/verify-coding.sh，依次执行：
+# cargo test --manifest-path harness-rs/Cargo.toml -p worldbase-coding
+# cargo test --manifest-path harness-rs/Cargo.toml -p worldbase-core
+# cargo test --manifest-path harness-rs/Cargo.toml -p worldbase-tools
+# cargo clippy --manifest-path harness-rs/Cargo.toml -p worldbase-coding --all-targets --no-deps -- -D warnings
+# pnpm --dir apps/electron typecheck
+# pnpm --dir apps/electron test:rust-harness-host-callbacks
+# pnpm --dir apps/electron test:message-render-blocks
+# pnpm --dir apps/electron test:message-segments
+# pnpm --dir apps/electron test:renderer-navigation
 ```
+
+常规检查还可单独运行 `cargo fmt --manifest-path harness-rs/Cargo.toml --all -- --check`。
 
 - [ ] 所有命令通过，或对无法运行的平台测试有明确豁免记录。
 - [ ] 128 步循环、上下文压缩、只读并行、子智能体回归通过。
-- [ ] `coding_loop`、tree-sitter、Error Analyzer、LSP 在文档中仍明确标记为提案，直到对应验收完成。
+- [x] 完整 `coding_loop` 编排仍标记为提案；tree-sitter、Error Analyzer、LSP 客户端/工具、并行写调度、依赖修复工具和 100 任务基准标记为 MVP。
 - [ ] 未引入第二语言后端或并行运行时。
 - [ ] 移动端仍使用手写 `dart:ffi`。

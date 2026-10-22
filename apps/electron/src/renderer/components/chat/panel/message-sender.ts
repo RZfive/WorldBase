@@ -62,6 +62,12 @@ import {
   buildOutgoingMessagesWithDocumentWorkspaceContext
 } from '../../workspace/workspace-store'
 import { codingStatusForCancelledRun, type CodingDiffState, type CodingStatus } from '../../../../shared/coding-status-types.js'
+import {
+  clearCodingState,
+  flushCodingStateSave,
+  saveCodingStateNow,
+  scheduleCodingStateSave
+} from './coding-status-storage'
 import type {
   AIExecutionAuthMode,
   BackgroundStreamState,
@@ -211,6 +217,13 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
   })
   const getNoResponseText = () => t('chatUi.noResponse')
 
+  const persistCodingState = (convId: string): void => {
+    scheduleCodingStateSave(convId, {
+      status: codingStatusByConversation.get(convId) ?? null,
+      diff: codingDiffByConversation.get(convId) ?? null
+    })
+  }
+
   function releaseStreamSession (convId: string, sessionId: string): void {
     const cleanup = activeCleanups.get(sessionId)
     if (cleanup) {
@@ -252,6 +265,12 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     const cancelledStatus = codingStatusForCancelledRun(currentStatus)
     if (cancelledStatus && cancelledStatus !== currentStatus) {
       codingStatusByConversation.set(convId, cancelledStatus)
+    }
+    if (cancelledStatus) {
+      saveCodingStateNow(convId, {
+        status: cancelledStatus,
+        diff: codingDiffByConversation.get(convId) ?? null
+      })
     }
 
     if (!streamingConvIds.has(convId)) return
@@ -518,6 +537,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       return created
     }
 
+    clearCodingState(convId)
     codingStatusByConversation.delete(convId)
     codingDiffByConversation.delete(convId)
     streamingConvIds.add(convId)
@@ -537,6 +557,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
           const finishSession = (saveConversation = false) => {
             flushPendingStreamText()
             clearPendingStreamSave()
+            flushCodingStateSave(convId)
             releaseStreamSession(convId, sessionId)
             // No pending panel of this conversation can be answered by the
             // model anymore; keep stale panels from stacking above the input.
@@ -647,8 +668,10 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
               appendGroupPeerMessageBlock(assistantMessage, event.peerMessage)
             } else if (event.type === 'coding_status' && event.codingStatus) {
               codingStatusByConversation.set(convId, event.codingStatus)
+              persistCodingState(convId)
             } else if (event.type === 'coding_diff' && event.codingDiff) {
               codingDiffByConversation.set(convId, event.codingDiff)
+              persistCodingState(convId)
             } else if (event.type === 'tool_start' && event.name) {
               flushPendingStreamText()
               hadToolSinceLastThinking = true
@@ -822,6 +845,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
         }
       }
     } catch (err) {
+      flushCodingStateSave(convId)
       releaseStreamSession(convId, sessionId)
       setAssistantErrorState(assistantMessage, (err as Error).message, getMessageTextContent)
       finalizePendingAuthBlocks(assistantMessage)

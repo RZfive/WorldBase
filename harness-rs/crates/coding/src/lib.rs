@@ -14,6 +14,7 @@ pub mod lsp;
 pub mod lsp_client;
 pub mod model;
 pub mod planner;
+pub mod project_index;
 pub mod repair;
 pub mod smart_editor;
 pub mod state;
@@ -44,6 +45,7 @@ pub use model::{
     VerificationProfile,
 };
 pub use planner::{plan_write_batches, PlannedWrite, WriteBatch};
+pub use project_index::{EditPlanFile, ProjectIndex, ProjectSymbol, SourceFile};
 pub use repair::{plan_repair, RepairPlan, RepairStopReason};
 pub use state::CodingState;
 pub use verification::{detect_profile, select_minimal_profile};

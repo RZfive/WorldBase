@@ -2497,6 +2497,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_only_recon_batch_enters_inspection_from_plan_and_repair() {
+        fn calls(names: &[(&str, &str)]) -> Vec<ScheduledCall> {
+            names
+                .iter()
+                .enumerate()
+                .map(|(index, (call_id, name))| ScheduledCall {
+                    index,
+                    call_id: (*call_id).into(),
+                    name: (*name).into(),
+                    input: serde_json::json!({}),
+                })
+                .collect()
+        }
+
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        assert_eq!(state.phase, CodingPhase::Plan);
+
+        let reads = calls(&[("read-1", "read_file"), ("diag-1", "coding_diagnose")]);
+        assert!(begin_coding_inspection_for_group(&mut state, &reads));
+        assert_eq!(state.phase, CodingPhase::Inspect);
+        assert!(
+            !begin_coding_inspection_for_group(&mut state, &reads),
+            "a second recon batch does not re-enter inspection"
+        );
+
+        let write = calls(&[("write-1", "write_file")]);
+        assert!(!begin_coding_inspection_for_group(&mut state, &write));
+        state.record_mutation([std::path::PathBuf::from("src/main.ts")]);
+        assert_eq!(state.phase, CodingPhase::Edit);
+        assert!(!begin_coding_inspection_for_group(&mut state, &reads));
+
+        let failure = coding_verify_execution("verify-1", false);
+        let mut signatures = Vec::new();
+        apply_coding_tool_outcome(
+            &mut state,
+            "coding_verify",
+            &json!({ "project_id": "project-1" }),
+            &failure,
+            &mut signatures,
+        )
+        .expect("coding_verify is handled");
+        assert_eq!(state.phase, CodingPhase::Repair);
+        assert!(
+            begin_coding_inspection_for_group(&mut state, &reads),
+            "repair may begin a fresh reconnaissance pass"
+        );
+        assert_eq!(state.phase, CodingPhase::Inspect);
+    }
+
     #[tokio::test]
     async fn failed_write_keeps_every_result_and_event_in_call_order() {
         let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
@@ -4375,6 +4429,858 @@ mod tests {
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
+    struct ScriptedVerifyTool {
+        results: std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedVerifyTool {
+        fn new(results: Vec<serde_json::Value>) -> Self {
+            Self {
+                results: std::sync::Mutex::new(results.into()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl worldbase_tools::Tool for ScriptedVerifyTool {
+        fn name(&self) -> &str {
+            "coding_verify"
+        }
+
+        fn description(&self) -> &str {
+            "Return scripted coding verification evidence for loop tests."
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "project_id": { "type": "string" } }
+            })
+        }
+
+        fn domain(&self) -> &str {
+            "desktop"
+        }
+
+        fn permission(&self) -> &str {
+            "allow"
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _services: &worldbase_tools::ToolServices,
+        ) -> Result<serde_json::Value> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("scripted verification result exhausted"))
+        }
+    }
+
+    fn protocol_test_hub_with_verify(
+        turns: Vec<LlmMessage>,
+        results: Vec<serde_json::Value>,
+    ) -> (
+        Arc<Hub>,
+        Arc<ProtocolProvider>,
+        Arc<ScriptedVerifyTool>,
+        std::path::PathBuf,
+        String,
+    ) {
+        let (mut hub, provider, workspace, conversation_id) = protocol_test_hub(turns);
+        let verify = Arc::new(ScriptedVerifyTool::new(results));
+        {
+            let hub_mut = Arc::get_mut(&mut hub).expect("test hub must be uniquely owned");
+            hub_mut.tools.retain(|tool| tool.name() != "coding_verify");
+            hub_mut.tools.push(verify.clone());
+        }
+        (hub, provider, verify, workspace, conversation_id)
+    }
+
+    fn coding_verify_passed_evidence() -> serde_json::Value {
+        serde_json::json!({
+            "passed": true,
+            "profile": { "projectKind": "frontendNode", "commands": [] },
+            "outcomes": [],
+            "diagnostics": []
+        })
+    }
+
+    fn coding_verify_failed_evidence(message: &str) -> serde_json::Value {
+        serde_json::json!({
+            "passed": false,
+            "profile": { "projectKind": "frontendNode", "commands": [] },
+            "outcomes": [{
+                "kind": "typecheck",
+                "program": "scripted-verify",
+                "args": [],
+                "required": true,
+                "description": "Scripted typecheck",
+                "exitCode": 1,
+                "stdout": "",
+                "stderr": message,
+                "timedOut": false,
+                "cancelled": false,
+                "durationMs": 1
+            }],
+            "diagnostics": []
+        })
+    }
+
+    fn coding_verify_timeout_evidence() -> serde_json::Value {
+        serde_json::json!({
+            "passed": false,
+            "timedOut": true,
+            "profile": { "projectKind": "frontendNode", "commands": [] },
+            "outcomes": [],
+            "diagnostics": []
+        })
+    }
+
+    fn tool_result_order(events: &[EventKind]) -> Vec<(String, bool)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                EventKind::ToolResult {
+                    call_id, is_error, ..
+                } => Some((call_id.clone(), *is_error)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn coding_gate_notices(events: &[EventKind]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                EventKind::Notice { text } if text.contains("编码验证") => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn scripted_coding_loop_inspects_edits_verifies_and_completes() {
+        let (hub, provider, verify, workspace, conversation_id) = protocol_test_hub_with_verify(
+            vec![
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "read-1",
+                        "read_file",
+                        serde_json::json!({ "path": "notes.txt" }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "write-1",
+                        "write_file",
+                        serde_json::json!({
+                            "path": "src/main.ts",
+                            "content": "export const value = 1;\n"
+                        }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "verify-1",
+                        "coding_verify",
+                        serde_json::json!({ "project_id": "fixture" }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "finish-1",
+                        FINISH_TASK_TOOL_NAME,
+                        serde_json::json!({
+                            "task_summary": "Implemented and verified the change.",
+                            "status": "completed"
+                        }),
+                    )],
+                ),
+            ],
+            vec![coding_verify_passed_evidence()],
+        );
+
+        let events = run_protocol_chat_with_context(
+            hub.clone(),
+            &conversation_id,
+            coding_e2e_context(&workspace),
+        )
+        .await;
+
+        assert_eq!(verify.calls(), 1);
+        assert_eq!(provider.requests().len(), 4);
+        assert_eq!(
+            tool_result_order(&events),
+            vec![
+                ("read-1".to_string(), false),
+                ("write-1".to_string(), false),
+                ("verify-1".to_string(), false),
+            ]
+        );
+        assert!(events.iter().any(|event| {
+            matches!(event, EventKind::Notice { text } if text == "编码验证通过。")
+        }));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EventKind::Error { .. })));
+        assert!(workspace.join("src/main.ts").is_file());
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scripted_coding_loop_repairs_a_failed_verification_then_completes() {
+        let (hub, provider, verify, workspace, conversation_id) = protocol_test_hub_with_verify(
+            vec![
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "write-1",
+                        "write_file",
+                        serde_json::json!({
+                            "path": "src/main.ts",
+                            "content": "export const value = missingValue;\n"
+                        }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "verify-1",
+                        "coding_verify",
+                        serde_json::json!({ "project_id": "fixture" }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "read-1",
+                        "read_file",
+                        serde_json::json!({ "path": "src/main.ts" }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "repair-1",
+                        "write_file",
+                        serde_json::json!({
+                            "path": "src/main.ts",
+                            "content": "export const value = 1;\n"
+                        }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "verify-2",
+                        "coding_verify",
+                        serde_json::json!({ "project_id": "fixture" }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "finish-1",
+                        FINISH_TASK_TOOL_NAME,
+                        serde_json::json!({
+                            "task_summary": "Repaired and verified the change.",
+                            "status": "completed"
+                        }),
+                    )],
+                ),
+            ],
+            vec![
+                coding_verify_failed_evidence(
+                    "src/main.ts(12,7): error TS2304: Cannot find name 'missingValue'.",
+                ),
+                coding_verify_passed_evidence(),
+            ],
+        );
+
+        let events = run_protocol_chat_with_context(
+            hub.clone(),
+            &conversation_id,
+            coding_e2e_context(&workspace),
+        )
+        .await;
+
+        assert_eq!(verify.calls(), 2);
+        assert_eq!(provider.requests().len(), 6);
+        let notices = coding_gate_notices(&events);
+        assert!(notices.iter().any(|text| text.contains("编码验证失败")));
+        assert!(notices.iter().any(|text| text == "编码验证通过。"));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EventKind::Error { .. })));
+        assert!(workspace.join("src/main.ts").is_file());
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn repeated_verification_failure_blocks_completed_finish() {
+        let failure = "src/main.ts(12,7): error TS2304: Cannot find name 'missingValue'.";
+        let (hub, provider, verify, workspace, conversation_id) = protocol_test_hub_with_verify(
+            vec![
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "write-1",
+                        "write_file",
+                        serde_json::json!({
+                            "path": "src/main.ts",
+                            "content": "export const value = missingValue;\n"
+                        }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "verify-1",
+                        "coding_verify",
+                        serde_json::json!({ "project_id": "fixture" }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "verify-2",
+                        "coding_verify",
+                        serde_json::json!({ "project_id": "fixture" }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "finish-1",
+                        FINISH_TASK_TOOL_NAME,
+                        serde_json::json!({
+                            "task_summary": "Completed despite repeated failure.",
+                            "status": "completed"
+                        }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "finish-2",
+                        FINISH_TASK_TOOL_NAME,
+                        serde_json::json!({
+                            "task_summary": "Blocked on the repeated verification failure.",
+                            "status": "blocked"
+                        }),
+                    )],
+                ),
+            ],
+            vec![
+                coding_verify_failed_evidence(failure),
+                coding_verify_failed_evidence(failure),
+            ],
+        );
+
+        let events = run_protocol_chat_with_context(
+            hub.clone(),
+            &conversation_id,
+            coding_e2e_context(&workspace),
+        )
+        .await;
+
+        assert_eq!(verify.calls(), 2);
+        assert_eq!(provider.requests().len(), 5);
+        let notices = coding_gate_notices(&events);
+        assert!(notices.iter().any(|text| text.contains("同一错误重复出现")));
+        assert!(notices.iter().any(|text| text.contains("编码验证门禁")));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EventKind::Error { .. })));
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn exhausted_repair_rounds_block_the_coding_run() {
+        let messages = [
+            "src/main.ts(12,7): error TS2304: Cannot find name 'missingValue'.",
+            "src/main.ts(13,7): error TS2304: Cannot find name 'secondValue'.",
+            "src/main.ts(14,7): error TS2304: Cannot find name 'thirdValue'.",
+            "src/main.ts(15,7): error TS2304: Cannot find name 'fourthValue'.",
+        ];
+        let mut turns = vec![protocol_assistant(
+            "",
+            vec![protocol_tool_call(
+                "write-1",
+                "write_file",
+                serde_json::json!({
+                    "path": "src/main.ts",
+                    "content": "export const value = missingValue;\n"
+                }),
+            )],
+        )];
+        for index in 0..messages.len() {
+            let call_id = format!("verify-{index}");
+            turns.push(protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    &call_id,
+                    "coding_verify",
+                    serde_json::json!({ "project_id": "fixture" }),
+                )],
+            ));
+        }
+        turns.push(protocol_assistant(
+            "",
+            vec![protocol_tool_call(
+                "finish-1",
+                FINISH_TASK_TOOL_NAME,
+                serde_json::json!({
+                    "task_summary": "Blocked after exhausting repair rounds.",
+                    "status": "blocked"
+                }),
+            )],
+        ));
+        let results = messages
+            .iter()
+            .map(|message| coding_verify_failed_evidence(message))
+            .collect();
+
+        let (hub, provider, verify, workspace, conversation_id) =
+            protocol_test_hub_with_verify(turns, results);
+
+        let events = run_protocol_chat_with_context(
+            hub.clone(),
+            &conversation_id,
+            coding_e2e_context(&workspace),
+        )
+        .await;
+
+        assert_eq!(verify.calls(), messages.len());
+        assert_eq!(provider.requests().len(), messages.len() + 2);
+        let notices = coding_gate_notices(&events);
+        assert!(notices.iter().any(|text| text.contains("修复轮次已耗尽")));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EventKind::Error { .. })));
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn verification_timeout_blocks_completed_finish() {
+        let (hub, provider, verify, workspace, conversation_id) = protocol_test_hub_with_verify(
+            vec![
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "write-1",
+                        "write_file",
+                        serde_json::json!({
+                            "path": "src/main.ts",
+                            "content": "export const value = 1;\n"
+                        }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "verify-1",
+                        "coding_verify",
+                        serde_json::json!({ "project_id": "fixture" }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "finish-1",
+                        FINISH_TASK_TOOL_NAME,
+                        serde_json::json!({
+                            "task_summary": "Completed after a timeout.",
+                            "status": "completed"
+                        }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "finish-2",
+                        FINISH_TASK_TOOL_NAME,
+                        serde_json::json!({
+                            "task_summary": "Blocked because verification timed out.",
+                            "status": "blocked"
+                        }),
+                    )],
+                ),
+            ],
+            vec![coding_verify_timeout_evidence()],
+        );
+
+        let events = run_protocol_chat_with_context(
+            hub.clone(),
+            &conversation_id,
+            coding_e2e_context(&workspace),
+        )
+        .await;
+
+        assert_eq!(verify.calls(), 1);
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[3].messages.iter().any(|message| {
+            let text = message.text_view();
+            text.starts_with(CODING_VERIFICATION_GATE_PREFIX) && text.contains("Cancelled")
+        }));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EventKind::Error { .. })));
+        assert!(hub.pending_host_requests.lock().unwrap().is_empty());
+        assert!(hub.pending_permissions.lock().unwrap().is_empty());
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    struct BlockingAfterToolProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        blocked: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for BlockingAfterToolProvider {
+        fn name(&self) -> &str {
+            "blocking-after-tool-test"
+        }
+
+        fn model(&self) -> &str {
+            "blocking-after-tool-test-model"
+        }
+
+        async fn chat_stream(
+            &self,
+            _system: Option<&str>,
+            _messages: Vec<LlmMessage>,
+            _tools: Vec<LlmTool>,
+            _max_tokens: u32,
+            _options: ChatOptions,
+        ) -> Result<ChunkStream> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                return Ok(Box::pin(futures::stream::iter([Ok(
+                    StreamChunk::Completed {
+                        stop_reason: "tool_use".into(),
+                        assistant: protocol_assistant(
+                            "",
+                            vec![protocol_tool_call(
+                                "write-before-cancel",
+                                "write_file",
+                                serde_json::json!({
+                                    "path": "cancel-mid-run.txt",
+                                    "content": "written before cancellation"
+                                }),
+                            )],
+                        ),
+                        usage: TokenUsage::default(),
+                    },
+                )])));
+            }
+            self.blocked.notify_one();
+            std::future::pending::<Result<ChunkStream>>().await
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_coding_run_mid_stream_leaves_no_hanging_tasks() {
+        let (hub, _provider, workspace, conversation_id) = protocol_test_hub(vec![]);
+        let blocked = Arc::new(tokio::sync::Notify::new());
+        hub.set_custom_provider(Arc::new(BlockingAfterToolProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            blocked: blocked.clone(),
+        }));
+        let mut receiver = hub.event_tx.subscribe();
+        let run = start_chat(
+            hub.clone(),
+            conversation_id,
+            "cancel this coding run".into(),
+            vec![],
+            Capabilities::desktop(),
+            false,
+            None,
+            None,
+            None,
+            coding_e2e_context(&workspace),
+        )
+        .unwrap();
+        let stream_id = run.stream_id;
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let frame = receiver.recv().await.unwrap();
+                if frame.stream_id != stream_id {
+                    continue;
+                }
+                if matches!(
+                    frame.kind,
+                    EventKind::ToolResult { ref name, .. } if name == "write_file"
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("write tool result was not published");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), blocked.notified())
+            .await
+            .expect("provider did not stall after the first tool batch");
+
+        {
+            let runs = hub.runs.lock().unwrap();
+            runs.get(&stream_id).expect("run handle").abort.cancel();
+        }
+
+        let stop_reason = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let frame = receiver.recv().await.unwrap();
+                if frame.stream_id != stream_id {
+                    continue;
+                }
+                if let EventKind::Done { stop_reason } = frame.kind {
+                    break stop_reason;
+                }
+            }
+        })
+        .await
+        .expect("cancelled coding run did not emit a terminal event");
+        assert_eq!(stop_reason, "aborted");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while hub.runs.lock().unwrap().contains_key(&stream_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled coding run left a hanging task");
+        assert!(hub.pending_host_requests.lock().unwrap().is_empty());
+        assert!(hub.pending_permissions.lock().unwrap().is_empty());
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn coding_mode_without_mutations_can_finish() {
+        let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "read-1",
+                    "read_file",
+                    serde_json::json!({ "path": "notes.txt" }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-1",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({
+                        "task_summary": "Inspected the workspace without editing.",
+                        "status": "completed"
+                    }),
+                )],
+            ),
+        ]);
+
+        let events = run_protocol_chat_with_context(
+            hub.clone(),
+            &conversation_id,
+            coding_e2e_context(&workspace),
+        )
+        .await;
+
+        assert_eq!(provider.requests().len(), 2);
+        assert_eq!(
+            tool_result_order(&events),
+            vec![("read-1".to_string(), false)]
+        );
+        assert!(coding_gate_notices(&events).is_empty());
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EventKind::Error { .. })));
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_coding_mode_keeps_the_existing_tool_loop() {
+        let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "read-1",
+                    "read_file",
+                    serde_json::json!({ "path": "notes.txt" }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-1",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({
+                        "task_summary": "Read the notes.",
+                        "status": "completed"
+                    }),
+                )],
+            ),
+        ]);
+
+        let events = run_protocol_chat(hub.clone(), &conversation_id).await;
+
+        assert_eq!(provider.requests().len(), 2);
+        assert_eq!(
+            tool_result_order(&events),
+            vec![("read-1".to_string(), false)]
+        );
+        assert!(coding_gate_notices(&events).is_empty());
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EventKind::Error { .. })));
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn parallel_write_failure_keeps_order_and_blocks_until_verified() {
+        let (hub, provider, verify, workspace, conversation_id) = protocol_test_hub_with_verify(
+            vec![
+                protocol_assistant(
+                    "",
+                    vec![
+                        protocol_tool_call(
+                            "write-a",
+                            "write_file",
+                            serde_json::json!({ "path": "parallel-a.txt", "content": "a" }),
+                        ),
+                        protocol_tool_call(
+                            "write-fail",
+                            "write_file",
+                            serde_json::json!({ "path": "../escape.txt", "content": "bad" }),
+                        ),
+                        protocol_tool_call(
+                            "write-z",
+                            "write_file",
+                            serde_json::json!({ "path": "parallel-z.txt", "content": "z" }),
+                        ),
+                    ],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "finish-1",
+                        FINISH_TASK_TOOL_NAME,
+                        serde_json::json!({
+                            "task_summary": "Completed without verification.",
+                            "status": "completed"
+                        }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "verify-1",
+                        "coding_verify",
+                        serde_json::json!({ "project_id": "fixture" }),
+                    )],
+                ),
+                protocol_assistant(
+                    "",
+                    vec![protocol_tool_call(
+                        "finish-2",
+                        FINISH_TASK_TOOL_NAME,
+                        serde_json::json!({
+                            "task_summary": "Verified the parallel writes.",
+                            "status": "completed"
+                        }),
+                    )],
+                ),
+            ],
+            vec![coding_verify_passed_evidence()],
+        );
+
+        let events = run_protocol_chat_with_context(
+            hub.clone(),
+            &conversation_id,
+            coding_e2e_context(&workspace),
+        )
+        .await;
+
+        assert_eq!(verify.calls(), 1);
+        assert_eq!(provider.requests().len(), 4);
+        assert_eq!(
+            tool_result_order(&events),
+            vec![
+                ("write-a".to_string(), false),
+                ("write-fail".to_string(), true),
+                ("write-z".to_string(), false),
+                ("verify-1".to_string(), false),
+            ]
+        );
+        let notices = coding_gate_notices(&events);
+        assert!(notices.iter().any(|text| text.contains("编码验证门禁")));
+        assert!(notices.iter().any(|text| text == "编码验证通过。"));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, EventKind::Done { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, EventKind::Error { .. })));
+        assert!(workspace.join("parallel-a.txt").is_file());
+        assert!(workspace.join("parallel-z.txt").is_file());
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
     #[tokio::test]
     async fn plain_text_after_a_tool_receives_exactly_two_finish_nudges() {
         let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
@@ -5514,6 +6420,23 @@ fn concurrency_safe_tool(name: &str) -> bool {
             | "web_search"
             | "fetch_webpage"
     )
+}
+
+/// Tools that gather evidence without mutating files or executing commands.
+/// This extends the parallel read-only allow-list with native diagnosis, which
+/// core runs serially but still treats as reconnaissance for the coding loop.
+fn coding_recon_tool(name: &str) -> bool {
+    concurrency_safe_tool(name) || name == "coding_diagnose"
+}
+
+/// Move an active coding run from Plan (or from Repair after a failed
+/// verification) into Inspect for a read-only reconnaissance batch. Batches
+/// that include any mutation, verification, or command call leave the phase
+/// untouched, and a run that already left Plan/Repair is never moved back.
+fn begin_coding_inspection_for_group(state: &mut CodingState, group: &[ScheduledCall]) -> bool {
+    let read_only_batch =
+        !group.is_empty() && group.iter().all(|call| coding_recon_tool(&call.name));
+    read_only_batch && state.begin_inspection()
 }
 
 /// Schedule one assistant turn. Read-only calls keep their existing parallel
@@ -6844,6 +7767,9 @@ async fn run_chat_inner(
                 break;
             }
             group.sort_by_key(|call| call.index);
+            if let Some(state) = coding_state.as_mut() {
+                begin_coding_inspection_for_group(state, &group);
+            }
             for call in &group {
                 publish(
                     &hub,

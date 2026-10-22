@@ -7,11 +7,14 @@ import MessageList from './components/chat/messages/MessageList.vue'
 import ChatInput from './components/chat/layout/ChatInput.vue'
 import PinnedTodoPanel from './components/chat/layout/PinnedTodoPanel.vue'
 import CodingStatusPanel from './components/chat/layout/CodingStatusPanel.vue'
+import CodingStatusTab from './components/workspace/tabs/CodingStatusTab.vue'
+import CodingDiffTab from './components/workspace/tabs/CodingDiffTab.vue'
 import AuthPermissionPanel from './components/chat/layout/AuthPermissionPanel.vue'
 import AskUserPanel from './components/chat/layout/AskUserPanel.vue'
 import { createAttentionAccordion, type AttentionPanelId } from './components/chat/panel/attention-accordion'
 import type { ChatMessage } from './components/chat/types'
-import type { CodingStatus } from '../shared/coding-status-types.js'
+import type { CodingDiffState, CodingStatus } from '../shared/coding-status-types.js'
+import { sharedChatPanelState } from './components/chat/panel/shared-state'
 import type { AgentSidebarItem, ConversationSidebarItem, GroupSidebarItem, LongTermGoalSidebarItem } from './components/chat/layout/ConversationSidebar.types'
 
 document.documentElement.dataset.theme = 'light'
@@ -66,6 +69,7 @@ const codingStatus: CodingStatus = {
     timedOut: false,
     cancelled: false,
     durationMs: 8420,
+    stdout: '> tsc --noEmit\n',
     stderr: "src/components/Table.vue(42,9): error TS2339: Property 'visibleRows' does not exist on type 'TableState'."
   }],
   diagnostics: [
@@ -77,6 +81,31 @@ const codingStatus: CodingStatus = {
   repairInstructions: ['Add visibleRows to TableState.', "Declare or import rowHeight in virtual.ts."],
   stopReason: 'verificationFailed',
   summary: '2 errors, 1 warning',
+  updatedAt: Date.now()
+}
+
+const codingDiff: CodingDiffState = {
+  files: [{
+    filePath: 'src/components/Table.vue',
+    operationCount: 2,
+    changes: [{
+      operation: 'edit',
+      before: "const rows = computed(() => props.rows)\nconst rendered = rows.value",
+      after: "const rows = computed(() => props.rows)\nconst visibleRows = computed(() => rows.value.slice(start.value, end.value))"
+    }, {
+      operation: 'edit',
+      before: 'watch(() => props.sortKey, resetScroll)',
+      after: 'watch(() => [props.sortKey, props.sortDirection], resetScroll)'
+    }]
+  }, {
+    filePath: 'src/lib/virtual.ts',
+    operationCount: 1,
+    changes: [{
+      operation: 'edit',
+      before: 'const ROW_HEIGHT = 32',
+      after: 'const ROW_HEIGHT = 36'
+    }]
+  }],
   updatedAt: Date.now()
 }
 
@@ -111,6 +140,14 @@ const App = defineComponent({
     const codingBlocked = codingParam === 'blocked' || codingParam === 'failed'
     const codingLoading = coding && !codingBlocked
     const previewCodingStatus = codingBlocked ? blockedCodingStatus : codingStatus
+    const previewConversationId = 'c1'
+    if (coding) {
+      sharedChatPanelState.codingStatusByConversation.set(previewConversationId, previewCodingStatus)
+      sharedChatPanelState.codingDiffByConversation.set(previewConversationId, codingDiff)
+    }
+    // ?coding=1 exposes the real diagnostics tab; switch to the diff tab to
+    // exercise the new per-file open/copy actions.
+    const workspacePane = ref<'status' | 'diff'>('status')
     // ?new=1 renders a brand-new conversation (interactive agent picker in
     // the header); default is a bound conversation (subdued agent badge).
     const isNew = params.get('new') === '1'
@@ -148,12 +185,23 @@ const App = defineComponent({
           modelValue:text.value,'onUpdate:modelValue':(v:string)=>text.value=v,isLoading,pendingAuthCount:auth?1:0,pendingImages:[],pendingFiles:[],isUploadingFiles:false,uploadFeedback:'',workspaceVisible:false,authMode:'strict',planModeActive:false,computerUseEnabled:false,computerUsePermissionGranted:true,availableSkills:[{id:'s1',name:'网页开发'},{id:'s2',name:'代码审查'}],activeSkillIds:new Set(['s1']),showSkillPicker:false,isGroupConversation:false,onSend:()=>{},onStop:()=>{},onAddAttachments:()=>{},onRemoveImage:()=>{},onRemoveFile:()=>{},onToggleWorkspace:()=>{},'onUpdate:authMode':()=>{},onTogglePlanMode:()=>{},onToggleComputerUse:()=>{},onToggleSkillPicker:()=>{},onSelectAllSkills:()=>{},onClearSkills:()=>{},onToggleSkill:()=>{}
         })
         ])
-      ])
+      ]),
+      ...(coding ? [h('aside',{class:'preview-workspace'},[
+        h('div',{class:'preview-workspace-tabs'},[
+          h('button',{type:'button',class:{active:workspacePane.value==='status'},onClick:()=>{workspacePane.value='status'}},'Diagnostics'),
+          h('button',{type:'button',class:{active:workspacePane.value==='diff'},onClick:()=>{workspacePane.value='diff'}},'Diff')
+        ]),
+        h('div',{class:'preview-workspace-body'},[
+          workspacePane.value==='status'
+            ? h(CodingStatusTab,{conversationId:previewConversationId})
+            : h(CodingDiffTab,{conversationId:previewConversationId})
+        ])
+      ])] : [])
     ])
   }
 })
 const app=createApp(App); app.use(i18n); app.mount('#app')
 
 const style=document.createElement('style'); style.textContent=`
-html,body,#app{height:100%;overflow:hidden}.preview-shell{display:flex;height:100%;background:var(--app-main-surface)}.preview-shell>.conv-sidebar{width:224px;flex:0 0 224px}.preview-chat{--chat-message-gutter:clamp(24px,4vw,64px);--chat-message-track-max:980px;--chat-user-message-max:680px;--chat-user-bubble-max:540px;--chat-event-card-max:100%;--chat-input-gutter:16px;position:relative;display:flex;flex:1;min-width:640px;min-height:0;flex-direction:column;overflow:hidden;background:var(--app-chat-canvas)}.preview-dock{position:absolute;left:0;right:0;bottom:0;z-index:7;display:flex;flex-direction:column;width:100%;pointer-events:none}.preview-attention{position:relative;width:calc(100% - 32px);max-height:min(42vh,360px);overflow-y:auto;margin:0 auto 8px;padding:0;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:none}.preview-attention>*{flex:0 0 auto;width:100%;pointer-events:auto}
+html,body,#app{height:100%;overflow:hidden}.preview-shell{display:flex;height:100%;background:var(--app-main-surface)}.preview-shell>.conv-sidebar{width:224px;flex:0 0 224px}.preview-chat{--chat-message-gutter:clamp(24px,4vw,64px);--chat-message-track-max:980px;--chat-user-message-max:680px;--chat-user-bubble-max:540px;--chat-event-card-max:100%;--chat-input-gutter:16px;position:relative;display:flex;flex:1;min-width:640px;min-height:0;flex-direction:column;overflow:hidden;background:var(--app-chat-canvas)}.preview-dock{position:absolute;left:0;right:0;bottom:0;z-index:7;display:flex;flex-direction:column;width:100%;pointer-events:none}.preview-attention{position:relative;width:calc(100% - 32px);max-height:min(42vh,360px);overflow-y:auto;margin:0 auto 8px;padding:0;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:none}.preview-attention>*{flex:0 0 auto;width:100%;pointer-events:auto}.preview-workspace{display:flex;flex:0 0 min(460px,42vw);min-width:0;flex-direction:column;border-left:1px solid var(--app-border);background:var(--app-panel)}.preview-workspace-tabs{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--app-border)}.preview-workspace-tabs button{appearance:none;border:1px solid var(--app-border);border-radius:999px;background:var(--app-panel-muted);color:var(--app-text-muted);padding:3px 9px;font:inherit;font-size:.7rem;cursor:pointer}.preview-workspace-tabs button.active{border-color:var(--app-accent);color:var(--app-accent)}.preview-workspace-tabs button:focus-visible{outline:2px solid var(--app-accent);outline-offset:1px}.preview-workspace-body{flex:1;min-width:0;min-height:0;overflow:hidden}
 `; document.head.appendChild(style)

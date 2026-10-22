@@ -173,6 +173,7 @@ function togglePanel(): void {
         class="coding-status-strip"
         type="button"
         :aria-expanded="isExpanded"
+        :aria-controls="isExpanded ? 'coding-status-body' : undefined"
         @click="togglePanel"
       >
         <span
@@ -226,7 +227,7 @@ function togglePanel(): void {
         </span>
       </button>
 
-      <div v-if="isExpanded" class="coding-status-body">
+      <div v-if="isExpanded" id="coding-status-body" class="coding-status-body">
         <div class="coding-status-command-row">
           <span class="coding-status-label">{{ $t('chatUi.codingCommands') }}</span>
           <span v-if="latestCommand" class="coding-status-command-line">

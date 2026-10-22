@@ -67,6 +67,20 @@ impl CodingState {
             .saturating_sub(self.repair_round)
     }
 
+    /// Enter the inspection phase for a read-only reconnaissance batch.
+    ///
+    /// Inspection follows planning and can also begin a fresh reconnaissance
+    /// pass from `Repair` after a failed verification. Any other phase,
+    /// including the terminal phases, rejects the transition.
+    pub fn begin_inspection(&mut self) -> bool {
+        if !matches!(self.phase, CodingPhase::Plan | CodingPhase::Repair) {
+            return false;
+        }
+
+        self.phase = CodingPhase::Inspect;
+        true
+    }
+
     /// Record one mutation operation. Files remain in `dirty_files` for run
     /// reporting, while repeated edits still increase the pending-mutation
     /// counter so they cannot hide behind an earlier dirty-file entry.

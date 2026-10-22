@@ -6,6 +6,16 @@ import test from 'node:test'
 import './register-ts-hooks.mjs'
 import { RustHarnessEngine, codingEventsForToolResult, planModeExitedAfterNativeResult, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
 import { codingStatusForCancelledRun } from '../src/shared/coding-status-types.ts'
+import {
+  CODING_STATE_STORAGE_PREFIX,
+  MAX_CODING_DIFF_BYTES,
+  clearCodingState,
+  codingStateStorageKey,
+  decodeCodingState,
+  encodeCodingState,
+  loadCodingState,
+  saveCodingStateNow
+} from '../src/renderer/components/chat/panel/coding-status-storage.ts'
 import { ElectronToolRegistry } from '../src/main/ai-harness/electron-tool-registry.ts'
 import { MCPService } from '../src/main/mcp/mcp-service.ts'
 import { RustHarnessClient } from '../electron/main-process/rust-harness-client.ts'
@@ -1957,4 +1967,122 @@ test('cancelled coding status keeps completed and blocked runs terminal', () => 
   const blocked = { ...active, phase: 'blocked', stopReason: 'maxRepairRounds' }
   assert.equal(codingStatusForCancelledRun(blocked), blocked)
   assert.equal(codingStatusForCancelledRun(null), null)
+})
+
+test('coding persistence serializes status and diff with legacy tolerance', () => {
+  const status = {
+    phase: 'repair',
+    repairRound: 1,
+    maxRepairRounds: 3,
+    verificationAttempts: 2,
+    changedFiles: ['src/main.ts'],
+    commands: [{
+      kind: 'typecheck',
+      program: 'pnpm',
+      args: ['run', 'typecheck'],
+      exitCode: 2,
+      timedOut: false,
+      cancelled: false,
+      durationMs: 1200,
+      stderr: 'TS2304'
+    }],
+    diagnostics: [{
+      severity: 'error',
+      message: "Cannot find name 'x'.",
+      code: 'TS2304',
+      file: 'src/main.ts',
+      line: 12,
+      column: 7,
+      confidence: 0.95
+    }],
+    dependencyIssues: [],
+    repairInstructions: ['Import x.'],
+    stopReason: 'verificationFailed',
+    updatedAt: 10
+  }
+  const diff = {
+    files: [{
+      filePath: 'src/main.ts',
+      operationCount: 1,
+      changes: [{ operation: 'edit', before: 'const a = 1', after: 'const a = 2' }]
+    }],
+    updatedAt: 11
+  }
+
+  const raw = encodeCodingState({ status, diff })
+  assert.ok(raw)
+  const decoded = decodeCodingState(raw)
+  assert.deepEqual(decoded.status, status)
+  assert.deepEqual(decoded.diff, diff)
+
+  const legacy = decodeCodingState(JSON.stringify(status))
+  assert.equal(legacy.status.phase, 'repair')
+  assert.equal(legacy.diff, null)
+
+  assert.deepEqual(decodeCodingState('{not json'), { status: null, diff: null })
+  assert.deepEqual(decodeCodingState(JSON.stringify({ phase: 'unknown' })), { status: null, diff: null })
+})
+
+test('coding persistence caps oversized diffs and keeps the newest files', () => {
+  const diff = {
+    files: [
+      {
+        filePath: 'src/old.ts',
+        operationCount: 1,
+        changes: [{ operation: 'edit', before: 'x'.repeat(180000), after: 'y'.repeat(180000) }]
+      },
+      {
+        filePath: 'src/new.ts',
+        operationCount: 1,
+        changes: [{ operation: 'edit', before: 'a', after: 'b' }]
+      }
+    ],
+    updatedAt: 12
+  }
+
+  const raw = encodeCodingState({ status: null, diff })
+  assert.ok(raw)
+  const decoded = decodeCodingState(raw)
+  assert.ok(decoded.diff)
+  assert.equal(decoded.diff.files.length, 1)
+  assert.equal(decoded.diff.files[0].filePath, 'src/new.ts')
+  assert.ok(Buffer.byteLength(JSON.stringify(decoded.diff), 'utf8') <= MAX_CODING_DIFF_BYTES)
+})
+
+test('coding persistence keys localStorage by conversation and clears it', () => {
+  const data = new Map()
+  const previousWindow = globalThis.window
+  globalThis.window = {
+    localStorage: {
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => { data.set(key, String(value)) },
+      removeItem: (key) => { data.delete(key) }
+    }
+  }
+
+  try {
+    const status = {
+      phase: 'complete',
+      repairRound: 0,
+      verificationAttempts: 1,
+      changedFiles: [],
+      commands: [],
+      diagnostics: [],
+      dependencyIssues: [],
+      repairInstructions: [],
+      stopReason: 'verificationPassed',
+      updatedAt: 20
+    }
+    saveCodingStateNow('conv-a', { status, diff: null })
+    assert.ok(data.has(codingStateStorageKey('conv-a')))
+    assert.ok(data.has(`${CODING_STATE_STORAGE_PREFIX}conv-a`))
+    assert.equal(loadCodingState('conv-a').status.phase, 'complete')
+    assert.equal(loadCodingState('conv-b').status, null)
+
+    clearCodingState('conv-a')
+    assert.equal(loadCodingState('conv-a').status, null)
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
 })

@@ -1,0 +1,49 @@
+name: Coding CI
+
+on:
+  push:
+    paths:
+      - 'harness-rs/**'
+      - 'apps/electron/**'
+      - 'scripts/verify-coding.sh'
+      - 'package.json'
+  pull_request:
+    paths:
+      - 'harness-rs/**'
+      - 'apps/electron/**'
+      - 'scripts/verify-coding.sh'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coding-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/electron/pnpm-lock.yaml
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --no-self-update
+          rustup default stable
+
+      - name: Install dependencies
+        run: pnpm --dir apps/electron install --frozen-lockfile
+
+      - name: Run coding gate
+        run: pnpm coding:check

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   CODING_CONFIDENCE_SUGGESTION_THRESHOLD,
@@ -12,6 +12,7 @@ import {
   type CodingStatus
 } from '../../../../shared/coding-status-types.js'
 import { sharedChatPanelState } from '../../chat/panel/shared-state'
+import { ensureWorkspaceTab, workspaceStore } from '../workspace-store'
 
 const props = defineProps<{
   conversationId: string
@@ -21,6 +22,10 @@ const { t } = useI18n()
 
 const status = computed<CodingStatus | null>(() => (
   sharedChatPanelState.codingStatusByConversation.get(props.conversationId) || null
+))
+
+const diffFiles = computed(() => (
+  sharedChatPanelState.codingDiffByConversation.get(props.conversationId)?.files ?? []
 ))
 
 const PHASES: ReadonlyArray<{ phase: CodingPhase; labelKey: string }> = [
@@ -162,6 +167,100 @@ function formatDuration (durationMs: number): string {
   return `${(durationMs / 1000).toFixed(1)} s`
 }
 
+function normalizePath (value: string): string {
+  return value.trim().replace(/\\/g, '/').replace(/^\.\//, '')
+}
+
+function pathsMatch (left: string, right: string): boolean {
+  const normalizedLeft = normalizePath(left)
+  const normalizedRight = normalizePath(right)
+  if (!normalizedLeft || !normalizedRight) return false
+  return normalizedLeft === normalizedRight ||
+    normalizedLeft.endsWith(`/${normalizedRight}`) ||
+    normalizedRight.endsWith(`/${normalizedLeft}`)
+}
+
+function diffFileForDiagnostic (diagnostic: CodingDiagnostic): string | null {
+  const file = diagnostic.file?.trim()
+  if (!file) return null
+  return diffFiles.value.find(item => pathsMatch(item.filePath, file))?.filePath ?? null
+}
+
+function openDiffForDiagnostic (diagnostic: CodingDiagnostic): void {
+  const filePath = diffFileForDiagnostic(diagnostic)
+  if (!filePath) return
+  ensureWorkspaceTab('coding-diff', {
+    conversationId: props.conversationId,
+    focusFilePath: filePath,
+    // Re-clicking the same diagnostic must re-focus the same file even when
+    // the tab state already carries that path.
+    focusRequestId: `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  })
+  workspaceStore.visible.value = true
+}
+
+function hasCommandOutput (command: CodingCommandOutcome): boolean {
+  return Boolean(command.stdout?.trim() || command.stderr?.trim())
+}
+
+function commandOutput (command: CodingCommandOutcome): string {
+  const chunks: string[] = []
+  if (command.stdout?.trim()) chunks.push(`${t('chatUi.codingLogStdout')}\n${command.stdout}`)
+  if (command.stderr?.trim()) chunks.push(`${t('chatUi.codingLogStderr')}\n${command.stderr}`)
+  return chunks.join('\n\n')
+}
+
+const openLogs = ref<Set<string>>(new Set())
+const copiedToken = ref('')
+let copiedTimer: ReturnType<typeof setTimeout> | null = null
+
+function commandLogId (index: number): string {
+  return `coding-command-log-${props.conversationId}-${index}`
+}
+
+function isLogOpen (id: string): boolean {
+  return openLogs.value.has(id)
+}
+
+function toggleLog (id: string): void {
+  const next = new Set(openLogs.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  openLogs.value = next
+}
+
+function isCopied (token: string): boolean {
+  return copiedToken.value === token
+}
+
+async function copyText (text: string, token: string): Promise<void> {
+  if (!text.trim()) return
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const area = document.createElement('textarea')
+      area.value = text
+      area.setAttribute('readonly', '')
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      document.execCommand('copy')
+      document.body.removeChild(area)
+    }
+    copiedToken.value = token
+    if (copiedTimer) clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => { copiedToken.value = '' }, 1600)
+  } catch {
+    copiedToken.value = ''
+  }
+}
+
+onBeforeUnmount(() => {
+  if (copiedTimer) clearTimeout(copiedTimer)
+})
+
 const stopReasonLabel = computed(() => {
   const reason = status.value?.stopReason
   if (!reason) return t('chatUi.codingAllClear')
@@ -240,6 +339,16 @@ const stopReasonLabel = computed(() => {
                   <code v-if="diagnostic.code" class="diag-code">{{ diagnostic.code }}</code>
                   <span class="diag-location">{{ diagnosticLocation(diagnostic) }}</span>
                   <span class="diag-message">{{ diagnostic.message }}</span>
+                  <button
+                    v-if="diffFileForDiagnostic(diagnostic)"
+                    type="button"
+                    class="diag-action"
+                    :aria-label="`${t('chatUi.codingOpenDiff')} · ${diagnosticLocation(diagnostic)}`"
+                    :title="diffFileForDiagnostic(diagnostic) || undefined"
+                    @click="openDiffForDiagnostic(diagnostic)"
+                  >
+                    {{ t('chatUi.codingOpenDiff') }}
+                  </button>
                   <span
                     v-if="diagnostic.confidence != null"
                     class="diag-confidence"
@@ -318,11 +427,37 @@ const stopReasonLabel = computed(() => {
               </p>
               <ul v-else class="command-list">
                 <li v-for="(command, index) in status.commands" :key="`${command.program}-${index}`">
-                  <code class="command-line">{{ formatCommand(command) }}</code>
+                  <div class="command-head">
+                    <code class="command-line">{{ formatCommand(command) }}</code>
+                    <button
+                      type="button"
+                      class="inline-action"
+                      :aria-label="t('chatUi.codingCopyCommand')"
+                      @click="copyText(formatCommand(command), `command-${index}`)"
+                    >
+                      {{ isCopied(`command-${index}`) ? t('chatUi.codingCopied') : t('chatUi.codingCopyCommand') }}
+                    </button>
+                  </div>
                   <div class="command-meta">
                     <span>exit {{ formatExitCode(command) }}</span>
                     <span>{{ formatDuration(command.durationMs) }}</span>
                   </div>
+                  <template v-if="hasCommandOutput(command)">
+                    <button
+                      type="button"
+                      class="raw-toggle"
+                      :aria-expanded="isLogOpen(commandLogId(index))"
+                      :aria-controls="commandLogId(index)"
+                      @click="toggleLog(commandLogId(index))"
+                    >
+                      {{ t('chatUi.codingRawOutput') }}
+                    </button>
+                    <pre
+                      v-if="isLogOpen(commandLogId(index))"
+                      :id="commandLogId(index)"
+                      class="command-raw"
+                    >{{ commandOutput(command) }}</pre>
+                  </template>
                 </li>
               </ul>
             </dd>
@@ -629,7 +764,7 @@ const stopReasonLabel = computed(() => {
 
 .diagnostic-row {
   display: grid;
-  grid-template-columns: 8px auto auto minmax(0, 1fr) auto auto;
+  grid-template-columns: 8px auto auto minmax(0, 1fr) auto auto auto;
   gap: 8px;
   align-items: start;
   padding: 6px 0;
@@ -900,13 +1035,72 @@ const stopReasonLabel = computed(() => {
   padding-top: 0;
 }
 
+.command-head {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .command-line {
   display: block;
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--app-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.69rem;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.inline-action,
+.diag-action,
+.raw-toggle {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--app-accent);
+  font: inherit;
+  font-size: 0.66rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.inline-action:hover,
+.diag-action:hover,
+.raw-toggle:hover {
+  color: var(--app-accent-strong);
+  text-decoration: underline;
+}
+
+.inline-action:focus-visible,
+.diag-action:focus-visible,
+.raw-toggle:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.raw-toggle {
+  justify-self: start;
+  width: fit-content;
+}
+
+.command-raw {
+  max-height: 220px;
+  margin: 5px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  background: var(--app-panel);
+  color: var(--app-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.67rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .command-meta {
@@ -1024,8 +1218,13 @@ const stopReasonLabel = computed(() => {
 
   .diag-location,
   .diag-confidence,
-  .suggestion-badge {
+  .suggestion-badge,
+  .diag-action {
     grid-column: 2 / -1;
+  }
+
+  .diag-action {
+    justify-self: start;
   }
 }
 

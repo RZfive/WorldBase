@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Instant;
+use tokio_util::sync::CancellationToken;
 use worldbase_coding::{
     analyze_dependency_diagnostics, analyze_package_manager_output, detect_package_manager,
     parse_package_manifest, CodingPolicy, DependencyIssue, Diagnostic, PackageManager,
@@ -143,7 +144,7 @@ impl Tool for CodingFixDependenciesTool {
             root: &root,
             timeout_seconds,
         };
-        let execution = run_commands(&planned, &executor).await;
+        let execution = run_commands(&planned, &executor, services.abort.as_ref()).await;
         Ok(output_payload(
             &project_id,
             package_manager,
@@ -514,6 +515,29 @@ struct FixExecution {
     outcomes: Vec<FixOutcome>,
 }
 
+/// Why a command stopped the plan. `completed` is the only success reason;
+/// every other reason makes the execution stop at that command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandOutcomeReason {
+    Completed,
+    SpawnError,
+    Timeout,
+    NonZeroExit,
+    Cancelled,
+}
+
+impl CommandOutcomeReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::SpawnError => "spawn_error",
+            Self::Timeout => "timeout",
+            Self::NonZeroExit => "non_zero_exit",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 struct FixOutcome {
     command: String,
     exit_code: Option<i32>,
@@ -522,11 +546,25 @@ struct FixOutcome {
     timed_out: bool,
     cancelled: bool,
     duration_ms: u64,
+    reason: CommandOutcomeReason,
 }
 
 impl FixOutcome {
+    fn cancelled(command: &str) -> Self {
+        Self {
+            command: command.to_string(),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: "dependency fix cancelled before command start".into(),
+            timed_out: false,
+            cancelled: true,
+            duration_ms: 0,
+            reason: CommandOutcomeReason::Cancelled,
+        }
+    }
+
     fn succeeded(&self) -> bool {
-        !self.cancelled && !self.timed_out && self.exit_code == Some(0)
+        self.reason == CommandOutcomeReason::Completed && self.exit_code == Some(0)
     }
 
     fn payload(&self) -> Value {
@@ -537,7 +575,8 @@ impl FixOutcome {
             "stderr": self.stderr,
             "timedOut": self.timed_out,
             "cancelled": self.cancelled,
-            "durationMs": self.duration_ms
+            "durationMs": self.duration_ms,
+            "reason": self.reason.label()
         })
     }
 }
@@ -548,7 +587,26 @@ struct CommandRun {
     stderr: String,
     timed_out: bool,
     cancelled: bool,
+    spawn_error: bool,
     duration_ms: u64,
+}
+
+impl CommandRun {
+    fn reason(&self) -> CommandOutcomeReason {
+        if self.cancelled {
+            CommandOutcomeReason::Cancelled
+        } else if self.timed_out {
+            CommandOutcomeReason::Timeout
+        } else if self.spawn_error {
+            CommandOutcomeReason::SpawnError
+        } else if self.exit_code == Some(0) {
+            CommandOutcomeReason::Completed
+        } else if self.exit_code.is_some() {
+            CommandOutcomeReason::NonZeroExit
+        } else {
+            CommandOutcomeReason::SpawnError
+        }
+    }
 }
 
 #[async_trait]
@@ -556,22 +614,36 @@ trait FixCommandExecutor: Send + Sync {
     async fn run(&self, command: &str) -> Result<CommandRun>;
 }
 
-async fn run_commands(commands: &[String], executor: &dyn FixCommandExecutor) -> FixExecution {
+async fn run_commands(
+    commands: &[String],
+    executor: &dyn FixCommandExecutor,
+    abort: Option<&CancellationToken>,
+) -> FixExecution {
     let mut outcomes = Vec::new();
     let mut stopped_at = None;
 
     for (index, command) in commands.iter().enumerate() {
+        if abort.is_some_and(CancellationToken::is_cancelled) {
+            outcomes.push(FixOutcome::cancelled(command));
+            stopped_at = Some(index);
+            break;
+        }
+
         let run = executor.run(command).await;
         let outcome = match run {
-            Ok(run) => FixOutcome {
-                command: command.clone(),
-                exit_code: run.exit_code,
-                stdout: run.stdout,
-                stderr: run.stderr,
-                timed_out: run.timed_out,
-                cancelled: run.cancelled,
-                duration_ms: run.duration_ms,
-            },
+            Ok(run) => {
+                let reason = run.reason();
+                FixOutcome {
+                    command: command.clone(),
+                    exit_code: run.exit_code,
+                    stdout: run.stdout,
+                    stderr: run.stderr,
+                    timed_out: run.timed_out,
+                    cancelled: run.cancelled,
+                    duration_ms: run.duration_ms,
+                    reason,
+                }
+            }
             Err(error) => FixOutcome {
                 command: command.clone(),
                 exit_code: None,
@@ -580,6 +652,7 @@ async fn run_commands(commands: &[String], executor: &dyn FixCommandExecutor) ->
                 timed_out: false,
                 cancelled: false,
                 duration_ms: 0,
+                reason: CommandOutcomeReason::SpawnError,
             },
         };
         let succeeded = outcome.succeeded();
@@ -619,6 +692,7 @@ impl FixCommandExecutor for ManagedCommandExecutor<'_> {
                 stderr: "dependency fix cancelled before command start".into(),
                 timed_out: false,
                 cancelled: true,
+                spawn_error: false,
                 duration_ms: 0,
             });
         }
@@ -665,6 +739,7 @@ impl FixCommandExecutor for ManagedCommandExecutor<'_> {
                 .abort
                 .as_ref()
                 .is_some_and(|abort| abort.is_cancelled()),
+            spawn_error: value.get("reason").and_then(Value::as_str) == Some("spawn_error"),
             duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         })
     }
@@ -675,6 +750,7 @@ mod tests {
     use super::*;
     use crate::HostBridge;
     use serde_json::json;
+    use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
@@ -788,6 +864,38 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("confirm must be true"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_execution_reports_cancelled_without_running_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut services, project) = services(temp.path());
+        write_manifest(&project, "pnpm@9.0.0");
+        let abort = CancellationToken::new();
+        abort.cancel();
+        services.abort = Some(abort);
+
+        let result = CodingFixDependenciesTool
+            .execute(
+                json!({
+                    "project_id": "alpha",
+                    "issues": [dependency_issue("pnpm add left-pad")],
+                    "dry_run": false,
+                    "confirm": true
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["dryRun"], false);
+        assert_eq!(result["applied"], false);
+        assert_eq!(result["stoppedAt"], 0);
+        assert_eq!(result["outcomes"][0]["command"], "pnpm add left-pad");
+        assert_eq!(result["outcomes"][0]["exitCode"], Value::Null);
+        assert_eq!(result["outcomes"][0]["cancelled"], true);
+        assert_eq!(result["outcomes"][0]["timedOut"], false);
+        assert_eq!(result["outcomes"][0]["reason"], "cancelled");
     }
 
     #[tokio::test]
@@ -916,6 +1024,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn package_manager_output_plans_multiple_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let (services, project) = services(temp.path());
+        write_manifest(&project, "npm@10.0.0");
+
+        let result = CodingFixDependenciesTool
+            .execute(
+                json!({
+                    "project_id": "alpha",
+                    "package_manager_output": "Cannot find module 'zod'.\nCannot find module 'left-pad'.",
+                    "dry_run": true
+                }),
+                &services,
+            )
+            .await
+            .unwrap();
+
+        let planned = result["plannedCommands"].as_array().unwrap();
+        assert_eq!(planned.len(), 2);
+        assert!(planned.contains(&json!("npm install zod")));
+        assert!(planned.contains(&json!("npm install left-pad")));
+        assert_eq!(result["applied"], false);
+        assert_eq!(result["outcomes"], json!([]));
+    }
+
+    #[tokio::test]
     async fn raw_diagnostics_are_analyzed_into_commands() {
         let temp = tempfile::tempdir().unwrap();
         let (services, project) = services(temp.path());
@@ -945,34 +1079,101 @@ mod tests {
         assert_eq!(result["plannedCommands"], json!(["yarn add zod"]));
     }
 
-    struct StubExecutor {
+    #[derive(Clone, Copy)]
+    enum FakeResponse {
+        Success,
+        Failure { exit_code: i32 },
+        Timeout,
+        Cancelled,
+        SpawnError,
+    }
+
+    struct FakeRunner {
         calls: Mutex<Vec<String>>,
-        fail_on: Option<&'static str>,
-        timeout_on: Option<&'static str>,
+        responses: Mutex<VecDeque<FakeResponse>>,
+        cancel_after: Option<usize>,
+        abort: Option<CancellationToken>,
+    }
+
+    impl FakeRunner {
+        fn new(responses: Vec<FakeResponse>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                responses: Mutex::new(responses.into()),
+                cancel_after: None,
+                abort: None,
+            }
+        }
+
+        fn cancelling_after(mut self, abort: CancellationToken, calls: usize) -> Self {
+            self.cancel_after = Some(calls);
+            self.abort = Some(abort);
+            self
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
     }
 
     #[async_trait]
-    impl FixCommandExecutor for StubExecutor {
+    impl FixCommandExecutor for FakeRunner {
         async fn run(&self, command: &str) -> Result<CommandRun> {
-            self.calls.lock().unwrap().push(command.to_string());
-            if self.timeout_on == Some(command) {
-                return Ok(CommandRun {
+            let call_count = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(command.to_string());
+                calls.len()
+            };
+            if self.cancel_after == Some(call_count) {
+                if let Some(abort) = &self.abort {
+                    abort.cancel();
+                }
+            }
+
+            let response = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(FakeResponse::Success);
+            Ok(match response {
+                FakeResponse::Success => CommandRun {
+                    exit_code: Some(0),
+                    stdout: "ok".into(),
+                    stderr: String::new(),
+                    timed_out: false,
+                    cancelled: false,
+                    spawn_error: false,
+                    duration_ms: 1,
+                },
+                FakeResponse::Failure { exit_code } => CommandRun {
+                    exit_code: Some(exit_code),
+                    stdout: String::new(),
+                    stderr: "boom".into(),
+                    timed_out: false,
+                    cancelled: false,
+                    spawn_error: false,
+                    duration_ms: 2,
+                },
+                FakeResponse::Timeout => CommandRun {
                     exit_code: None,
                     stdout: String::new(),
-                    stderr: String::new(),
+                    stderr: "timed out".into(),
                     timed_out: true,
                     cancelled: false,
+                    spawn_error: false,
                     duration_ms: 5,
-                });
-            }
-            let failed = self.fail_on == Some(command);
-            Ok(CommandRun {
-                exit_code: Some(if failed { 1 } else { 0 }),
-                stdout: if failed { String::new() } else { "ok".into() },
-                stderr: if failed { "boom".into() } else { String::new() },
-                timed_out: false,
-                cancelled: false,
-                duration_ms: 1,
+                },
+                FakeResponse::Cancelled => CommandRun {
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: "cancelled".into(),
+                    timed_out: false,
+                    cancelled: true,
+                    spawn_error: false,
+                    duration_ms: 0,
+                },
+                FakeResponse::SpawnError => return Err(anyhow::anyhow!("spawn failed")),
             })
         }
     }
@@ -982,57 +1183,191 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_stops_at_the_first_failure() {
-        let executor = StubExecutor {
-            calls: Mutex::new(Vec::new()),
-            fail_on: Some("pnpm add b"),
-            timeout_on: None,
-        };
+    async fn execution_runs_sequentially_and_stops_at_the_first_failure() {
+        let executor = FakeRunner::new(vec![
+            FakeResponse::Success,
+            FakeResponse::Failure { exit_code: 1 },
+            FakeResponse::Success,
+        ]);
         let execution = run_commands(
             &commands(&["pnpm add a", "pnpm add b", "pnpm add c"]),
             &executor,
+            None,
         )
         .await;
 
-        assert_eq!(
-            executor.calls.lock().unwrap().as_slice(),
-            ["pnpm add a", "pnpm add b"]
-        );
+        assert_eq!(executor.calls(), ["pnpm add a", "pnpm add b"]);
         assert!(!execution.applied);
         assert_eq!(execution.stopped_at, Some(1));
         assert_eq!(execution.outcomes.len(), 2);
+        assert_eq!(
+            execution.outcomes[0].reason,
+            CommandOutcomeReason::Completed
+        );
         assert_eq!(execution.outcomes[1].exit_code, Some(1));
         assert_eq!(execution.outcomes[1].stderr, "boom");
+        assert_eq!(
+            execution.outcomes[1].reason,
+            CommandOutcomeReason::NonZeroExit
+        );
     }
 
     #[tokio::test]
     async fn timeout_stops_execution_and_is_not_applied() {
-        let executor = StubExecutor {
-            calls: Mutex::new(Vec::new()),
-            fail_on: None,
-            timeout_on: Some("pnpm add b"),
-        };
-        let execution = run_commands(&commands(&["pnpm add a", "pnpm add b"]), &executor).await;
+        let executor = FakeRunner::new(vec![FakeResponse::Success, FakeResponse::Timeout]);
+        let execution =
+            run_commands(&commands(&["pnpm add a", "pnpm add b"]), &executor, None).await;
 
         assert!(!execution.applied);
         assert_eq!(execution.stopped_at, Some(1));
         assert!(execution.outcomes[1].timed_out);
-        assert_eq!(executor.calls.lock().unwrap().len(), 2);
+        assert_eq!(execution.outcomes[1].reason, CommandOutcomeReason::Timeout);
+        assert_eq!(executor.calls(), ["pnpm add a", "pnpm add b"]);
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_before_the_next_command() {
+        let abort = CancellationToken::new();
+        let executor = FakeRunner::new(vec![FakeResponse::Success, FakeResponse::Success])
+            .cancelling_after(abort.clone(), 1);
+        let execution = run_commands(
+            &commands(&["pnpm add a", "pnpm add b", "pnpm add c"]),
+            &executor,
+            Some(&abort),
+        )
+        .await;
+
+        assert_eq!(executor.calls(), ["pnpm add a"]);
+        assert!(!execution.applied);
+        assert_eq!(execution.stopped_at, Some(1));
+        assert_eq!(execution.outcomes.len(), 2);
+        assert!(execution.outcomes[1].cancelled);
+        assert_eq!(
+            execution.outcomes[1].reason,
+            CommandOutcomeReason::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_the_first_command_runs_nothing() {
+        let abort = CancellationToken::new();
+        abort.cancel();
+        let executor = FakeRunner::new(vec![FakeResponse::Success]);
+        let execution = run_commands(
+            &commands(&["pnpm add a", "pnpm add b"]),
+            &executor,
+            Some(&abort),
+        )
+        .await;
+
+        assert!(executor.calls().is_empty());
+        assert!(!execution.applied);
+        assert_eq!(execution.stopped_at, Some(0));
+        assert_eq!(execution.outcomes.len(), 1);
+        assert!(execution.outcomes[0].cancelled);
+        assert_eq!(
+            execution.outcomes[0].reason,
+            CommandOutcomeReason::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_reported_cancellation_stops_execution() {
+        let executor = FakeRunner::new(vec![FakeResponse::Cancelled, FakeResponse::Success]);
+        let execution =
+            run_commands(&commands(&["pnpm add a", "pnpm add b"]), &executor, None).await;
+
+        assert_eq!(executor.calls(), ["pnpm add a"]);
+        assert!(!execution.applied);
+        assert_eq!(execution.stopped_at, Some(0));
+        assert!(execution.outcomes[0].cancelled);
+        assert_eq!(
+            execution.outcomes[0].reason,
+            CommandOutcomeReason::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_errors_are_reported_and_stop_execution() {
+        let executor = FakeRunner::new(vec![FakeResponse::SpawnError, FakeResponse::Success]);
+        let execution =
+            run_commands(&commands(&["pnpm add a", "pnpm add b"]), &executor, None).await;
+
+        assert_eq!(executor.calls(), ["pnpm add a"]);
+        assert!(!execution.applied);
+        assert_eq!(execution.stopped_at, Some(0));
+        assert_eq!(execution.outcomes[0].exit_code, None);
+        assert!(execution.outcomes[0].stderr.contains("spawn failed"));
+        assert_eq!(
+            execution.outcomes[0].reason,
+            CommandOutcomeReason::SpawnError
+        );
     }
 
     #[tokio::test]
     async fn successful_execution_is_applied() {
-        let executor = StubExecutor {
-            calls: Mutex::new(Vec::new()),
-            fail_on: None,
-            timeout_on: None,
-        };
-        let execution = run_commands(&commands(&["pnpm add a", "pnpm install"]), &executor).await;
+        let executor = FakeRunner::new(vec![FakeResponse::Success, FakeResponse::Success]);
+        let execution =
+            run_commands(&commands(&["pnpm add a", "pnpm install"]), &executor, None).await;
 
         assert!(execution.applied);
         assert_eq!(execution.stopped_at, None);
         assert_eq!(execution.outcomes.len(), 2);
         assert!(execution.outcomes.iter().all(FixOutcome::succeeded));
+        assert!(execution
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.reason == CommandOutcomeReason::Completed));
+    }
+
+    #[tokio::test]
+    async fn outcome_payload_contains_execution_details() {
+        let executor = FakeRunner::new(vec![
+            FakeResponse::Success,
+            FakeResponse::Failure { exit_code: 3 },
+        ]);
+        let execution =
+            run_commands(&commands(&["pnpm add a", "pnpm add b"]), &executor, None).await;
+
+        let success = execution.outcomes[0].payload();
+        let mut keys = success
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "cancelled",
+                "command",
+                "durationMs",
+                "exitCode",
+                "reason",
+                "stderr",
+                "stdout",
+                "timedOut"
+            ]
+        );
+        assert_eq!(success["command"], "pnpm add a");
+        assert_eq!(success["exitCode"], 0);
+        assert_eq!(success["stdout"], "ok");
+        assert_eq!(success["stderr"], "");
+        assert_eq!(success["timedOut"], false);
+        assert_eq!(success["cancelled"], false);
+        assert_eq!(success["durationMs"], 1);
+        assert_eq!(success["reason"], "completed");
+
+        let failure = execution.outcomes[1].payload();
+        assert_eq!(failure["command"], "pnpm add b");
+        assert_eq!(failure["exitCode"], 3);
+        assert_eq!(failure["stdout"], "");
+        assert_eq!(failure["stderr"], "boom");
+        assert_eq!(failure["timedOut"], false);
+        assert_eq!(failure["cancelled"], false);
+        assert_eq!(failure["durationMs"], 2);
+        assert_eq!(failure["reason"], "non_zero_exit");
     }
 
     #[tokio::test]

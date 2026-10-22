@@ -276,6 +276,73 @@ fn diagnosis_and_repair_reject_terminal_and_empty_states() {
 }
 
 #[test]
+fn inspection_is_reachable_only_from_plan_and_repair() {
+    let mut state = CodingState::new(policy(2));
+    assert!(!state.begin_inspection(), "an idle run cannot inspect");
+
+    state.begin();
+    assert_eq!(state.phase, CodingPhase::Plan);
+    assert!(state.begin_inspection());
+    assert_eq!(state.phase, CodingPhase::Inspect);
+    assert!(
+        !state.begin_inspection(),
+        "repeated read batches stay in Inspect"
+    );
+
+    state.record_mutation([PathBuf::from("src/lib.rs")]);
+    assert_eq!(state.phase, CodingPhase::Edit);
+    assert!(!state.begin_inspection(), "editing is past inspection");
+
+    assert!(state.begin_verification());
+    assert_eq!(state.phase, CodingPhase::Verify);
+    assert!(!state.begin_inspection());
+    assert!(!state.record_verification(&evidence(false, false, false)));
+    assert_eq!(state.phase, CodingPhase::Repair);
+
+    assert!(state.begin_inspection());
+    assert_eq!(state.phase, CodingPhase::Inspect);
+    state.record_mutation([PathBuf::from("src/lib.rs")]);
+    assert_eq!(state.phase, CodingPhase::Edit);
+
+    assert!(state.record_verification(&evidence(true, false, false)));
+    assert_eq!(state.phase, CodingPhase::Complete);
+    assert!(!state.begin_inspection());
+}
+
+#[test]
+fn inspection_rejects_terminal_and_advanced_phases() {
+    for phase in [
+        CodingPhase::Verify,
+        CodingPhase::Diagnose,
+        CodingPhase::Inspect,
+    ] {
+        let mut state = CodingState::new(policy(2));
+        state.begin();
+        state.phase = phase;
+        assert!(
+            !state.begin_inspection(),
+            "{phase:?} must not start inspection"
+        );
+        assert_eq!(state.phase, phase);
+    }
+
+    let mut complete = CodingState::new(policy(2));
+    complete.begin();
+    complete.record_mutation([PathBuf::from("src/lib.rs")]);
+    assert!(complete.record_verification(&evidence(true, false, false)));
+    assert_eq!(complete.phase, CodingPhase::Complete);
+    assert!(!complete.begin_inspection());
+
+    let mut blocked = CodingState::new(policy(2));
+    blocked.begin();
+    blocked.cancel();
+    assert!(blocked.is_terminal());
+    assert_eq!(blocked.stop_reason, Some(CodingStopReason::Cancelled));
+    assert!(!blocked.begin_inspection());
+    assert_eq!(blocked.phase, CodingPhase::Blocked);
+}
+
+#[test]
 fn repair_budget_exhaustion_prevents_the_repair_transition() {
     let mut state = CodingState::new(policy(1));
     state.begin();

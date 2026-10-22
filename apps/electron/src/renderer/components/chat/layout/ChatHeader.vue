@@ -261,6 +261,7 @@ onBeforeUnmount(() => {
           type="button"
           aria-haspopup="dialog"
           :aria-expanded="codingPopoverOpen"
+          :aria-controls="codingPopoverOpen ? 'header-coding-popover' : undefined"
           :title="`${codingPhaseLabel}${codingPillMeta ? ' · ' + codingPillMeta : ''}`"
           @click.stop="toggleCodingPopover"
         >
@@ -286,6 +287,7 @@ onBeforeUnmount(() => {
 
         <div
           v-if="codingPopoverOpen"
+          id="header-coding-popover"
           class="header-coding-popover"
           role="dialog"
           :aria-label="$t('chatUi.codingStatusAria')"
@@ -559,7 +561,9 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
   max-width: 100%;
+  min-width: 0;
   height: 24px;
   padding: 0 9px;
   overflow: hidden;
@@ -625,18 +629,24 @@ onBeforeUnmount(() => {
 }
 
 .header-coding-phase {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: inherit;
   font-weight: 600;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .header-coding-meta {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: var(--app-text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.63rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .header-coding-caret {
@@ -655,7 +665,11 @@ onBeforeUnmount(() => {
   right: 0;
   z-index: 60;
   width: min(300px, calc(100vw - 32px));
+  max-width: calc(100vw - 24px);
+  max-height: min(70vh, calc(100vh - 70px));
   padding: 10px 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--app-border-strong);
   border-radius: 9px;
   background: var(--app-panel);
@@ -781,6 +795,32 @@ onBeforeUnmount(() => {
 
   .header-coding-caret {
     transition: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .header-coding {
+    max-width: min(168px, 38vw);
+  }
+
+  .header-coding-meta {
+    display: none;
+  }
+
+  .header-coding-popover {
+    right: 0;
+    width: min(280px, calc(100vw - 20px));
+    max-width: calc(100vw - 20px);
+  }
+}
+
+@media (max-width: 480px) {
+  .header-coding {
+    max-width: min(124px, 42vw);
+  }
+
+  .header-coding-pill {
+    padding: 0 7px;
   }
 }
 

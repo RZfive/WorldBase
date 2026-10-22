@@ -1,5 +1,6 @@
 import { reactive, ref } from 'vue'
 import { computerUsePermissions } from '../../../utils/computer-use-permissions'
+import { loadCodingState } from './coding-status-storage'
 import type { CodingDiffState, CodingStatus } from '../../../../shared/coding-status-types.js'
 import type {
   AgentDefinition,
@@ -90,6 +91,21 @@ export const sharedChatPanelState = {
   codingDiffByConversation: reactive(new Map<string, CodingDiffState>()),
   codingRunActionsByConversation: reactive(new Map<string, CodingRunActions>()),
   conversationTargets: new Map<string, string | null>()
+}
+
+/**
+ * Restores the last persisted coding status/diff when a conversation is opened.
+ * Live in-memory state always wins over the storage snapshot.
+ */
+export function hydrateCodingStateForConversation (conversationId: string): void {
+  if (!conversationId) return
+  const snapshot = loadCodingState(conversationId)
+  if (snapshot.status && !sharedChatPanelState.codingStatusByConversation.has(conversationId)) {
+    sharedChatPanelState.codingStatusByConversation.set(conversationId, snapshot.status)
+  }
+  if (snapshot.diff && !sharedChatPanelState.codingDiffByConversation.has(conversationId)) {
+    sharedChatPanelState.codingDiffByConversation.set(conversationId, snapshot.diff)
+  }
 }
 
 export const sharedChatPanelLifecycle = {
