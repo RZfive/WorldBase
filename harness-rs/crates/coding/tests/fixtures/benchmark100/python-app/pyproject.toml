@@ -1,0 +1,13 @@
+[project]
+name = "benchmark100-python"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+
+[tool.mypy]
+strict = true
+
+[tool.ruff]
+line-length = 100

@@ -80,6 +80,19 @@ const codingStatus: CodingStatus = {
   updatedAt: Date.now()
 }
 
+const blockedCodingStatus: CodingStatus = {
+  ...codingStatus,
+  phase: 'blocked',
+  repairRound: 3,
+  diagnostics: [
+    ...codingStatus.diagnostics,
+    { severity: 'warning', message: 'Table virtualization may still drop sorted rows on resize.', code: 'WB-TABLE-02', file: 'src/components/Table.vue', line: 88, column: 3, confidence: 0.42 }
+  ],
+  stopReason: 'maxRepairRounds',
+  summary: '2 errors remain after 3 repair rounds',
+  updatedAt: Date.now()
+}
+
 const App = defineComponent({
   setup () {
     const text = ref('')
@@ -91,11 +104,17 @@ const App = defineComponent({
     const busy = params.get('busy') === '1'
     const auth = params.get('auth') === '1'
     const ask = params.get('ask') === '1'
-    const coding = params.get('coding') === '1'
+    // ?coding=1 previews an active run; ?coding=blocked previews the
+    // retryable failed state (including a low-confidence suggestion).
+    const codingParam = params.get('coding')
+    const coding = codingParam === '1' || codingParam === 'blocked' || codingParam === 'failed'
+    const codingBlocked = codingParam === 'blocked' || codingParam === 'failed'
+    const codingLoading = coding && !codingBlocked
+    const previewCodingStatus = codingBlocked ? blockedCodingStatus : codingStatus
     // ?new=1 renders a brand-new conversation (interactive agent picker in
     // the header); default is a bound conversation (subdued agent badge).
     const isNew = params.get('new') === '1'
-    const isLoading = busy || auth
+    const isLoading = busy || auth || codingLoading
     // Same one-expanded-at-a-time accordion as ChatPanelContainer.
     const pendingAttentionPanels = computed<AttentionPanelId[]>(() => {
       const ids: AttentionPanelId[] = []
@@ -112,11 +131,11 @@ const App = defineComponent({
     return () => h('div',{class:'preview-shell'},[
       h(ConversationSidebar,{agentItems,groupItems,longTermGoalItems:goalItems,conversationItems,conversationListLoaded:true,onNewConversation:()=>{},onToggleCollapse:()=>{},onSelectConversation:()=>{},onOpenAgent:()=>{},onOpenGroup:()=>{},onOpenLongTermGoal:()=>{},onNewLongTermGoal:()=>{},onDeleteLongTermGoal:()=>{},onDeleteConversation:()=>{},onRenameConversation:()=>{}}),
       h('main',{class:'preview-chat'},[
-        h(ChatHeader,{contextLabel:isNew?'💬 新对话':'🤖 主 Agent',contextDetail:'',availableChannelBindings:[],selectedChannelBindingId:'',providers:[{id:'anthropic',name:'Anthropic',models:['Opus 4.8']}],activeProviderId:'anthropic',selectedModel:'Opus 4.8',showProviderSelector:true,reasoningStrength:'high',temperature:null,providerDefaultTemperature:1,isGroupConversation:false,showAgentSelector:isNew,availableAgents:[{id:'a1',name:'前端工程师',icon:'🤖'},{id:'a2',name:'文案作者',icon:'✍️'}],selectedAgentId:'',onSelectProviderModel:()=>{},'onUpdate:reasoningStrength':()=>{},'onUpdate:temperature':()=>{},'onUpdate:selectedAgentId':()=>{}}),
+        h(ChatHeader,{contextLabel:isNew?'💬 新对话':'🤖 主 Agent',contextDetail:'',availableChannelBindings:[],selectedChannelBindingId:'',providers:[{id:'anthropic',name:'Anthropic',models:['Opus 4.8']}],activeProviderId:'anthropic',selectedModel:'Opus 4.8',showProviderSelector:true,reasoningStrength:'high',temperature:null,providerDefaultTemperature:1,isGroupConversation:false,showAgentSelector:isNew,availableAgents:[{id:'a1',name:'前端工程师',icon:'🤖'},{id:'a2',name:'文案作者',icon:'✍️'}],selectedAgentId:'',codingStatus:coding?previewCodingStatus:null,codingDiffFileCount:coding?2:0,codingLoading,onSelectProviderModel:()=>{},'onUpdate:reasoningStrength':()=>{},'onUpdate:temperature':()=>{},'onUpdate:selectedAgentId':()=>{},onOpenCodingDiagnostics:()=>{},onOpenCodingDiff:()=>{},onCancelCoding:()=>{},onRetryCoding:()=>{}}),
         h(MessageList,{messages,isLoading,filePreview:{active:false,filePath:'',lineCount:0,added:0,removed:0},assistantName:'前端工程师'}),
         h('div',{class:'preview-dock'},[
         h('div',{class:'preview-attention'},[
-          ...(coding ? [h(CodingStatusPanel,{status:codingStatus,diffFileCount:2,isLoading:true,expanded:accordion.expandedPanel.value==='coding',onToggle:()=>accordion.togglePanel('coding'),onOpenDiagnostics:()=>{},onOpenDiff:()=>{}})] : []),
+          ...(coding ? [h(CodingStatusPanel,{status:previewCodingStatus,diffFileCount:2,isLoading:codingLoading,expanded:accordion.expandedPanel.value==='coding',onToggle:()=>accordion.togglePanel('coding'),onOpenDiagnostics:()=>{},onOpenDiff:()=>{},onCancel:()=>{},onRetry:()=>{}})] : []),
           h(PinnedTodoPanel,{items:[{id:1,title:'定位表格渲染瓶颈',status:'completed'},{id:2,title:'实现虚拟滚动窗口',status:'in-progress'},{id:3,title:'补充性能回归数据',status:'not-started'}],isLoading:true,expanded:accordion.expandedPanel.value==='todo',onToggle:()=>accordion.togglePanel('todo')}),
           ...(auth ? [h(AuthPermissionPanel,{request:{requestId:'r1',title:'运行命令',detail:'local_run_command · 只读'},pendingCount:1,expanded:accordion.expandedPanel.value==='auth',onToggle:()=>accordion.togglePanel('auth'),onRespond:()=>{}})] : []),
           ...(ask ? [h(AskUserPanel,{request:{requestId:'q1',questions:[

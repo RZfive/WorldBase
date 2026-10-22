@@ -6,17 +6,90 @@ use std::sync::OnceLock;
 const STRUCTURED_CONFIDENCE: f32 = 0.9;
 const HEADER_CONFIDENCE: f32 = 0.6;
 
+/// Per-stream state for javac/Maven diagnostics whose `symbol`, `location`,
+/// `required`, or `found` details arrive on continuation lines.
+#[derive(Default)]
+pub(crate) struct ParserState {
+    pending: Option<Diagnostic>,
+}
+
 /// Parse one Java compiler/Maven/Gradle/JUnit/JVM output line.
-pub(crate) fn parse_line(text: &str, raw: &str) -> Option<Diagnostic> {
-    parse_javac(text, raw)
-        .or_else(|| parse_maven_coordinate(text, raw))
-        .or_else(|| parse_junit_summary(text, raw))
+///
+/// The boolean is true when this parser owns the line, even if a javac/Maven
+/// diagnostic is still waiting for continuation details.
+pub(crate) fn parse_line(
+    state: &mut ParserState,
+    text: &str,
+    raw: &str,
+) -> (Option<Diagnostic>, bool) {
+    if let Some(detail) = continuation_detail(text) {
+        if let Some(pending) = state.pending.as_mut() {
+            if !pending.message.contains(detail) {
+                if pending.message.is_empty() {
+                    pending.message = detail.to_string();
+                } else {
+                    pending.message.push_str("; ");
+                    pending.message.push_str(detail);
+                }
+            }
+        }
+        return (None, true);
+    }
+
+    if let Some(diagnostic) = parse_javac(text, raw).or_else(|| parse_maven_coordinate(text, raw)) {
+        state.pending = Some(diagnostic);
+        return (None, true);
+    }
+
+    let immediate = parse_junit_summary(text, raw)
         .or_else(|| parse_kotlin(text, raw))
         .or_else(|| parse_gradle_task(text, raw))
         .or_else(|| parse_build_header(text, raw))
         .or_else(|| parse_maven_goal(text, raw))
         .or_else(|| parse_stack_frame(text, raw))
-        .or_else(|| parse_java_exception(text, raw))
+        .or_else(|| parse_java_exception(text, raw));
+    match immediate {
+        Some(diagnostic) => (Some(diagnostic), true),
+        None => (None, false),
+    }
+}
+
+/// Flush a pending javac/Maven diagnostic when the current line is not one of
+/// its continuation details.
+pub(crate) fn flush_if_boundary(
+    state: &mut ParserState,
+    text: &str,
+    _raw: &str,
+) -> Vec<Diagnostic> {
+    if state.pending.is_none() || continuation_detail(text).is_some() {
+        return Vec::new();
+    }
+    state.pending.take().into_iter().collect()
+}
+
+/// Emit a javac/Maven diagnostic that had no continuation lines.
+pub(crate) fn finish(state: &mut ParserState) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    flush_pending(state, &mut diagnostics);
+    diagnostics
+}
+
+fn flush_pending(state: &mut ParserState, diagnostics: &mut Vec<Diagnostic>) {
+    if let Some(pending) = state.pending.take() {
+        diagnostics.push(pending);
+    }
+}
+
+fn continuation_detail(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    let detail = trimmed
+        .strip_prefix("[ERROR]")
+        .map(str::trim_start)
+        .unwrap_or(trimmed);
+    ["symbol:", "location:", "required:", "found:", "reason:"]
+        .into_iter()
+        .any(|prefix| detail.starts_with(prefix))
+        .then_some(detail)
 }
 
 fn parse_javac(text: &str, raw: &str) -> Option<Diagnostic> {

@@ -10,7 +10,10 @@ pub(crate) static PROFILE: LanguageProfile = LanguageProfile {
         "method_declaration" | "constructor_declaration" | "compact_constructor_declaration" => {
             Some(SymbolKind::Method)
         }
-        "field_declaration" | "constant_declaration" => Some(SymbolKind::Variable),
+        "field_declaration" | "constant_declaration" | "local_variable_declaration" => {
+            Some(SymbolKind::Variable)
+        }
+        "enum_constant" => Some(SymbolKind::Variable),
         "import_declaration" => Some(SymbolKind::Import),
         "package_declaration" => Some(SymbolKind::Module),
         _ => None,
@@ -18,7 +21,9 @@ pub(crate) static PROFILE: LanguageProfile = LanguageProfile {
     is_import: |kind| kind == "import_declaration",
     is_declarator: |kind| kind == "variable_declarator",
     symbol_name: |node, source| match node.kind() {
-        "field_declaration" | "constant_declaration" => single_declarator_name(node, source),
+        "field_declaration" | "constant_declaration" | "local_variable_declaration" => {
+            single_declarator_name(node, source)
+        }
         "package_declaration" => package_name(node, source),
         _ => name_field(node, source).map(ToOwned::to_owned).or_else(|| {
             (node.kind() == "import_declaration")
@@ -26,6 +31,8 @@ pub(crate) static PROFILE: LanguageProfile = LanguageProfile {
                 .flatten()
         }),
     },
+    declaration_parent: None,
+    import_names: None,
     // Members are exported only when `public` is present, except that
     // interface and annotation-type members are implicitly public. Explicit
     // `private` interface methods stay non-exported.
@@ -35,6 +42,10 @@ pub(crate) static PROFILE: LanguageProfile = LanguageProfile {
             return false;
         }
         has_modifier(node, source, "public")
+            || (node.kind() == "enum_constant"
+                && node
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == "enum_body"))
             || node.parent().is_some_and(|parent| {
                 matches!(parent.kind(), "interface_body" | "annotation_type_body")
             })
@@ -98,10 +109,11 @@ pub(crate) static PROFILE: LanguageProfile = LanguageProfile {
     ],
 };
 
-/// Java declarations may contain several field declarators. Only index a
-/// field when exactly one clean identifier can be attributed to the whole
-/// declaration; multi-declarator fields are skipped to avoid duplicate or
-/// ambiguous entries.
+/// Java declarations may contain several field/local declarators. Only index
+/// a declaration when exactly one clean identifier can be attributed to the
+/// whole declaration; multi-declarator declarations are skipped to avoid
+/// duplicate or ambiguous entries. Enum constants are single-name nodes and
+/// go through `symbol_name` directly.
 fn single_declarator_name(node: Node<'_>, source: &str) -> Option<String> {
     let mut cursor = node.walk();
     let declarators = node

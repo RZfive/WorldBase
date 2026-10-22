@@ -16,6 +16,7 @@ use worldbase_protocol::types::ToolDescriptor;
 pub mod coding_apply;
 pub mod coding_diagnose;
 pub mod coding_edit;
+pub mod coding_fix;
 pub mod coding_verify;
 pub mod command;
 pub mod compat_tools;
@@ -211,6 +212,7 @@ impl ToolServices {
                 | "delete_project_file"
                 | "coding_edit"
                 | "coding_apply"
+                | "coding_fix_dependencies"
                 | "write_workspace_file"
                 | "edit_workspace_file"
                 | "patch_workspace_file"
@@ -670,6 +672,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(coding_edit::CodingEditTool),
         Arc::new(coding_apply::CodingApplyTool),
         Arc::new(coding_diagnose::CodingDiagnoseTool),
+        Arc::new(coding_fix::CodingFixDependenciesTool),
         Arc::new(FinalizeProjectTool),
         Arc::new(ClearProjectBuildFlagTool),
         Arc::new(GetProjectLogsTool),

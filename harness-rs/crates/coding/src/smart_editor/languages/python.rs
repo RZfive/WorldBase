@@ -14,6 +14,8 @@ pub(crate) static PROFILE: LanguageProfile = LanguageProfile {
     is_import: |kind| matches!(kind, "import_statement" | "import_from_statement"),
     is_declarator: |kind| matches!(kind, "assignment" | "annotated_assignment"),
     symbol_name: symbol_name_for,
+    declaration_parent: None,
+    import_names: Some(import_names_for),
     export_scope: ExportScope::TopLevel,
     is_exported: is_exported_for,
     identifier_kinds: &["identifier"],
@@ -24,6 +26,78 @@ pub(crate) static PROFILE: LanguageProfile = LanguageProfile {
         "try", "while", "with", "yield",
     ],
 };
+
+fn import_names_for(node: Node<'_>, source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    match node.kind() {
+        "import_statement" => collect_bound_names(node, source, &mut names),
+        "import_from_statement" => {
+            let mut cursor = node.walk();
+            for child in node.children_by_field_name("name", &mut cursor) {
+                collect_imported_name(child, source, &mut names);
+            }
+            if names.is_empty() {
+                let module_range = node
+                    .child_by_field_name("module_name")
+                    .map(|module| module.byte_range());
+                for child in node.named_children(&mut cursor) {
+                    if module_range
+                        .as_ref()
+                        .is_some_and(|range| range == &child.byte_range())
+                    {
+                        continue;
+                    }
+                    if matches!(
+                        child.kind(),
+                        "dotted_name" | "aliased_import" | "wildcard_import"
+                    ) {
+                        collect_imported_name(child, source, &mut names);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    names.dedup();
+    names
+}
+
+fn collect_bound_names(node: Node<'_>, source: &str, names: &mut Vec<String>) {
+    let mut cursor = node.walk();
+    for child in node.children_by_field_name("name", &mut cursor) {
+        match child.kind() {
+            "dotted_name" => {
+                if let Some(text) = node_text(child, source) {
+                    let binding = text.split('.').next().unwrap_or(text).trim();
+                    if !binding.is_empty() {
+                        names.push(binding.to_string());
+                    }
+                }
+            }
+            _ => collect_imported_name(child, source, names),
+        }
+    }
+}
+
+fn collect_imported_name(node: Node<'_>, source: &str, names: &mut Vec<String>) {
+    let name = match node.kind() {
+        "wildcard_import" => Some("*".to_string()),
+        "aliased_import" => node
+            .child_by_field_name("alias")
+            .and_then(|alias| node_text(alias, source))
+            .or_else(|| {
+                node.child_by_field_name("name")
+                    .and_then(|name| node_text(name, source))
+            })
+            .map(ToOwned::to_owned),
+        _ => node_text(node, source)
+            .map(str::trim)
+            .map(ToOwned::to_owned),
+    };
+    if let Some(name) = name.filter(|name| !name.is_empty()) {
+        names.push(name);
+    }
+}
 
 fn symbol_name_for(node: Node<'_>, source: &str) -> Option<String> {
     if matches!(node.kind(), "assignment" | "annotated_assignment") {

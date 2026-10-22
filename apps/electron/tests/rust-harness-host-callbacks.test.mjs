@@ -5,6 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 import './register-ts-hooks.mjs'
 import { RustHarnessEngine, codingEventsForToolResult, planModeExitedAfterNativeResult, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
+import { codingStatusForCancelledRun } from '../src/shared/coding-status-types.ts'
 import { ElectronToolRegistry } from '../src/main/ai-harness/electron-tool-registry.ts'
 import { MCPService } from '../src/main/mcp/mcp-service.ts'
 import { RustHarnessClient } from '../electron/main-process/rust-harness-client.ts'
@@ -1883,4 +1884,77 @@ test('coding tool results map into status and diff stream events', () => {
   assert.equal(apply.diff.files[0].filePath, 'src/main.ts')
   assert.equal(apply.diff.files[1].filePath, 'src/a.ts')
   assert.equal(apply.diff.files[1].changes.length, 2)
+})
+
+test('cancelled coding runs map to a blocked cancelled status stream event', async () => {
+  const client = {
+    ...createNativeToolClient([{
+      name: 'coding_verify',
+      description: 'Rust coding_verify',
+      inputSchema: { type: 'object' },
+      electronNative: true
+    }]),
+    async chatStream (_sessionId, _conversationId, _text, _options, onFrame) {
+      onFrame({ kind: 'tool_call', name: 'coding_verify', call_id: 'verify-1', args: {} })
+      onFrame({
+        kind: 'tool_result',
+        name: 'coding_verify',
+        call_id: 'verify-1',
+        content: JSON.stringify({
+          passed: false,
+          diagnostics: [{
+            severity: 'error',
+            message: "Cannot find name 'x'.",
+            code: 'TS2304',
+            file: 'src/main.ts',
+            line: 12,
+            column: 7,
+            confidence: 0.95
+          }]
+        })
+      })
+      onFrame({ kind: 'done', stopReason: 'aborted' })
+      return { streamId: 'coding-abort-stream' }
+    }
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  const events = []
+
+  await assert.rejects(async () => {
+    for await (const event of engine.chatStream([{ role: 'user', content: 'fix the project' }])) {
+      events.push(event)
+    }
+  }, /stopped by user/i)
+
+  const statuses = events.filter(event => event.type === 'coding_status').map(event => event.status)
+  assert.equal(statuses.length, 3)
+  assert.equal(statuses.at(-1).phase, 'blocked')
+  assert.equal(statuses.at(-1).stopReason, 'cancelled')
+  assert.equal(statuses.at(-1).verificationAttempts, 1)
+  assert.equal(statuses.at(-1).diagnostics[0].code, 'TS2304')
+})
+
+test('cancelled coding status keeps completed and blocked runs terminal', () => {
+  const active = {
+    phase: 'repair',
+    repairRound: 1,
+    verificationAttempts: 1,
+    changedFiles: ['src/main.ts'],
+    commands: [],
+    diagnostics: [],
+    dependencyIssues: [],
+    repairInstructions: [],
+    updatedAt: 1
+  }
+  const cancelled = codingStatusForCancelledRun(active)
+  assert.equal(cancelled.phase, 'blocked')
+  assert.equal(cancelled.stopReason, 'cancelled')
+  assert.deepEqual(cancelled.changedFiles, ['src/main.ts'])
+
+  const complete = { ...active, phase: 'complete', stopReason: 'verificationPassed' }
+  assert.equal(codingStatusForCancelledRun(complete), complete)
+
+  const blocked = { ...active, phase: 'blocked', stopReason: 'maxRepairRounds' }
+  assert.equal(codingStatusForCancelledRun(blocked), blocked)
+  assert.equal(codingStatusForCancelledRun(null), null)
 })

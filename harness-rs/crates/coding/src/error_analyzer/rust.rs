@@ -9,19 +9,16 @@
 
 use crate::model::{Diagnostic, DiagnosticSeverity};
 use regex::Regex;
-use std::{cell::RefCell, collections::VecDeque, path::PathBuf, sync::OnceLock};
+use std::{path::PathBuf, sync::OnceLock};
 
 const STRUCTURED_CONFIDENCE: f32 = 0.95;
 const RUNTIME_CONFIDENCE: f32 = 0.7;
 
+/// Per-stream state for rustc diagnostics whose location arrives on a later
+/// line. Keeping it in the caller avoids cross-outcome state leakage.
 #[derive(Default)]
-struct ParseState {
+pub(crate) struct ParserState {
     pending: Option<Diagnostic>,
-    ready: VecDeque<Diagnostic>,
-}
-
-thread_local! {
-    static STATE: RefCell<ParseState> = RefCell::new(ParseState::default());
 }
 
 struct ParsedLine {
@@ -30,52 +27,80 @@ struct ParsedLine {
 }
 
 /// Parse one Rust compiler/test output line.
-pub(crate) fn parse_line(text: &str, raw: &str) -> Option<Diagnostic> {
+///
+/// The boolean is true when this parser owns the line, even if the header is
+/// still waiting for its `-->` location.
+pub(crate) fn parse_line(
+    state: &mut ParserState,
+    text: &str,
+    raw: &str,
+) -> (Option<Diagnostic>, bool) {
     if let Some(captures) = location_regex().captures(text) {
-        let file = captures.name("file")?.as_str().trim().to_string();
-        let line = parse_u32(captures.name("line")?.as_str())?;
-        let column = parse_u32(captures.name("column")?.as_str())?;
-        return STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            if let Some(mut diagnostic) = state.pending.take() {
-                diagnostic.file = Some(PathBuf::from(file));
-                diagnostic.line = Some(line);
-                diagnostic.column = Some(column);
-                state.ready.push_back(diagnostic);
-            }
-            state.ready.pop_front()
-        });
+        let Some(file) = captures
+            .name("file")
+            .map(|file| file.as_str().trim().to_string())
+        else {
+            return (None, true);
+        };
+        let Some(line) = captures
+            .name("line")
+            .and_then(|line| parse_u32(line.as_str()))
+        else {
+            return (None, true);
+        };
+        let Some(column) = captures
+            .name("column")
+            .and_then(|column| parse_u32(column.as_str()))
+        else {
+            return (None, true);
+        };
+        if let Some(mut diagnostic) = state.pending.take() {
+            diagnostic.file = Some(PathBuf::from(file));
+            diagnostic.line = Some(line);
+            diagnostic.column = Some(column);
+            return (Some(diagnostic), true);
+        }
+        return (None, true);
     }
 
-    let parsed = parse_single_line(text, raw);
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        match parsed {
-            Some(ParsedLine {
-                diagnostic,
-                awaits_location: true,
-            }) => {
-                if let Some(previous) = state.pending.replace(diagnostic) {
-                    state.ready.push_back(previous);
-                }
-            }
-            Some(ParsedLine {
-                diagnostic,
-                awaits_location: false,
-            }) => {
-                if let Some(previous) = state.pending.take() {
-                    state.ready.push_back(previous);
-                }
-                state.ready.push_back(diagnostic);
-            }
-            None => {
-                if let Some(previous) = state.pending.take() {
-                    state.ready.push_back(previous);
-                }
-            }
+    match parse_single_line(text, raw) {
+        Some(ParsedLine {
+            diagnostic,
+            awaits_location: true,
+        }) => {
+            state.pending = Some(diagnostic);
+            (None, true)
         }
-        state.ready.pop_front()
-    })
+        Some(ParsedLine {
+            diagnostic,
+            awaits_location: false,
+        }) => (Some(diagnostic), true),
+        None => (None, false),
+    }
+}
+
+/// Flush a pending header when the current line can no longer be its location.
+pub(crate) fn flush_if_boundary(state: &mut ParserState, text: &str, raw: &str) -> Vec<Diagnostic> {
+    if state.pending.is_none() || location_regex().is_match(text) || is_location_context(text, raw)
+    {
+        return Vec::new();
+    }
+    state.pending.take().into_iter().collect()
+}
+
+/// Flush a header that never received a following `-->` location.
+pub(crate) fn finish(state: &mut ParserState) -> Vec<Diagnostic> {
+    state.pending.take().into_iter().collect()
+}
+
+fn is_location_context(text: &str, raw: &str) -> bool {
+    raw.starts_with(' ')
+        || raw.starts_with('\t')
+        || text.starts_with('|')
+        || text.starts_with('=')
+        || text.starts_with("note:")
+        || text.starts_with("help:")
+        || text.starts_with("...")
 }
 
 fn parse_single_line(text: &str, raw: &str) -> Option<ParsedLine> {

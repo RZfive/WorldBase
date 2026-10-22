@@ -459,7 +459,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     startNewConversation: newConversation
   })
 
-  const { sendMessage, stopCurrentStream } = createChatMessageSender({
+  const { sendMessage, stopCurrentStream, retryLastUserMessage } = createChatMessageSender({
     t,
     getActivePageContext: () => props.activePageContext,
     getActiveTerminalContext: () => props.activeTerminalContext,
@@ -499,6 +499,20 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     resetTransientStreamState,
     clearPendingAskUserRequests
   })
+
+  // Workspace diagnostic tabs live outside this composable; expose the same
+  // stop/retry path through shared state instead of duplicating stream logic.
+  watch(
+    currentConversationId,
+    (conversationId) => {
+      if (!conversationId) return
+      sharedChatPanelState.codingRunActionsByConversation.set(conversationId, {
+        cancel: () => stopCurrentStream(conversationId),
+        retry: () => retryLastUserMessage(conversationId)
+      })
+    },
+    { immediate: true }
+  )
 
   const {
     editingMessageId,
@@ -695,6 +709,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     showSkillPicker,
     startEditUserMessage: startEditMessage,
     stopCurrentStream,
+    retryLastUserMessage,
     togglePlanMode,
     toggleComputerUse,
     toggleSkill,

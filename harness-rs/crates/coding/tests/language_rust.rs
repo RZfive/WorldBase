@@ -142,8 +142,8 @@ fn indexes_rust_items_with_kinds_parent_paths_and_visibility() {
         &parsed,
         "render",
         SymbolKind::Function,
-        &["api", "Widget<T>"],
-        false,
+        &["api", "Widget<T> as Render"],
+        true,
     );
 
     assert_symbol(&parsed, "Public", SymbolKind::Type, &[], true);
@@ -183,7 +183,7 @@ fn indexes_rust_items_with_kinds_parent_paths_and_visibility() {
 }
 
 #[test]
-fn impl_symbols_and_methods_share_the_implemented_type() {
+fn impl_symbols_distinguish_inherent_and_trait_implementations() {
     let source = r#"struct Gadget;
 
 impl Gadget {
@@ -199,14 +199,24 @@ impl core::fmt::Display for Gadget {
     let parsed = parsed(source);
 
     assert_symbol(&parsed, "spin", SymbolKind::Function, &["Gadget"], false);
-    assert_symbol(&parsed, "fmt", SymbolKind::Function, &["Gadget"], false);
-
-    let impls = parsed.find_symbols(&SymbolQuery::new("Gadget").with_kind(SymbolKind::Type));
-    assert_eq!(
-        impls.len(),
-        3,
-        "the struct and both impl blocks are indexed by type name"
+    assert_symbol(
+        &parsed,
+        "fmt",
+        SymbolKind::Function,
+        &["Gadget as core::fmt::Display"],
+        true,
     );
+
+    let inherent = parsed.find_symbols(&SymbolQuery::new("Gadget").with_kind(SymbolKind::Type));
+    assert_eq!(
+        inherent.len(),
+        2,
+        "the struct and inherent impl are indexed by type name"
+    );
+    let trait_impl = parsed
+        .find_symbol(&SymbolQuery::new("Gadget as core::fmt::Display").with_kind(SymbolKind::Type))
+        .unwrap();
+    assert_eq!(trait_impl.kind, SymbolKind::Type);
 }
 
 #[test]

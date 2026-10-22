@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type {
-  CodingCommandOutcome,
-  CodingDiagnostic,
-  CodingStatus,
+import {
+  CODING_STOP_REASON_LABEL_KEYS,
+  isCodingStatusActive,
+  isCodingStatusRetryable,
+  type CodingCommandOutcome,
+  type CodingDiagnostic,
+  type CodingStatus,
 } from '../../../../shared/coding-status-types.js'
 
 const props = defineProps<{
@@ -20,6 +23,8 @@ const emit = defineEmits<{
   (e: 'toggle'): void
   (e: 'openDiagnostics'): void
   (e: 'openDiff'): void
+  (e: 'cancel'): void
+  (e: 'retry'): void
 }>()
 
 const { t } = useI18n()
@@ -91,6 +96,18 @@ const isPulsing = computed(
       props.status.phase === 'diagnose' ||
       props.status.phase === 'repair'),
 )
+const canCancel = computed(
+  () => props.isLoading === true && isCodingStatusActive(props.status),
+)
+const canRetry = computed(
+  () => props.isLoading !== true && isCodingStatusRetryable(props.status),
+)
+const stopReasonLabel = computed(() => {
+  const reason = props.status.stopReason
+  if (!reason) return t('chatUi.codingAllClear')
+  const key = CODING_STOP_REASON_LABEL_KEYS[reason]
+  return key ? t(key) : reason
+})
 const dotClass = computed(() => {
   if (props.status.phase === 'complete') return 'is-complete'
   if (props.status.phase === 'blocked') return 'is-blocked'
@@ -230,6 +247,11 @@ function togglePanel(): void {
           }}
         </div>
 
+        <div v-if="props.status.stopReason" class="coding-status-stop">
+          <span class="coding-status-label">{{ $t('chatUi.codingStopReason') }}</span>
+          <span class="coding-status-stop-value">{{ stopReasonLabel }}</span>
+        </div>
+
         <div class="coding-status-diagnostics">
           <div
             v-for="(diagnostic, index) in topDiagnostics"
@@ -261,6 +283,26 @@ function togglePanel(): void {
             @click.stop="emit('openDiff')"
           >
             {{ $t('chatUi.codingOpenDiff') }}
+          </button>
+          <button
+            v-if="props.isLoading"
+            class="coding-status-action"
+            type="button"
+            :disabled="!canCancel"
+            :title="$t('chatUi.codingCancelRun')"
+            @click.stop="emit('cancel')"
+          >
+            {{ $t('chatUi.codingCancelRun') }}
+          </button>
+          <button
+            v-else-if="canRetry"
+            class="coding-status-action"
+            type="button"
+            :disabled="!canRetry"
+            :title="$t('chatUi.codingRetryRun')"
+            @click.stop="emit('retry')"
+          >
+            {{ $t('chatUi.codingRetryRun') }}
           </button>
         </div>
       </div>
@@ -526,6 +568,18 @@ function togglePanel(): void {
   font-size: 0.72rem;
 }
 
+.coding-status-stop {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 7px;
+  font-size: 0.72rem;
+}
+
+.coding-status-stop-value {
+  color: var(--app-text-soft);
+}
+
 .coding-status-diagnostics {
   display: flex;
   flex-direction: column;
@@ -580,6 +634,7 @@ function togglePanel(): void {
 
 .coding-status-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 14px;
   margin-top: 10px;
   padding-top: 8px;
@@ -597,9 +652,15 @@ function togglePanel(): void {
   cursor: pointer;
 }
 
-.coding-status-action:hover {
+.coding-status-action:hover:not(:disabled) {
   color: var(--app-accent-strong);
   text-decoration: underline;
+}
+
+.coding-status-action:disabled {
+  color: var(--app-text-muted);
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .coding-status-action:focus-visible {

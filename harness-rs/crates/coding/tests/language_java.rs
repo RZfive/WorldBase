@@ -163,7 +163,7 @@ public interface Contract {
 }
 
 #[test]
-fn indexes_only_unambiguous_single_variable_fields() {
+fn indexes_only_unambiguous_single_field_and_local_declarations() {
     let source = r#"class Fields {
     private int count;
     public String name = "value";
@@ -186,11 +186,13 @@ fn indexes_only_unambiguous_single_variable_fields() {
             .iter()
             .map(|entry| entry.name.as_str())
             .collect::<Vec<_>>(),
-        ["count", "name"]
+        ["count", "name", "local"]
     );
     assert_eq!(variables[0].parent_path, ["Fields"]);
     assert!(!variables[0].exported);
     assert!(variables[1].exported);
+    assert_eq!(variables[2].parent_path, ["Fields", "method"]);
+    assert!(!variables[2].exported);
 }
 
 #[test]

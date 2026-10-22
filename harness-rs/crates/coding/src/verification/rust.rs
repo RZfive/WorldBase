@@ -9,7 +9,8 @@ pub(crate) fn detect(root: &Path) -> Result<Option<VerificationProfile>> {
     }
 
     let manifest_text = fs::read_to_string(&manifest).unwrap_or_default();
-    let is_workspace = manifest_text.contains("[workspace]");
+    let is_workspace = has_manifest_section(&manifest_text, "workspace");
+    let is_package = has_manifest_section(&manifest_text, "package");
     let mut commands = vec![
         command(
             VerificationCheckKind::Typecheck,
@@ -32,10 +33,13 @@ pub(crate) fn detect(root: &Path) -> Result<Option<VerificationProfile>> {
     let rustfmt_marker = ["rustfmt.toml", ".rustfmt.toml"]
         .into_iter()
         .find(|name| root.join(name).is_file());
-    let mut source = if is_workspace {
-        "Rust workspace project detected from Cargo.toml.".to_string()
-    } else {
-        "Rust project detected from Cargo.toml.".to_string()
+    let mut source = match (is_workspace, is_package) {
+        (true, true) => {
+            "Rust workspace project with a root package detected from Cargo.toml.".to_string()
+        }
+        (true, false) => "Rust workspace project detected from Cargo.toml.".to_string(),
+        (false, true) => "Rust package project detected from Cargo.toml.".to_string(),
+        (false, false) => "Rust project detected from Cargo.toml.".to_string(),
     };
     if let Some(marker) = rustfmt_marker {
         commands.push(VerificationCommand {
@@ -55,6 +59,14 @@ pub(crate) fn detect(root: &Path) -> Result<Option<VerificationProfile>> {
         commands,
         source,
     }))
+}
+
+fn has_manifest_section(manifest: &str, section: &str) -> bool {
+    let expected = format!("[{section}]");
+    manifest
+        .lines()
+        .map(str::trim)
+        .any(|line| line == expected || line.starts_with(&format!("{expected} ")))
 }
 
 fn command(kind: VerificationCheckKind, args: &[&str], description: &str) -> VerificationCommand {

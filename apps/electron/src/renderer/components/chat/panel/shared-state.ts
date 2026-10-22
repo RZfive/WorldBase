@@ -22,6 +22,11 @@ import type {
 } from './types'
 export const DEFAULT_REASONING_STRENGTH: ReasoningStrength = 'max'
 
+export interface CodingRunActions {
+  cancel: () => Promise<void>
+  retry: () => Promise<void>
+}
+
 export const sharedChatPanelState = {
   messages: ref<ChatMessage[]>([]),
   inputText: ref(''),
@@ -83,6 +88,7 @@ export const sharedChatPanelState = {
   activeGroupSessionIds: reactive(new Set<string>()),
   codingStatusByConversation: reactive(new Map<string, CodingStatus>()),
   codingDiffByConversation: reactive(new Map<string, CodingDiffState>()),
+  codingRunActionsByConversation: reactive(new Map<string, CodingRunActions>()),
   conversationTargets: new Map<string, string | null>()
 }
 
@@ -109,6 +115,7 @@ export function cleanupSharedChatPanelResources (): void {
   sharedChatPanelState.activeCleanups.clear()
   sharedChatPanelState.activeStreamSessionIds.clear()
   sharedChatPanelState.activeGroupSessionIds.clear()
+  sharedChatPanelState.codingRunActionsByConversation.clear()
 
   const lifecycle = sharedChatPanelLifecycle
   lifecycle.providerChangeCleanup?.()

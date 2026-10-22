@@ -61,7 +61,7 @@ import {
   buildCurrentFolderWorkspaceState,
   buildOutgoingMessagesWithDocumentWorkspaceContext
 } from '../../workspace/workspace-store'
-import type { CodingDiffState, CodingStatus } from '../../../../shared/coding-status-types.js'
+import { codingStatusForCancelledRun, type CodingDiffState, type CodingStatus } from '../../../../shared/coding-status-types.js'
 import type {
   AIExecutionAuthMode,
   BackgroundStreamState,
@@ -232,12 +232,13 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     }
   }
 
-  async function stopCurrentStream () {
-    if (!window.electronAPI || !currentConversationId.value) return
-    const convId = currentConversationId.value
-    const targetMessages = messages.value
+  async function stopCurrentStream (conversationId?: string) {
+    const convId = conversationId || currentConversationId.value
+    if (!window.electronAPI || !convId) return
     const sessionId = activeStreamSessionIds.get(convId)
     if (!sessionId) return
+    const isForeground = currentConversationId.value === convId
+    const targetMessages = isForeground ? messages.value : null
 
     try {
       await window.electronAPI.stopChatStream(sessionId)
@@ -245,7 +246,18 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       console.warn('[chat] Failed to request stream stop:', (err as Error).message)
     }
 
+    // Reflect the user's stop immediately; the harness may emit its own
+    // cancelled status after the listener has already been torn down.
+    const currentStatus = codingStatusByConversation.get(convId)
+    const cancelledStatus = codingStatusForCancelledRun(currentStatus)
+    if (cancelledStatus && cancelledStatus !== currentStatus) {
+      codingStatusByConversation.set(convId, cancelledStatus)
+    }
+
     if (!streamingConvIds.has(convId)) return
+    // Background streams finalize through their own event handler, which owns
+    // the assistant message object and its save target.
+    if (!isForeground || !targetMessages) return
 
     const assistantMessage = findLatestAssistantMessage(targetMessages)
     if (assistantMessage) {
@@ -253,10 +265,47 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     }
 
     releaseStreamSession(convId, sessionId)
-    if (currentConversationId.value === convId) {
-      resetTransientStreamState()
-    }
+    resetTransientStreamState()
     void doSaveConversation(convId, targetMessages)
+  }
+
+  /**
+   * Retry the last coding request through the normal send path: truncate the
+   * failed turn, then re-send the same user message so the runner starts a
+   * fresh stream instead of inventing a second runtime.
+   */
+  async function retryLastUserMessage (conversationId?: string): Promise<void> {
+    const convId = conversationId || currentConversationId.value
+    if (!convId || convId !== currentConversationId.value) return
+    if (isLoading.value || isUploadingFiles.value) return
+
+    let lastUserIndex = -1
+    for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+      if (messages.value[index].role === 'user') {
+        lastUserIndex = index
+        break
+      }
+    }
+    if (lastUserIndex < 0) return
+
+    const original = messages.value[lastUserIndex]
+    const prepared: PreparedUserMessage = {
+      id: original.id || generateId(),
+      content: original.content,
+      blocks: original.blocks && original.blocks.length > 0 ? original.blocks : undefined,
+      text: getMessageTextContent(original.content)
+    }
+    const snapshot = [...messages.value]
+    messages.value = messages.value.slice(0, lastUserIndex)
+
+    try {
+      await doSaveConversation(convId, messages.value)
+      await sendMessage(prepared)
+    } catch (err) {
+      console.warn('[chat] Retry failed, restoring previous messages:', (err as Error).message)
+      messages.value = snapshot
+      await doSaveConversation(convId, snapshot)
+    }
   }
 
   async function sendMessage (prepared?: PreparedUserMessage) {
@@ -784,6 +833,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
 
   return {
     sendMessage,
-    stopCurrentStream
+    stopCurrentStream,
+    retryLastUserMessage
   }
 }

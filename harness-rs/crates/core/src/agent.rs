@@ -2,6 +2,7 @@
 
 use crate::hub::{Hub, RunHandle};
 use crate::subagents::{CoreSubagentRuntime, MAX_SUBAGENT_NESTING_DEPTH};
+use crate::tool_scheduler::{into_call_order, schedule_tool_calls, ScheduledCall};
 use anyhow::Result;
 use futures::{future::join_all, StreamExt};
 use serde_json::json;
@@ -2466,21 +2467,108 @@ mod tests {
 
     #[test]
     fn read_only_tool_calls_are_batched_without_reordering_side_effects() {
-        let calls = vec![
-            ("a".into(), "read_file".into(), serde_json::json!({})),
-            ("b".into(), "read_document".into(), serde_json::json!({})),
-            ("c".into(), "write_file".into(), serde_json::json!({})),
-            ("d".into(), "list_documents".into(), serde_json::json!({})),
-            ("e".into(), "web_search".into(), serde_json::json!({})),
-        ];
-        let groups = group_tool_calls(&calls);
+        let calls = [
+            ("a", "read_file"),
+            ("b", "read_document"),
+            ("c", "write_file"),
+            ("d", "list_documents"),
+            ("e", "web_search"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (call_id, name))| ScheduledCall {
+            index,
+            call_id: call_id.into(),
+            name: name.into(),
+            input: serde_json::json!({}),
+        })
+        .collect::<Vec<_>>();
+        let groups = schedule_tool_calls(&calls, concurrency_safe_tool, |_| false);
         assert_eq!(
             groups
                 .iter()
-                .map(|group| group.iter().map(|call| call.0.as_str()).collect::<Vec<_>>())
+                .map(|group| group
+                    .calls
+                    .iter()
+                    .map(|call| call.call_id.as_str())
+                    .collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
             vec![vec!["a", "b"], vec!["c"], vec!["d", "e"],]
         );
+    }
+
+    #[tokio::test]
+    async fn failed_write_keeps_every_result_and_event_in_call_order() {
+        let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
+            protocol_assistant(
+                "Writing three files.",
+                vec![
+                    protocol_tool_call(
+                        "write-z",
+                        "write_file",
+                        serde_json::json!({ "path": "z.txt", "content": "z" }),
+                    ),
+                    protocol_tool_call(
+                        "write-fail",
+                        "write_file",
+                        serde_json::json!({ "path": "../escape.txt", "content": "bad" }),
+                    ),
+                    protocol_tool_call(
+                        "write-a",
+                        "write_file",
+                        serde_json::json!({ "path": "a.txt", "content": "a" }),
+                    ),
+                ],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-1",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({
+                        "task_summary": "Finished the scheduled writes.",
+                        "status": "completed"
+                    }),
+                )],
+            ),
+        ]);
+
+        let events = run_protocol_chat(hub.clone(), &conversation_id).await;
+        let results = events
+            .iter()
+            .filter_map(|event| match event {
+                EventKind::ToolResult {
+                    call_id, is_error, ..
+                } => Some((call_id.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results,
+            vec![("write-z", false), ("write-fail", true), ("write-a", false),]
+        );
+
+        let requests = provider.requests();
+        let replayed = requests[1]
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    ..
+                } => Some((tool_use_id.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replayed,
+            vec![("write-z", false), ("write-fail", true), ("write-a", false),]
+        );
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
@@ -5428,24 +5516,93 @@ fn concurrency_safe_tool(name: &str) -> bool {
     )
 }
 
-/// Partition calls into ordered groups. Consecutive read-only calls are
-/// parallelized, while side-effecting calls form single-item serial groups.
-fn group_tool_calls(
+/// Schedule one assistant turn. Read-only calls keep their existing parallel
+/// grouping; consecutive parallel-safe writes are dependency-planned; every
+/// other call (including `coding_apply`, shell, deletes, and unknown tools)
+/// remains a serial barrier.
+fn schedule_calls_for_run(
     calls: &[(String, String, serde_json::Value)],
-) -> Vec<Vec<(String, String, serde_json::Value)>> {
-    let mut groups: Vec<Vec<(String, String, serde_json::Value)>> = Vec::new();
-    for call in calls {
-        let can_batch = concurrency_safe_tool(&call.1)
-            && groups
-                .last()
-                .is_some_and(|group| concurrency_safe_tool(&group[0].1));
-        if can_batch {
-            groups.last_mut().expect("checked above").push(call.clone());
-        } else {
-            groups.push(vec![call.clone()]);
-        }
+    hub: &Hub,
+    tools: &[Arc<dyn worldbase_tools::Tool>],
+    custom_tools: &[ToolDescriptor],
+    auto_approve: bool,
+) -> Vec<Vec<ScheduledCall>> {
+    let scheduled = calls
+        .iter()
+        .enumerate()
+        .map(|(index, (call_id, name, input))| ScheduledCall {
+            index,
+            call_id: call_id.clone(),
+            name: name.clone(),
+            input: input.clone(),
+        })
+        .collect::<Vec<_>>();
+    schedule_tool_calls(&scheduled, concurrency_safe_tool, |call| {
+        write_call_requires_interactive_permission(hub, tools, custom_tools, call, auto_approve)
+    })
+    .into_iter()
+    .map(|group| group.calls)
+    .collect()
+}
+
+/// A write batch must run serially when any member could ask the host for
+/// permission. `auto_approve` disables prompts for unattended runs, so the
+/// batch may stay parallel there.
+fn write_call_requires_interactive_permission(
+    hub: &Hub,
+    tools: &[Arc<dyn worldbase_tools::Tool>],
+    custom_tools: &[ToolDescriptor],
+    call: &ScheduledCall,
+    auto_approve: bool,
+) -> bool {
+    if auto_approve {
+        return false;
     }
-    groups
+    if configured_permission_asks(hub, &call.name) {
+        return true;
+    }
+    let tool = tools.iter().find(|tool| tool.name() == call.name);
+    let custom_tool = custom_tools.iter().find(|tool| tool.name == call.name);
+    let policy = worldbase_policy_for(hub.store.as_ref(), tool, custom_tool, &call.name);
+    !matches!(policy.as_str(), "allow" | "deny")
+}
+
+/// Detect an explicit ask rule. Argument-scoped rules are treated as matching
+/// conservatively (serializing an otherwise parallel batch is always safe).
+fn configured_permission_asks(hub: &Hub, tool_name: &str) -> bool {
+    let setting = hub
+        .store
+        .get_setting("permissionRules")
+        .ok()
+        .flatten()
+        .or_else(|| {
+            hub.store
+                .get_setting("permissions")
+                .ok()
+                .flatten()
+                .and_then(|value| value.get("rules").cloned())
+        });
+    let Some(setting) = setting else {
+        return false;
+    };
+    let rules = setting.get("rules").unwrap_or(&setting);
+    let Some(rules) = rules.as_array() else {
+        return false;
+    };
+    rules.iter().any(|rule| {
+        if rule.get("decision").and_then(serde_json::Value::as_str) != Some("ask") {
+            return false;
+        }
+        match rule.get("tool").and_then(serde_json::Value::as_str) {
+            Some("*") => true,
+            Some(name) => {
+                name == tool_name
+                    || crate::permissions::canonical_tool_name(name)
+                        == crate::permissions::canonical_tool_name(tool_name)
+            }
+            None => false,
+        }
+    })
 }
 
 /// Tools whose successful execution changes source or project files. The
@@ -6674,76 +6831,84 @@ async fn run_chat_inner(
         llm_messages.push(assistant_msg);
         let iteration_calls = tool_uses.clone();
         let mut tool_results_for_llm = Vec::new();
-        for mut group in group_tool_calls(&tool_uses) {
+        let scheduled_groups = schedule_calls_for_run(
+            &tool_uses,
+            hub.as_ref(),
+            &tools,
+            &custom_tools,
+            context.auto_approve_permissions,
+        );
+        let mut executions = Vec::new();
+        for mut group in scheduled_groups {
             if abort.is_cancelled() {
                 break;
             }
-            for (call_id, name, input) in &group {
+            group.sort_by_key(|call| call.index);
+            for call in &group {
                 publish(
                     &hub,
                     &channel,
                     &stream_id,
                     EventKind::ToolCall {
-                        call_id: call_id.clone(),
-                        name: name.clone(),
-                        args: input.clone(),
+                        call_id: call.call_id.clone(),
+                        name: call.name.clone(),
+                        args: call.input.clone(),
                     },
                 )
                 .await;
             }
-            for (_, name, input) in &mut group {
-                let original = std::mem::take(input);
-                *input = prepare_coding_verify_input(
-                    name,
+            for call in &mut group {
+                let original = std::mem::take(&mut call.input);
+                call.input = prepare_coding_verify_input(
+                    &call.name,
                     original,
                     coding_state.as_ref(),
                     services.folder_workspace_root(),
                 );
             }
-            let group_calls = group.clone();
 
-            let group_results = if group.len() == 1 {
-                let (call_id, name, input) = group.into_iter().next().expect("single call");
-                vec![
-                    execute_tool_for_run(
-                        &hub,
-                        &services,
-                        &tools,
-                        &custom_tools,
+            let auto_approve = context.auto_approve_permissions;
+            let group_results = join_all(group.into_iter().map(|call| {
+                let index = call.index;
+                let hub = &hub;
+                let services = &services;
+                let tools = &tools;
+                let custom_tools = &custom_tools;
+                let stream_id = &stream_id;
+                let abort = &abort;
+                let tool_input_errors = &tool_input_errors;
+                let tool_result_storage_dir = &tool_result_storage_dir;
+                async move {
+                    let execution = execute_tool_for_run(
+                        hub,
+                        services,
+                        tools,
+                        custom_tools,
                         interactive,
-                        context.auto_approve_permissions,
-                        &stream_id,
-                        &abort,
-                        &tool_input_errors,
-                        call_id,
-                        name,
-                        input,
-                        &tool_result_storage_dir,
+                        auto_approve,
+                        stream_id,
+                        abort,
+                        tool_input_errors,
+                        call.call_id,
+                        call.name,
+                        call.input,
+                        tool_result_storage_dir,
                     )
-                    .await,
-                ]
-            } else {
-                join_all(group.into_iter().map(|(call_id, name, input)| {
-                    execute_tool_for_run(
-                        &hub,
-                        &services,
-                        &tools,
-                        &custom_tools,
-                        interactive,
-                        context.auto_approve_permissions,
-                        &stream_id,
-                        &abort,
-                        &tool_input_errors,
-                        call_id,
-                        name,
-                        input,
-                        &tool_result_storage_dir,
-                    )
-                }))
-                .await
-            };
+                    .await;
+                    (index, execution)
+                }
+            }))
+            .await;
+
+            // Keep the coding gate's group-level ordering: mutations and
+            // verification results are applied before the next group runs.
+            let mut group_results = group_results;
+            group_results.sort_by_key(|(index, _)| *index);
             if let Some(state) = coding_state.as_mut() {
-                for ((_, name, input), execution) in group_calls.iter().zip(group_results.iter()) {
+                for (index, execution) in &group_results {
+                    let Some((_, name, input)) = iteration_calls.get(*index) else {
+                        continue;
+                    };
                     let Some(outcome) = apply_coding_tool_outcome(
                         state,
                         name,
@@ -6777,28 +6942,32 @@ async fn run_chat_inner(
                     .await;
                 }
             }
-            for execution in group_results {
-                publish(
-                    &hub,
-                    &channel,
-                    &stream_id,
-                    EventKind::ToolResult {
-                        call_id: execution.call_id.clone(),
-                        name: execution.name.clone(),
-                        content: execution.content.clone(),
-                        is_error: execution.is_error,
-                    },
-                )
-                .await;
-                let tool_use_id = execution.call_id;
-                tool_results_for_llm.push(ContentBlock::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    content: execution.content,
+            executions.extend(group_results);
+        }
+
+        // Published results and LLM tool-result blocks always use the original
+        // assistant turn order, even when dependency planning reordered writes.
+        for execution in into_call_order(executions) {
+            publish(
+                &hub,
+                &channel,
+                &stream_id,
+                EventKind::ToolResult {
+                    call_id: execution.call_id.clone(),
+                    name: execution.name.clone(),
+                    content: execution.content.clone(),
                     is_error: execution.is_error,
-                });
-                for image_url in execution.images {
-                    tool_results_for_llm.push(ContentBlock::ImageUrl { url: image_url });
-                }
+                },
+            )
+            .await;
+            let tool_use_id = execution.call_id;
+            tool_results_for_llm.push(ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: execution.content,
+                is_error: execution.is_error,
+            });
+            for image_url in execution.images {
+                tool_results_for_llm.push(ContentBlock::ImageUrl { url: image_url });
             }
         }
 

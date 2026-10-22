@@ -3,30 +3,107 @@ use regex::Regex;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+/// Per-stream state for Python tracebacks. A frame is held until the following
+/// exception line arrives, so one traceback yields one diagnostic instead of
+/// one duplicate per stack frame.
+#[derive(Default)]
+pub(crate) struct ParserState {
+    traceback: Option<Diagnostic>,
+}
+
 /// Parse one Python compiler/test/linter output line.
-pub(crate) fn parse_line(text: &str, raw: &str) -> Option<Diagnostic> {
-    if let Some(diagnostic) = parse_ruff_or_flake8(text, raw) {
-        return Some(diagnostic);
-    }
-    if let Some(diagnostic) = parse_mypy(text, raw) {
-        return Some(diagnostic);
-    }
+///
+/// The boolean is true when this parser owns the line, even if a traceback
+/// frame is still waiting for its exception line.
+pub(crate) fn parse_line(
+    state: &mut ParserState,
+    text: &str,
+    raw: &str,
+) -> (Option<Diagnostic>, bool) {
     if let Some(diagnostic) = parse_traceback_file(text, raw) {
-        return Some(diagnostic);
+        state.traceback = Some(diagnostic);
+        return (None, true);
     }
-    if let Some(diagnostic) = parse_pytest_failure(text, raw) {
-        return Some(diagnostic);
+
+    if let Some(mut diagnostic) = state.traceback.take() {
+        if let Some(exception) = parse_traceback_exception(text) {
+            diagnostic.message = exception;
+            diagnostic.raw = Some(raw.to_string());
+            return (Some(diagnostic), true);
+        }
+        if is_traceback_followup(text, raw) {
+            state.traceback = Some(diagnostic);
+            return (None, true);
+        }
+        // A new unrelated line: release the frame and let the caller parse the
+        // current line normally.
+        return (Some(diagnostic), false);
     }
-    if let Some(diagnostic) = parse_module_not_found(text, raw) {
-        return Some(diagnostic);
+
+    let diagnostic = parse_ruff_or_flake8(text, raw)
+        .or_else(|| parse_mypy(text, raw))
+        .or_else(|| parse_pytest_failure(text, raw))
+        .or_else(|| parse_module_not_found(text, raw))
+        .or_else(|| parse_syntax_error(text, raw))
+        .or_else(|| parse_pytest_short_summary(text, raw));
+    match diagnostic {
+        Some(diagnostic) => (Some(diagnostic), true),
+        None => (None, false),
     }
-    if let Some(diagnostic) = parse_syntax_error(text, raw) {
-        return Some(diagnostic);
+}
+
+/// Flush a held traceback frame when the current line cannot extend it.
+pub(crate) fn flush_if_boundary(state: &mut ParserState, text: &str, raw: &str) -> Vec<Diagnostic> {
+    if state.traceback.is_none()
+        || parse_traceback_file(text, raw).is_some()
+        || parse_traceback_exception(text).is_some()
+        || is_traceback_followup(text, raw)
+    {
+        return Vec::new();
     }
-    if let Some(diagnostic) = parse_pytest_short_summary(text, raw) {
-        return Some(diagnostic);
+    state.traceback.take().into_iter().collect()
+}
+
+/// Emit the last traceback frame when no exception line follows it.
+pub(crate) fn finish(state: &mut ParserState) -> Vec<Diagnostic> {
+    state.traceback.take().into_iter().collect()
+}
+
+fn is_traceback_followup(text: &str, raw: &str) -> bool {
+    raw.starts_with(' ')
+        || raw.starts_with('\t')
+        || text.starts_with("Traceback (most recent call last):")
+        || text.starts_with("During handling of the above exception")
+        || text.starts_with("The above exception was the direct cause")
+}
+
+fn parse_traceback_exception(text: &str) -> Option<String> {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        Regex::new(r"^(?P<name>[A-Za-z_][A-Za-z0-9_.]*)(?::\s*(?P<message>.*))?$")
+            .expect("valid Python traceback exception regex")
+    });
+    let captures = pattern.captures(text)?;
+    let name = captures.name("name")?.as_str();
+    if !name.chars().next().is_some_and(char::is_uppercase) {
+        return None;
     }
-    None
+    let has_message = captures.name("message").is_some();
+    let known = [
+        "Error",
+        "Exception",
+        "Warning",
+        "Interrupt",
+        "Exit",
+        "Stop",
+        "Iteration",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix));
+    if !has_message && !known {
+        return None;
+    }
+    Some(text.trim().to_string())
 }
 
 fn parse_ruff_or_flake8(text: &str, raw: &str) -> Option<Diagnostic> {

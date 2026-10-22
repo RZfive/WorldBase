@@ -290,16 +290,35 @@ fn visit_generic(
     language: LanguageId,
 ) {
     let profile = languages::profile(language);
-    let mut child_parents = parents.to_vec();
+    let declaration_parent = profile
+        .declaration_parent
+        .and_then(|parent| parent(node, source));
+    let mut entry_parents = parents.to_vec();
+    if let Some(parent) = declaration_parent.filter(|parent| !parent.is_empty()) {
+        entry_parents.push(parent);
+    }
+    let mut child_parents = entry_parents.clone();
     if let Some(kind) = (profile.kind_for_node)(node.kind()) {
-        let name = (profile.symbol_name)(node, source)
-            .filter(|name| !name.is_empty())
-            .or_else(|| {
-                (profile.is_import)(node.kind())
-                    .then(|| import_name(node, source))
-                    .flatten()
-            });
-        if let Some(name) = name {
+        let mut names = if (profile.is_import)(node.kind()) {
+            profile
+                .import_names
+                .map(|import_names| import_names(node, source))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if names.is_empty() {
+            names.extend(
+                (profile.symbol_name)(node, source)
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| {
+                        (profile.is_import)(node.kind())
+                            .then(|| import_name(node, source))
+                            .flatten()
+                    }),
+            );
+        }
+        for name in names {
             let start = node.start_position();
             let end = node.end_position();
             let exported = match profile.export_scope {
@@ -315,10 +334,12 @@ fn visit_generic(
                 start_column: start.column,
                 end_row: end.row,
                 end_column: end.column,
-                parent_path: parents.to_vec(),
+                parent_path: entry_parents.clone(),
                 exported,
             });
-            child_parents.push(name);
+            if child_parents.len() == entry_parents.len() {
+                child_parents.push(name);
+            }
         }
     }
 

@@ -188,6 +188,7 @@ const {
   shouldUseConversationProviderOverride,
   showSkillPicker,
   stopCurrentStream,
+  retryLastUserMessage,
   togglePlanMode,
   toggleComputerUse,
   toggleSkill,
@@ -1718,11 +1719,18 @@ watch(
             :show-agent-selector="!currentConversationId"
             :available-agents="nonDefaultAgents"
             :selected-agent-id="agentSelectorValue"
+            :coding-status="currentCodingStatus"
+            :coding-diff-file-count="currentCodingDiff?.files.length || 0"
+            :coding-loading="isLoading"
             @update:selected-channel-binding-id="handleChannelBindingSelectionChange"
             @select-provider-model="handleProviderModelSelectionChange"
             @update:reasoning-strength="handleReasoningStrengthChange"
             @update:temperature="handleTemperatureChange"
             @update:selected-agent-id="handleAgentSelectionChange"
+            @open-coding-diagnostics="openCodingDiagnostics"
+            @open-coding-diff="openCodingDiff"
+            @cancel-coding="stopCurrentStream"
+            @retry-coding="retryLastUserMessage"
           />
 
           <div v-if="conversationDetailState === 'loading'" class="conversation-detail-state">
@@ -1815,6 +1823,8 @@ watch(
               @toggle="toggleAttentionPanel('coding')"
               @open-diagnostics="openCodingDiagnostics"
               @open-diff="openCodingDiff"
+              @cancel="stopCurrentStream"
+              @retry="retryLastUserMessage"
             />
 
             <PinnedTodoPanel

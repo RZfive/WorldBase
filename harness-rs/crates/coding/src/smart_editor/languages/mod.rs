@@ -29,6 +29,12 @@ pub(crate) struct LanguageProfile {
     /// isolation (for example a Go `var_spec` inside `var_declaration`).
     pub is_declarator: fn(&str) -> bool,
     pub symbol_name: fn(Node<'_>, &str) -> Option<String>,
+    /// Extra path segment inserted between the enclosing declaration path and
+    /// the symbol itself. Go uses this to nest methods under their receiver.
+    pub declaration_parent: Option<fn(Node<'_>, &str) -> Option<String>>,
+    /// Import declarations that bind several names. Returning an empty list
+    /// falls back to [`LanguageProfile::symbol_name`].
+    pub import_names: Option<fn(Node<'_>, &str) -> Vec<String>>,
     pub is_exported: fn(Node<'_>, &str) -> bool,
     pub export_scope: ExportScope,
     pub identifier_kinds: &'static [&'static str],

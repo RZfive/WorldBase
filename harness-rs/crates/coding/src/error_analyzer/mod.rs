@@ -299,6 +299,11 @@ fn build_repair_instructions(matches: &[PatternMatch]) -> Vec<String> {
 }
 
 fn parse_stream(stream: &str, diagnostics: &mut Vec<Diagnostic>) {
+    let mut python_state = python::ParserState::default();
+    let mut go_state = go::ParserState::default();
+    let mut java_state = java::ParserState::default();
+    let mut rust_state = rust::ParserState::default();
+
     for raw_line in stream.lines() {
         let raw = raw_line.trim_end_matches('\r');
         let text = strip_ansi(raw);
@@ -306,6 +311,13 @@ fn parse_stream(stream: &str, diagnostics: &mut Vec<Diagnostic>) {
         if text.is_empty() {
             continue;
         }
+
+        // Flush pending multi-line diagnostics before the current line can
+        // contribute one of its own, so mixed output stays in source order.
+        diagnostics.extend(python::flush_if_boundary(&mut python_state, text, raw));
+        diagnostics.extend(go::flush_if_boundary(&mut go_state, text, raw));
+        diagnostics.extend(java::flush_if_boundary(&mut java_state, text, raw));
+        diagnostics.extend(rust::flush_if_boundary(&mut rust_state, text, raw));
 
         if let Some(diagnostic) = parse_typescript(text, raw) {
             diagnostics.push(diagnostic);
@@ -319,18 +331,38 @@ fn parse_stream(stream: &str, diagnostics: &mut Vec<Diagnostic>) {
             diagnostics.push(diagnostic);
             continue;
         }
-        for parser in [
-            python::parse_line,
-            go::parse_line,
-            rust::parse_line,
-            java::parse_line,
-        ] {
-            if let Some(diagnostic) = parser(text, raw) {
-                diagnostics.push(diagnostic);
-                break;
-            }
+
+        let (diagnostic, consumed) = python::parse_line(&mut python_state, text, raw);
+        if let Some(diagnostic) = diagnostic {
+            diagnostics.push(diagnostic);
+        }
+        if consumed {
+            continue;
+        }
+        let (diagnostic, consumed) = go::parse_line(&mut go_state, text, raw);
+        if let Some(diagnostic) = diagnostic {
+            diagnostics.push(diagnostic);
+        }
+        if consumed {
+            continue;
+        }
+        let (diagnostic, consumed) = java::parse_line(&mut java_state, text, raw);
+        if let Some(diagnostic) = diagnostic {
+            diagnostics.push(diagnostic);
+        }
+        if consumed {
+            continue;
+        }
+        let (diagnostic, _) = rust::parse_line(&mut rust_state, text, raw);
+        if let Some(diagnostic) = diagnostic {
+            diagnostics.push(diagnostic);
         }
     }
+
+    diagnostics.extend(python::finish(&mut python_state));
+    diagnostics.extend(go::finish(&mut go_state));
+    diagnostics.extend(java::finish(&mut java_state));
+    diagnostics.extend(rust::finish(&mut rust_state));
 }
 
 fn parse_typescript(text: &str, raw: &str) -> Option<Diagnostic> {

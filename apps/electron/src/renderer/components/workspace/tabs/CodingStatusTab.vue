@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type {
-  CodingCommandOutcome,
-  CodingDiagnostic,
-  CodingPhase,
-  CodingStatus
+import {
+  CODING_CONFIDENCE_SUGGESTION_THRESHOLD,
+  CODING_STOP_REASON_LABEL_KEYS,
+  isCodingStatusRetryable,
+  isLowConfidenceDiagnostic,
+  type CodingCommandOutcome,
+  type CodingDiagnostic,
+  type CodingPhase,
+  type CodingStatus
 } from '../../../../shared/coding-status-types.js'
 import { sharedChatPanelState } from '../../chat/panel/shared-state'
 
@@ -80,6 +84,50 @@ const repairMaxLabel = computed(() => (
   status.value?.maxRepairRounds != null ? String(status.value.maxRepairRounds) : '—'
 ))
 
+const runActions = computed(() => (
+  sharedChatPanelState.codingRunActionsByConversation.get(props.conversationId) || null
+))
+const conversationIsStreaming = computed(() => (
+  sharedChatPanelState.streamingConversationIds.has(props.conversationId)
+))
+const conversationIsCurrent = computed(() => (
+  sharedChatPanelState.currentConversationId.value === props.conversationId
+))
+const canCancelRun = computed(() => conversationIsStreaming.value && Boolean(runActions.value?.cancel))
+const canRetryRun = computed(() => (
+  conversationIsCurrent.value &&
+  !conversationIsStreaming.value &&
+  isCodingStatusRetryable(status.value) &&
+  Boolean(runActions.value?.retry)
+))
+const showRunActions = computed(() => (
+  Boolean(runActions.value) &&
+  (conversationIsCurrent.value || conversationIsStreaming.value)
+))
+
+function cancelRun (): void {
+  void runActions.value?.cancel()
+}
+
+function retryRun (): void {
+  void runActions.value?.retry()
+}
+
+function isSuggestion (diagnostic: CodingDiagnostic): boolean {
+  return isLowConfidenceDiagnostic(diagnostic)
+}
+
+function isConfident (diagnostic: CodingDiagnostic): boolean {
+  return diagnostic.confidence != null && diagnostic.confidence >= CODING_CONFIDENCE_SUGGESTION_THRESHOLD
+}
+
+function diagnosticRowClass (diagnostic: CodingDiagnostic): Record<string, boolean> {
+  return {
+    'is-suggestion': isSuggestion(diagnostic),
+    'is-confident': isConfident(diagnostic)
+  }
+}
+
 function phaseState (index: number): 'completed' | 'current' | 'pending' {
   const current = currentPhaseIndex.value
   if (current < 0) return 'pending'
@@ -114,22 +162,10 @@ function formatDuration (durationMs: number): string {
   return `${(durationMs / 1000).toFixed(1)} s`
 }
 
-const STOP_REASON_KEYS: Record<string, string> = {
-  verificationPassed: 'chatUi.codingStopVerificationPassed',
-  verificationFailed: 'chatUi.codingStopVerificationFailed',
-  maxRepairRounds: 'chatUi.codingStopMaxRepairRounds',
-  repeatedFailure: 'chatUi.codingStopRepeatedFailure',
-  noRepairableIssue: 'chatUi.codingStopNoRepairableIssue',
-  verificationUnavailable: 'chatUi.codingStopVerificationUnavailable',
-  budgetExhausted: 'chatUi.codingStopBudgetExhausted',
-  cancelled: 'chatUi.codingStopCancelled',
-  nonRecoverable: 'chatUi.codingStopNonRecoverable'
-}
-
 const stopReasonLabel = computed(() => {
   const reason = status.value?.stopReason
   if (!reason) return t('chatUi.codingAllClear')
-  const key = STOP_REASON_KEYS[reason]
+  const key = CODING_STOP_REASON_LABEL_KEYS[reason]
   return key ? t(key) : reason
 })
 </script>
@@ -193,9 +229,9 @@ const stopReasonLabel = computed(() => {
                 v-for="(diagnostic, index) in group.diagnostics"
                 :key="`${group.file}-${index}-${diagnostic.code || diagnostic.message}`"
                 class="diagnostic-item"
-                :aria-label="`${diagnostic.severity}: ${diagnostic.message}`"
+                :aria-label="`${diagnostic.severity}: ${diagnostic.message}${isSuggestion(diagnostic) ? ' · ' + t('chatUi.codingSuggestionBadge') : ''}`"
               >
-                <div class="diagnostic-row">
+                <div class="diagnostic-row" :class="diagnosticRowClass(diagnostic)">
                   <span
                     class="severity-dot"
                     :data-severity="diagnostic.severity"
@@ -204,8 +240,22 @@ const stopReasonLabel = computed(() => {
                   <code v-if="diagnostic.code" class="diag-code">{{ diagnostic.code }}</code>
                   <span class="diag-location">{{ diagnosticLocation(diagnostic) }}</span>
                   <span class="diag-message">{{ diagnostic.message }}</span>
-                  <span v-if="diagnostic.confidence != null" class="diag-confidence">
+                  <span
+                    v-if="diagnostic.confidence != null"
+                    class="diag-confidence"
+                    :class="{
+                      'is-suggestion': isSuggestion(diagnostic),
+                      'is-confident': isConfident(diagnostic)
+                    }"
+                  >
                     {{ t('chatUi.codingConfidence', { value: formatConfidence(diagnostic.confidence) }) }}
+                  </span>
+                  <span
+                    v-if="isSuggestion(diagnostic)"
+                    class="suggestion-badge"
+                    :title="t('chatUi.codingSuggestionTooltip')"
+                  >
+                    {{ t('chatUi.codingSuggestionBadge') }}
                   </span>
                 </div>
                 <details v-if="diagnostic.raw" class="diag-raw">
@@ -219,6 +269,25 @@ const stopReasonLabel = computed(() => {
       </section>
 
       <aside class="summary-panel">
+        <div v-if="showRunActions" class="run-actions">
+          <button
+            type="button"
+            class="run-action"
+            :disabled="!canCancelRun"
+            @click="cancelRun"
+          >
+            {{ t('chatUi.codingCancelRun') }}
+          </button>
+          <button
+            type="button"
+            class="run-action"
+            :disabled="!canRetryRun"
+            @click="retryRun"
+          >
+            {{ t('chatUi.codingRetryRun') }}
+          </button>
+        </div>
+
         <dl class="summary-definitions">
           <div class="definition-row">
             <dt>{{ t('chatUi.codingStopReason') }}</dt>
@@ -560,12 +629,36 @@ const stopReasonLabel = computed(() => {
 
 .diagnostic-row {
   display: grid;
-  grid-template-columns: 8px auto auto minmax(0, 1fr) auto;
+  grid-template-columns: 8px auto auto minmax(0, 1fr) auto auto;
   gap: 8px;
   align-items: start;
   padding: 6px 0;
   border-top: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
   font-size: 0.76rem;
+}
+
+/* Low-confidence findings are advisory. Keep them visually separate from
+   diagnostics the harness is confident about and never auto-apply them. */
+.diagnostic-row.is-suggestion {
+  padding-left: 8px;
+  border-left: 2px dashed color-mix(in srgb, var(--app-warning) 58%, transparent);
+}
+
+.diagnostic-row.is-suggestion .diag-message {
+  color: var(--app-text-muted);
+}
+
+.suggestion-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 6px;
+  border: 1px dashed color-mix(in srgb, var(--app-warning) 58%, transparent);
+  border-radius: 999px;
+  color: var(--app-warning);
+  font-size: 0.62rem;
+  font-weight: 650;
+  white-space: nowrap;
 }
 
 .severity-dot {
@@ -622,6 +715,15 @@ const stopReasonLabel = computed(() => {
   white-space: nowrap;
 }
 
+.diag-confidence.is-suggestion {
+  color: var(--app-warning);
+  font-weight: 600;
+}
+
+.diag-confidence.is-confident {
+  color: var(--app-success);
+}
+
 .diag-raw {
   margin: 2px 0 0 16px;
   color: var(--app-text-muted);
@@ -660,6 +762,44 @@ const stopReasonLabel = computed(() => {
   overflow: auto;
   border-left: 1px solid var(--app-border);
   background: var(--app-panel-muted);
+}
+
+.run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.run-action {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 999px;
+  background: var(--app-panel);
+  color: var(--app-accent);
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.run-action:hover:not(:disabled) {
+  border-color: var(--app-accent);
+  color: var(--app-accent-strong);
+}
+
+.run-action:disabled {
+  color: var(--app-text-muted);
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.run-action:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
 }
 
 .summary-definitions {
@@ -883,7 +1023,8 @@ const stopReasonLabel = computed(() => {
   }
 
   .diag-location,
-  .diag-confidence {
+  .diag-confidence,
+  .suggestion-badge {
     grid-column: 2 / -1;
   }
 }

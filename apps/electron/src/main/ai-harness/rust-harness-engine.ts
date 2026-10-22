@@ -18,7 +18,7 @@ import {
   type ElectronToolRegistryServices,
   type ElectronToolRunContext
 } from './electron-tool-registry.js'
-import type { CodingDiffState, CodingStatus } from '../../shared/coding-status-types.js'
+import { codingStatusForCancelledRun, type CodingDiffState, type CodingStatus } from '../../shared/coding-status-types.js'
 import type {
   AIConfigInput,
   AIHarness,
@@ -318,6 +318,11 @@ export class RustHarnessEngine implements AIHarness {
         // The IPC boundary already owns terminal rendering. Do not yield a
         // completed event and then throw an abort, or a failure event twice.
         if (streamWasAborted) {
+          const cancelledStatus = codingStatusForCancelledRun(codingStatus)
+          if (cancelledStatus && cancelledStatus !== codingStatus) {
+            codingStatus = cancelledStatus
+            emit({ type: 'coding_status', status: cancelledStatus })
+          }
           wake?.()
           wake = null
           return

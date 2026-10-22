@@ -11,6 +11,7 @@ pub mod dependency;
 pub mod error_analyzer;
 pub mod evidence;
 pub mod lsp;
+pub mod lsp_client;
 pub mod model;
 pub mod planner;
 pub mod repair;

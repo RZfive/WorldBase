@@ -63,13 +63,14 @@ fn indexes_package_functions_methods_and_types() {
         .find_symbol(&SymbolQuery::new("Greet").with_kind(SymbolKind::Method))
         .unwrap();
     assert!(greet.exported);
-    assert_eq!(greet.parent_path, Vec::<String>::new());
+    assert_eq!(greet.parent_path, vec!["User"]);
     assert!(file.source[greet.byte_range()].starts_with("func (u User) Greet("));
 
     let rename = file
         .find_symbol(&SymbolQuery::new("rename").with_kind(SymbolKind::Method))
         .unwrap();
     assert!(!rename.exported);
+    assert_eq!(rename.parent_path, vec!["User"]);
     assert!(file.source[rename.byte_range()].starts_with("func (u *User) rename("));
 
     for type_name in ["User", "Greeter", "ID"] {
@@ -146,19 +147,25 @@ type lower struct{}
 }
 
 #[test]
-fn method_parent_path_limitation_is_explicit() {
+fn method_parent_path_includes_the_receiver_type() {
     let file = parsed(INDEX_SOURCE);
     let greet = file
-        .find_symbol(&SymbolQuery::new("Greet").with_kind(SymbolKind::Method))
-        .unwrap();
-    assert_eq!(greet.parent_path, Vec::<String>::new());
-    assert!(file
         .find_symbol(
             &SymbolQuery::new("Greet")
                 .with_kind(SymbolKind::Method)
                 .with_parent("User"),
         )
-        .is_err());
+        .unwrap();
+    assert_eq!(greet.parent_path, vec!["User"]);
+
+    let rename = file
+        .find_symbol(
+            &SymbolQuery::new("rename")
+                .with_kind(SymbolKind::Method)
+                .with_parent("User"),
+        )
+        .unwrap();
+    assert_eq!(rename.parent_path, vec!["User"]);
 }
 
 #[test]
