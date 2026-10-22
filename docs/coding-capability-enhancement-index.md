@@ -68,6 +68,7 @@ graph LR
 ### 当前已知缺口
 
 - **live server CI 覆盖**：`coding_lsp` 单测覆盖 server 解析和错误路径；真实语言服务器往返测试默认 `#[ignore]`，CI 未安装语言服务器。
+- **LSP server 按需安装管理器**：当前 `coding_lsp` 只检测 PATH 和已安装 server；没有类似 VS Code 扩展的应用托管目录、版本管理、设置页一键安装/更新/卸载。
 - **真实包管理器变更测试**：`coding_fix_dependencies` 的执行路径使用受控命令和 fake executor 测试，尚未在 CI 中对真实 pnpm/npm 项目做写入式验证。
 - **真实模型 E2E**：100 任务基准是确定性离线策略测试，不调用真实模型，也不衡量端到端修复成功率。
 

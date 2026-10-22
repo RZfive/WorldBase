@@ -628,6 +628,7 @@ pnpm --dir apps/electron test:renderer-navigation
 ## 🚧 当前已知缺口
 
 - **live server CI 覆盖**：`coding_lsp` 单测覆盖 server 解析、路径边界、缺少 server 和输出归一化；真实语言服务器往返测试默认 `#[ignore]`，需要 `WORLDBASE_LSP_TEST_PROGRAM` 手动启用。
+- **LSP server 按需安装管理器**：当前只检测 PATH/已安装 server；尚未实现应用托管目录、版本管理、设置页一键安装/更新/卸载，也没有随桌面端分发语言服务器。
 - **真实包管理器变更测试**：`coding_fix_dependencies` 默认 dry-run，执行路径通过受控命令与 fake executor 测试；CI 尚未在真实 pnpm/npm 项目上做写入式验证。
 - **真实模型 E2E**：100 任务基准验证确定性策略、编辑、诊断和 LSP 数据解析，不调用真实模型，也不衡量端到端任务成功率。
 

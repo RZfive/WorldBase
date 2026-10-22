@@ -26,11 +26,12 @@
 - [x] 50 项离线前端基准：两套 fixture + 真实仓库 TS/TSX 文件，覆盖符号、编辑、诊断、修复、格式与延迟指标。
 - [x] P2 能力层：LSP publishDiagnostics/符号/定义解析、依赖诊断与修复命令建议。
 - [x] live LSP 客户端：`LspClient` 管理真实 server 生命周期；`coding_lsp` 按文件拉起已安装 server 并返回归一化诊断。
+- [ ] LSP server 按需安装管理器：当前只检测 PATH/已安装 server；应用托管目录、版本管理、设置页一键安装/更新尚未实现。
 - [x] 并行写调度：core `tool_scheduler` + `plan_write_batches` 支持 allow-list 独立文件并行、同文件串行、依赖排序和权限回退。
 - [x] 依赖修复工具：`coding_fix_dependencies` 默认 dry-run，`confirm=true` 才执行 allow-list 包管理器命令。
 - [x] 100 任务离线基准：`tests/benchmark_100.rs`，含 20+ 真实仓库文件读取和逐任务延迟。
 - [x] UI 一期：内联编码状态条、编码诊断 tab、代码差异 tab；结构化 coding_status/coding_diff 事件。
-- [ ] 真实模型 E2E、真实包管理器写入式测试、live server CI 覆盖、完整 Plan/Inspect 编排。
+- [ ] 真实模型 E2E、真实包管理器写入式测试、live server CI 覆盖、LSP 按需安装管理器、完整 Plan/Inspect 编排。
 
 ---
 
