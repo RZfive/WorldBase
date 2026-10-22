@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { AnnotationAnchor, ChatMessageBlock, MessageAnnotation } from '../types'
+import type { ChatMessageBlock } from '../types'
 import { deriveWorkGroupStatus, formatElapsedDuration, type WorkGroupToolCounts } from '../message-utils'
 import type { WorkBurstEntry } from '../message-segments'
 import ExecutionDisclosure from './ExecutionDisclosure.vue'
@@ -10,48 +10,34 @@ import ToolRunBlock from './ToolRunBlock.vue'
 import WebSearchBlock from './WebSearchBlock.vue'
 import WebFetchBlock from './WebFetchBlock.vue'
 import FilePreviewBlock from './FilePreviewBlock.vue'
-import ContentBlock from './ContentBlock.vue'
 
 type ThinkingBlockModel = Extract<ChatMessageBlock, { kind: 'thinking' }>
 type ToolBlockModel = Extract<ChatMessageBlock, { kind: 'tool' }>
 type WebSearchBlockModel = Extract<ChatMessageBlock, { kind: 'web_search' }>
 type WebFetchBlockModel = Extract<ChatMessageBlock, { kind: 'web_fetch' }>
 type FilePreviewBlockModel = Extract<ChatMessageBlock, { kind: 'file_preview' }>
-type ContentBlockModel = Extract<ChatMessageBlock, { kind: 'content' }>
-type GroupBlock = ThinkingBlockModel | ToolBlockModel | WebSearchBlockModel | WebFetchBlockModel | FilePreviewBlockModel | ContentBlockModel
+type GroupBlock = ThinkingBlockModel | ToolBlockModel | WebSearchBlockModel | WebFetchBlockModel | FilePreviewBlockModel
 
 const props = withDefaults(defineProps<{
   /** Work-summary members with their original block index (for image/annotation anchoring). */
   entries: WorkBurstEntry[]
   /** Whether the owning message is the currently streaming one. */
   messageStreaming?: boolean
-  role?: string
-  messageIndex?: number
-  messageText?: string
-  annotations?: MessageAnnotation[]
 }>(), {
-  messageStreaming: false,
-  role: 'assistant',
-  messageIndex: -1,
-  messageText: '',
-  annotations: undefined
+  messageStreaming: false
 })
 
 const emit = defineEmits<{
-  (e: 'openLightbox', messageIndex: number, blockIndex: number, partIndex: number): void
-  (e: 'openMermaidPreview', code: string): void
-  (e: 'removeAnnotation', annotationId: string): void
-  (e: 'openAnnotationThread', payload: { annotationId: string; anchor: AnnotationAnchor }): void
   (e: 'openFilePath', filePath: string): void
 }>()
 
 const { t } = useI18n()
 
 // Codex-style work summary: consecutive thinking + tool + web result runs —
-// plus the narration between tool calls — collapse into ONE row — live
-// seconds while working, frozen total once settled — expanding to the full
-// trace (narration paragraphs, thinking pills, per-tool rows and web result
-// cards) underneath.
+// plus the settled "已写入" file rows — collapse into ONE row — live seconds
+// while working, frozen total once settled — expanding to the full trace
+// (thinking pills, per-tool rows, web result cards, written-file rows)
+// underneath. Assistant answer text is never part of this group.
 
 const hasRunningTool = computed(() => {
   return props.entries.some(({ block }) => block.kind === 'tool' && block.toolRun.status === 'running')
@@ -157,15 +143,12 @@ function getBlockVerbKey (block: GroupBlock): string {
   if (block.kind === 'web_search') return 'chatUi.toolVerbWebSearch'
   if (block.kind === 'web_fetch') return 'chatUi.toolVerbFetch'
   if (block.kind === 'file_preview') return 'chatUi.toolVerbWrite'
-  if (block.kind === 'content') return 'chatUi.toolVerbRun'
   return getToolVerbKey(block.toolRun.name)
 }
 
 const summaryText = computed(() => {
   const verbCounts = new Map<string, number>()
   for (const { block } of props.entries) {
-    // Narration is context, not an executed action — it stays out of the verb summary.
-    if (block.kind === 'content') continue
     const verbKey = getBlockVerbKey(block)
     verbCounts.set(verbKey, (verbCounts.get(verbKey) || 0) + 1)
   }
@@ -242,21 +225,6 @@ function isInnerThinkingStreaming (block: ThinkingBlockModel, index: number): bo
           :block="entry.block"
           class="tool-group-item"
         />
-        <ContentBlock
-          v-else-if="entry.block.kind === 'content'"
-          :block="entry.block"
-          :role="role"
-          :message-index="messageIndex"
-          :block-index="entry.blockIndex"
-          :is-streaming-block="false"
-          :message-text="messageText"
-          :annotations="annotations"
-          class="tool-group-item tool-group-narration"
-          @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
-          @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
-          @remove-annotation="(annotationId) => emit('removeAnnotation', annotationId)"
-          @open-annotation-thread="(payload) => emit('openAnnotationThread', payload)"
-        />
         <ToolRunBlock
           v-else
           :block="entry.block"
@@ -277,12 +245,5 @@ function isInnerThinkingStreaming (block: ThinkingBlockModel, index: number): bo
 
 .tool-group-item {
   margin: 0;
-}
-
-/* Narration folded into the trace reads as commentary, not as the answer —
-   keep it visually quieter than the trailing content block outside. */
-.tool-group-narration {
-  font-size: 0.92em;
-  color: var(--app-text-muted);
 }
 </style>

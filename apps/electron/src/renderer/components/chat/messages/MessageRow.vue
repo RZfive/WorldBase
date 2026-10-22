@@ -108,14 +108,13 @@ const lastContentBlockIndex = computed(() => getLastContentBlockIndex(blocks.val
 const messageText = computed(() => getMessageText())
 
 /**
- * Codex-style work summary: consecutive thinking + tool + web result runs —
- * plus the narration text between tool calls and settled "已写入" file rows —
- * collapse into ONE row (live seconds while working, frozen total once
- * settled), expanding to the full trace — narration paragraphs, thinking
- * pills, per-tool rows, web result cards and written-file rows. The message's
- * trailing content (the actual answer) always stays visible outside the
- * summary. The transform lives in message-segments.ts so it stays
- * unit-testable.
+ * Codex-style work summary: consecutive thinking + tool + web result runs plus
+ * settled "已写入" file rows collapse into ONE row (live seconds while working,
+ * frozen total once settled), expanding to the full trace — thinking pills,
+ * per-tool rows, web result cards and written-file rows. Assistant answer text
+ * is never folded in: every content block renders as its own visible paragraph
+ * at its original position. The transform lives in message-segments.ts so it
+ * stays unit-testable.
  */
 const renderSegments = computed(() => buildRenderSegments(blocks.value))
 
@@ -165,15 +164,6 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
               v-if="segment.type === 'group'"
               :entries="segment.groupEntries"
               :message-streaming="isStreamingAssistantMessage"
-              :role="props.msg.role"
-              :message-index="props.index"
-              :message-text="messageText"
-              :annotations="props.msg.annotations"
-              @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
-              @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
-              @remove-annotation="(annotationId) => emit('removeAnnotation', annotationId)"
-              @open-annotation-thread="(payload) => emit('openAnnotationThread', payload)"
-              @open-file-path="filePath => emit('openFilePath', filePath)"
             />
             <template v-else>
               <ThinkingBlock
@@ -191,8 +181,11 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
               />
             </template>
 
+            <!-- Single (ungrouped) blocks only: a work-summary group already
+                 renders its own members, so guarding here keeps a settled
+                 file-preview row from showing twice when it opens a run. -->
             <FilePreviewBlock
-              v-if="segment.block.kind === 'file_preview'"
+              v-if="segment.type === 'single' && segment.block.kind === 'file_preview'"
               :block="segment.block"
             />
 
@@ -237,12 +230,12 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
             />
 
             <WebSearchBlock
-              v-else-if="segment.block.kind === 'web_search'"
+              v-else-if="segment.type === 'single' && segment.block.kind === 'web_search'"
               :block="segment.block"
             />
 
             <WebFetchBlock
-              v-else-if="segment.block.kind === 'web_fetch'"
+              v-else-if="segment.type === 'single' && segment.block.kind === 'web_fetch'"
               :block="segment.block"
             />
 

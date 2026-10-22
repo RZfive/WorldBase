@@ -28,7 +28,13 @@ function idsOf (segment) {
   return segment.groupEntries.map(entry => entry.block.id)
 }
 
-test('narration between file-write tool calls folds into the work summary group', () => {
+function shapeOf (segments) {
+  return segments.map(segment => segment.type === 'group'
+    ? { type: 'group', ids: idsOf(segment) }
+    : { type: 'single', id: segment.block.id })
+}
+
+test('assistant text between tool calls stays outside the work summary group', () => {
   const blocks = [
     content('我来创建配置文件', 'n1'),
     tool('t1'),
@@ -40,14 +46,15 @@ test('narration between file-write tool calls folds into the work summary group'
 
   const segments = buildRenderSegments(blocks)
 
-  assert.equal(segments.length, 2)
-  const [group, answer] = segments
-  assert.equal(group.type, 'group')
-  assert.deepEqual(idsOf(group), ['n1', 't1', 't2', 'n2', 't3'])
-  // Narration keeps its original position so image/annotation anchors still resolve.
-  assert.deepEqual(group.groupEntries.map(entry => entry.blockIndex), [0, 1, 2, 3, 4])
-  assert.equal(answer.type, 'single')
-  assert.equal(answer.block.id, 'final')
+  assert.deepEqual(shapeOf(segments), [
+    { type: 'single', id: 'n1' },
+    { type: 'group', ids: ['t1', 't2'] },
+    { type: 'single', id: 'n2' },
+    { type: 'group', ids: ['t3'] },
+    { type: 'single', id: 'final' }
+  ])
+  // Content keeps its original index so image/annotation anchors still resolve.
+  assert.deepEqual(segments.map(segment => segment.blockIndex), [0, 1, 3, 4, 5])
 })
 
 test('trailing answer content always stays outside the group', () => {
@@ -61,12 +68,13 @@ test('trailing answer content always stays outside the group', () => {
   assert.equal(segments[1].block.id, 'final')
 })
 
-test('mid-work narration collapses once any work block follows it', () => {
+test('assistant text before work stays a standalone paragraph', () => {
   const segments = buildRenderSegments([content('正在写入文件', 'n1'), tool('t1')])
 
-  assert.equal(segments.length, 1)
-  assert.equal(segments[0].type, 'group')
-  assert.deepEqual(idsOf(segments[0]), ['n1', 't1'])
+  assert.deepEqual(shapeOf(segments), [
+    { type: 'single', id: 'n1' },
+    { type: 'group', ids: ['t1'] }
+  ])
 })
 
 test('plain text message is never grouped', () => {
@@ -75,6 +83,15 @@ test('plain text message is never grouped', () => {
   assert.equal(segments.length, 1)
   assert.equal(segments[0].type, 'single')
   assert.equal(segments[0].block.kind, 'content')
+})
+
+test('several assistant paragraphs stay separate visible segments', () => {
+  const segments = buildRenderSegments([content('第一段', 'c1'), content('第二段', 'c2')])
+
+  assert.deepEqual(shapeOf(segments), [
+    { type: 'single', id: 'c1' },
+    { type: 'single', id: 'c2' }
+  ])
 })
 
 test('lone thinking stays a standalone pill', () => {
@@ -104,16 +121,18 @@ test('web search and fetch runs keep grouping alongside tools', () => {
 
   const segments = buildRenderSegments(blocks)
 
-  assert.equal(segments.length, 2)
-  assert.equal(segments[0].type, 'group')
-  assert.deepEqual(idsOf(segments[0]), ['w1', 'n1', 'f1', 't1'])
-  assert.equal(segments[1].block.id, 'final')
+  assert.deepEqual(shapeOf(segments), [
+    { type: 'group', ids: ['w1'] },
+    { type: 'single', id: 'n1' },
+    { type: 'group', ids: ['f1', 't1'] },
+    { type: 'single', id: 'final' }
+  ])
 })
 
 test('group segments keep stable keys derived from the first member', () => {
-  const segments = buildRenderSegments([content('n', 'n1'), tool('t1'), content('done', 'final')])
+  const segments = buildRenderSegments([tool('t1'), tool('t2'), content('done', 'final')])
 
-  assert.equal(segments[0].key, 'group-n1')
+  assert.equal(segments[0].key, 'group-t1')
 })
 
 test('settled written-file rows fold into the work summary between tool bars', () => {
@@ -128,11 +147,11 @@ test('settled written-file rows fold into the work summary between tool bars', (
 
   const segments = buildRenderSegments(blocks)
 
-  assert.equal(segments.length, 2)
-  assert.equal(segments[0].type, 'group')
-  assert.deepEqual(idsOf(segments[0]), ['n1', 't1', 'p1', 't2', 'p2'])
-  assert.equal(segments[1].type, 'single')
-  assert.equal(segments[1].block.id, 'final')
+  assert.deepEqual(shapeOf(segments), [
+    { type: 'single', id: 'n1' },
+    { type: 'group', ids: ['t1', 'p1', 't2', 'p2'] },
+    { type: 'single', id: 'final' }
+  ])
 })
 
 test('active file-preview row stays visible while the file is being written', () => {
