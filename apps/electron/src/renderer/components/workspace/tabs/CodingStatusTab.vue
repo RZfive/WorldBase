@@ -635,9 +635,11 @@ const stopReasonLabel = computed(() => {
 
 .phase-list::before {
   position: absolute;
-  top: 8px;
-  bottom: 8px;
-  left: 7px;
+  top: 10px;
+  bottom: 10px;
+  /* Tick centers sit 11.5px from the list's left edge (4px item padding +
+     15px tick / 2). Keep the connector on that axis instead of left of it. */
+  left: 11px;
   width: 1px;
   background: var(--app-border);
   content: '';

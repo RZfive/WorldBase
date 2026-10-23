@@ -337,7 +337,9 @@ function togglePanel(): void {
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
   border-radius: 11px;
-  background: var(--app-panel-muted);
+  /* The strip sits above the composer; a translucent muted fill let the chat
+     text behind it bleed through, so use the solid panel surface. */
+  background: var(--app-panel);
   box-sizing: border-box;
 }
 
