@@ -1581,6 +1581,37 @@ fn coding_mode_prompt() -> String {
         .into()
 }
 
+fn work_mode_selection_prompt() -> String {
+    "## Work mode\n\
+     - Before the first file or project mutation, call `select_work_mode` with `coding`, `document`, or `chat`.\n\
+     - Use `coding` when the task creates or changes an app, source code, config, scripts, build output, or project files.\n\
+     - Use `document` when the target is an Office/PDF/Markdown document; read it with read_document/doc_parse and edit it only with doc_draft.\n\
+     - Use `chat` for questions or analysis that should not modify files.\n\
+     - When unsure between coding and document, inspect the target file type first. Selecting `coding` activates the coding verification gate and code-diff tracking for the rest of this run.\n\
+     - Never write Office/PDF documents with coding or generic file-write tools."
+        .into()
+}
+
+fn coding_mode_activation_requested(tool_uses: &[(String, String, serde_json::Value)]) -> bool {
+    for (_, name, input) in tool_uses {
+        if name == "select_work_mode"
+            && input
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .map(|mode| mode.eq_ignore_ascii_case("coding"))
+                .unwrap_or(false)
+        {
+            return true;
+        }
+        if matches!(name.as_str(), "create_project" | "create_lightweight_app")
+            || name.starts_with("coding_")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn coding_profile_prompt(profile: &worldbase_coding::VerificationProfile) -> String {
     let commands = if profile.commands.is_empty() {
         "- No verification command was discovered from the project manifest. Inspect the project and use the strongest available check, or report verification as unavailable."
@@ -1643,9 +1674,14 @@ fn static_system_prompt_sections(
         role_and_core_rules_prompt(&tools),
         response_formatting_prompt(),
         available_tools_prompt(&tools),
+    ];
+    if tools.has("select_work_mode") {
+        sections.push(work_mode_selection_prompt());
+    }
+    sections.extend([
         software_engineering_prompt(&tools),
         execution_safety_prompt(&tools),
-    ];
+    ]);
     if tools.has("memory_search") {
         if context.memory_scopes.is_empty() {
             sections.push(
@@ -3810,6 +3846,47 @@ mod tests {
         )
         .join("\n\n");
         assert!(unbound_prompt.contains("## New managed project workflow"));
+    }
+
+    #[test]
+    fn work_mode_prompt_is_advertised_when_the_tool_is_visible() {
+        let tools = vec![prompt_tool("select_work_mode", "Choose the work mode.")];
+        let prompt = static_system_prompt_sections(
+            std::path::Path::new("/workspace"),
+            &ChatRunContext::default(),
+            &tools,
+        )
+        .join("\n\n");
+        assert!(prompt.contains("## Work mode"));
+        assert!(prompt.contains("select_work_mode"));
+        assert!(prompt.contains("doc_draft"));
+    }
+
+    #[test]
+    fn coding_mode_activation_tracks_ai_selection_and_code_actions() {
+        let call = |name: &str, input: serde_json::Value| {
+            (format!("call-{name}"), name.to_string(), input)
+        };
+        assert!(coding_mode_activation_requested(&[call(
+            "select_work_mode",
+            serde_json::json!({"mode": "coding"})
+        )]));
+        assert!(!coding_mode_activation_requested(&[call(
+            "select_work_mode",
+            serde_json::json!({"mode": "document"})
+        )]));
+        assert!(coding_mode_activation_requested(&[call(
+            "create_project",
+            serde_json::json!({"name": "demo"})
+        )]));
+        assert!(!coding_mode_activation_requested(&[call(
+            "write_project_file",
+            serde_json::json!({"file_path": "src/main.ts", "content": "x"})
+        )]));
+        assert!(!coding_mode_activation_requested(&[call(
+            "doc_draft",
+            serde_json::json!({"file_path": "docs/report.docx"})
+        )]));
     }
 
     #[test]
@@ -7192,6 +7269,7 @@ async fn run_chat_inner(
     let mut total_input_tokens = 0u64;
     let mut total_output_tokens = 0u64;
     let mut finish_task_state = FinishTaskState::default();
+    let mut coding_mode_active = context.coding_mode;
     let mut coding_state = context.coding_mode.then(|| {
         let mut state = CodingState::new(CodingPolicy {
             enabled: true,
@@ -7582,6 +7660,33 @@ async fn run_chat_inner(
         let (finish_call, assistant_msg) = split_finish_task_tool_calls(assistant_msg);
         let tool_uses = assistant_msg.tool_uses();
 
+        // The model can select coding mode explicitly with select_work_mode,
+        // or implicitly by creating a project / editing a code file. Activation
+        // is monotonic for this run: document or chat selection never disables
+        // a coding gate that the model already triggered.
+        let mut coding_mode_activated_now = false;
+        if !coding_mode_active && coding_mode_activation_requested(&tool_uses) {
+            coding_mode_active = true;
+            coding_mode_activated_now = true;
+            if coding_state.is_none() {
+                let mut state = CodingState::new(CodingPolicy {
+                    enabled: true,
+                    ..CodingPolicy::default()
+                });
+                state.begin();
+                coding_state = Some(state);
+            }
+            publish(
+                &hub,
+                &channel,
+                &stream_id,
+                EventKind::Notice {
+                    text: "已切换到编码模式：启用编码验证与代码差异跟踪。".into(),
+                },
+            )
+            .await;
+        }
+
         // A lone finish signal is terminal metadata, not an executable tool
         // call. Persist and publish only its rendered user-visible message so
         // replay never contains a tool_use without a matching tool_result.
@@ -7914,6 +8019,15 @@ async fn run_chat_inner(
             role: LlmRole::User,
             content: tool_results_for_llm.clone(),
         });
+        if coding_mode_activated_now {
+            llm_messages.push(LlmMessage::text(
+                LlmRole::User,
+                format!(
+                    "Work mode selected by the model: coding. This is now active for the rest of the run.\n\n{}",
+                    coding_mode_prompt()
+                ),
+            ));
+        }
         let tr_record = ChatMessage {
             id: 0,
             role: Role::User,

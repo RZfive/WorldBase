@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import './register-ts-hooks.mjs'
-import { RustHarnessEngine, codingEventsForGenericFileResult, codingEventsForToolResult, planModeExitedAfterNativeResult, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
+import { RustHarnessEngine, codingEventsForGenericFileResult, codingEventsForToolResult, planModeExitedAfterNativeResult, shouldActivateCodingMode, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
 import { codingStatusForCancelledRun } from '../src/shared/coding-status-types.ts'
 import {
   CODING_STATE_STORAGE_PREFIX,
@@ -1894,6 +1894,17 @@ test('coding tool results map into status and diff stream events', () => {
   assert.equal(apply.diff.files[0].filePath, 'src/main.ts')
   assert.equal(apply.diff.files[1].filePath, 'src/a.ts')
   assert.equal(apply.diff.files[1].changes.length, 2)
+})
+
+test('AI-selected and implicit coding actions activate coding mode', () => {
+  assert.equal(shouldActivateCodingMode('select_work_mode', { mode: 'coding' }), true)
+  assert.equal(shouldActivateCodingMode('select_work_mode', { mode: 'document' }), false)
+  assert.equal(shouldActivateCodingMode('select_work_mode', { mode: 'chat' }), false)
+  assert.equal(shouldActivateCodingMode('create_project', {}), true)
+  assert.equal(shouldActivateCodingMode('coding_verify', {}), true)
+  assert.equal(shouldActivateCodingMode('write_project_file', { file_path: 'src/main.ts' }), false)
+  assert.equal(shouldActivateCodingMode('write_workspace_file', { path: 'src/App.vue' }), false)
+  assert.equal(shouldActivateCodingMode('doc_draft', { file_path: 'docs/report.docx' }), false)
 })
 
 test('generic code writes map into coding status and diff', () => {

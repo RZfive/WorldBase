@@ -273,10 +273,21 @@ pub(crate) fn resolve_coding_workspace(
         .as_deref()
         .map(str::trim)
         .filter(|project_id| !project_id.is_empty());
-    if let Some(project_id) = explicit_project.or(target_project) {
-        let root = services.projects.project_root(project_id)?;
+    // After create_project, coding tools should continue against the project
+    // created earlier in the same run even if the model omits project_id.
+    let created_project = services
+        .created_project_id
+        .lock()
+        .ok()
+        .and_then(|value| value.clone());
+    let project_id = explicit_project
+        .or(target_project)
+        .map(str::to_string)
+        .or(created_project);
+    if let Some(project_id) = project_id {
+        let root = services.projects.project_root(&project_id)?;
         return Ok(CodingWorkspace {
-            project_id: Some(project_id.to_string()),
+            project_id: Some(project_id),
             root,
         });
     }

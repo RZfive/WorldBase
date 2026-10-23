@@ -189,7 +189,7 @@ export class RustHarnessEngine implements AIHarness {
     )
     const history = priorMessages
       .filter(message => message.role !== 'system' && message.role !== 'developer') as RustSyncMessage[]
-    const codingModeEnabled = options?.codingMode ??
+    let codingModeEnabled = options?.codingMode ??
       Boolean(options?.targetProjectId || this.defaultTargetProjectId || options?.workspaceRoot)
     const queue: StreamEvent[] = []
     let terminal = false
@@ -250,6 +250,22 @@ export class RustHarnessEngine implements AIHarness {
       }
       if (frame.kind === 'tool_call') {
         const toolName = stringValue(frame.name)
+        if (!codingModeEnabled && shouldActivateCodingMode(toolName, frame.args)) {
+          codingModeEnabled = true
+          // A coding tool already emits its own phase below; only explicit
+          // mode selection and implicit non-coding actions need a separate
+          // activation status.
+          if (!isCodingToolName(toolName)) {
+            codingStatus = codingStatusForModeActivation(codingStatus)
+            emit({ type: 'coding_status', status: codingStatus })
+            // Clear a previous run's diff so a newly selected coding mode does
+            // not show stale files before the first real edit arrives.
+            if (!codingDiff?.files.length) {
+              codingDiff = { files: [], updatedAt: Date.now() }
+              emit({ type: 'coding_diff', diff: codingDiff })
+            }
+          }
+        }
         if (isCodingToolName(toolName)) {
           codingStatus = codingStatusForToolStart(codingStatus, toolName)
           emit({ type: 'coding_status', status: codingStatus })
@@ -636,6 +652,33 @@ function parseToolResult (content: unknown): unknown {
     return JSON.parse(content)
   } catch {
     return content
+  }
+}
+
+/**
+ * The model owns the final work-mode decision. `select_work_mode` is the
+ * explicit signal; creating a project or calling a coding tool is the implicit
+ * fallback for models that skip the mode call. Generic file writes stay in the
+ * normal flow so a simple text edit cannot accidentally arm the coding gate.
+ */
+export function shouldActivateCodingMode (name: string, args: unknown): boolean {
+  if (!name) return false
+  if (name === 'select_work_mode') {
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return false
+    const mode = (args as Record<string, unknown>).mode
+    return typeof mode === 'string' && mode.trim().toLowerCase() === 'coding'
+  }
+  return name === 'create_project' ||
+    name === 'create_lightweight_app' ||
+    name.startsWith('coding_')
+}
+
+function codingStatusForModeActivation (previous: CodingStatus | null): CodingStatus {
+  const base = previous ?? emptyCodingStatus()
+  return {
+    ...base,
+    phase: 'plan',
+    updatedAt: Date.now()
   }
 }
 

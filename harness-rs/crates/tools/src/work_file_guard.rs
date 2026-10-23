@@ -205,6 +205,16 @@ pub(crate) fn assert_document_target(file_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether a generic write to this path should activate coding mode. Text
+/// formats such as Markdown/CSV are reviewable code-side edits when no
+/// document surface was selected.
+pub(crate) fn is_coding_activation_path(file_path: &str) -> bool {
+    matches!(
+        classify_work_file(file_path),
+        WorkFileKind::Code | WorkFileKind::MarkdownText
+    )
+}
+
 /// Add `before_content` / `after_content` / `content_truncated` to a generic
 /// write result for reviewable text files. Document and asset targets keep
 /// their existing result shape.

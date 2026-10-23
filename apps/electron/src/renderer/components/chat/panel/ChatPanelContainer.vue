@@ -72,7 +72,6 @@ const { t } = useI18n()
 
 const autoOpenedCodingConversations = new Set<string>()
 const autoFocusedCodingDiffAt = new Map<string, number>()
-const pendingCodingWorkspaceRoot = ref<string | null>(null)
 
 const DEFAULT_APP_WINDOW_MIN_WIDTH = 800
 const CONVERSATION_SIDEBAR_WIDTH = 224
@@ -1349,28 +1348,10 @@ function pickProject (entry: ProjectPickerEntry): void {
   if (purpose === 'coding') {
     targetProjectId.value = entry.id
     void openWorkspaceTab('project', { projectId: entry.id, name: entry.name })
-    void sendMessage(undefined, { codingRun: true })
+    void sendMessage()
     return
   }
   void openWorkspaceTab('project', { projectId: entry.id, name: entry.name })
-}
-
-function resolveActiveProjectId (): string | null {
-  const activeTab = getActiveWorkspaceTab()
-  const activeProjectId = activeTab?.kind === 'project' ? activeTab.state?.projectId : null
-  if (typeof activeProjectId === 'string' && activeProjectId.trim()) {
-    return activeProjectId.trim()
-  }
-
-  const projectIds = Array.from(new Set(
-    workspaceStore.tabs.value
-      .filter(tab => tab.kind === 'project')
-      .map(tab => tab.state?.projectId)
-      .filter((projectId): projectId is string => (
-        typeof projectId === 'string' && projectId.trim().length > 0
-      ))
-  ))
-  return projectIds.length === 1 ? projectIds[0] : null
 }
 
 function getDocumentTabsForRunContext (): WorkspaceTabInstance[] {
@@ -1404,75 +1385,18 @@ function resolveChatRunContext () {
   })
 }
 
-async function sendMessageWithCodingRoot (): Promise<void> {
-  const codingWorkspaceRoot = pendingCodingWorkspaceRoot.value
-  try {
-    await sendMessage(undefined, { codingWorkspaceRoot, codingRun: true })
-  } finally {
-    pendingCodingWorkspaceRoot.value = null
-  }
-}
-
-async function pickCodingFolderAndSend (): Promise<void> {
-  const api = window.electronAPI
-  if (!api?.pickFolderWorkspace) {
-    await openProjectPicker('coding')
-    return
-  }
-
-  const conversationId = currentConversationId.value
-  try {
-    const picked = await api.pickFolderWorkspace()
-    if (picked.canceled || !picked.rootPath) return
-    if (currentConversationId.value !== conversationId) return
-    pendingCodingWorkspaceRoot.value = picked.rootPath
-    await sendMessageWithCodingRoot()
-  } catch {
-    return
-  }
-}
-
 function handleChatSend (): void {
   if (isLoading.value || isUploadingFiles.value) return
 
-  const text = inputText.value
-  const hasProjectTag = /\[\[project:[^\]]+\]\]/.test(text)
-  if (hasProjectTag) {
-    void sendMessage()
-    return
-  }
-
   const runContext = resolveChatRunContext()
-  if (!runContext.coding.enabled) {
-    pendingCodingWorkspaceRoot.value = null
-    void sendMessage()
-    return
-  }
-
-  if (runContext.coding.root) {
-    pendingCodingWorkspaceRoot.value = runContext.coding.root
-    void sendMessageWithCodingRoot()
-    return
-  }
-
-  if (targetProjectId.value) {
-    void sendMessage(undefined, { codingRun: true })
-    return
-  }
-
-  const activeProjectId = resolveActiveProjectId()
-  if (activeProjectId) {
-    targetProjectId.value = activeProjectId
-    void sendMessage(undefined, { codingRun: true })
-    return
-  }
-
-  if (runContext.documents.length === 0 && !runContext.folderRoot) {
-    void openProjectPicker('coding')
-    return
-  }
-
-  void pickCodingFolderAndSend()
+  const folderRoot = buildCurrentFolderWorkspaceState()?.rootPath
+  // The renderer only supplies a root hint for document-project coding. The
+  // mode itself is chosen by the model through select_work_mode (or the
+  // create_project/coding-tool fallback), never by this regex prefill.
+  const codingWorkspaceRoot = !targetProjectId.value && !folderRoot
+    ? runContext.coding.root
+    : null
+  void sendMessage(undefined, codingWorkspaceRoot ? { codingWorkspaceRoot } : undefined)
 }
 
 function closeWorkspaceTab (tabId: string): void {

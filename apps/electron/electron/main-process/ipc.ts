@@ -100,20 +100,22 @@ function buildFolderWorkspacePromptSection (workspaceRoot: string | null): strin
   ].join('\n')
 }
 
-function buildCodingWorkspacePromptSection (workspaceRoot: string | null): string | null {
+/**
+ * Neutral workspace context for AI-decided work modes. It deliberately does
+ * not prescribe code-edit tools: the model first calls select_work_mode, then
+ * the activated mode's prompt supplies the concrete tool rules.
+ */
+function buildWorkspaceRootPromptSection (workspaceRoot: string | null): string | null {
   if (!workspaceRoot) return null
   const rootName = getFolderWorkspaceRootName(workspaceRoot)
   return [
-    '## Coding workspace',
-    `The user selected a local coding workspace for this conversation: ${rootName}`,
+    '## Conversation workspace',
+    `The user selected a local workspace for this conversation: ${rootName}`,
     `Absolute workspace path: ${workspaceRoot}`,
-    '- Inspect the workspace with list_workspace_files, read_workspace_file, grep_workspace, and glob_workspace.',
-    '- This folder may contain both documents and code. Route by file type, not by folder.',
-    '- Edit supported source files with coding_edit or coding_apply, and verify with coding_verify. If verification fails, run coding_diagnose before repairing.',
-    '- For code/config types coding tools do not support, use the workspace/project write or patch tools; their code changes still produce a diff.',
-    '- Documents go through doc_draft. Never write Office/PDF documents directly with file-write tools.',
+    '- Inspect with list_workspace_files, read_workspace_file, grep_workspace, and glob_workspace.',
     '- Use relative paths inside the selected workspace. Do not use absolute paths as tool arguments.',
-    '- Plan mode still applies: read/search tools are allowed, while workspace write/delete/run tools are blocked until planning exits.'
+    '- Before the first file/project mutation, choose a work mode with `select_work_mode`.',
+    '- Coding edits use coding tools; Office/PDF documents go through doc_draft. Never write Office/PDF directly.'
   ].join('\n')
 }
 
@@ -477,11 +479,7 @@ export function setupIPC (): void {
     const resolvedFolderWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(folderWorkspaceRoot)
     const resolvedCodingWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(codingWorkspaceRoot)
     const effectiveWorkspaceRoot = resolvedCodingWorkspaceRoot ?? resolvedFolderWorkspaceRoot
-    // Only an explicit coding root supplies a coding workspace section. The
-    // generic folder prompt is suppressed below whenever the run is coding.
-    const codingWorkspacePromptSection = resolvedCodingWorkspaceRoot
-      ? buildCodingWorkspacePromptSection(effectiveWorkspaceRoot)
-      : null
+    const workspacePromptSection = buildWorkspaceRootPromptSection(effectiveWorkspaceRoot)
     const baseRuntimeContext = await resolveAgentRuntimeContext({
       messages,
       agentId,
@@ -513,16 +511,9 @@ export function setupIPC (): void {
           requestedTemperature: temperature
         })
       : baseRuntimeContext
-    // Coding mode is explicit for this path: a coding root or a bound managed
-    // project. A folder root alone must not force document-only turns into the
-    // coding gate, and coding runs must never receive the generic folder edit
-    // instructions that conflict with coding tools.
-    const codingModeEnabled = Boolean(
-      resolvedCodingWorkspaceRoot || runtimeContext.effectiveTargetProjectId
-    )
-    const folderWorkspacePromptSection = codingModeEnabled
-      ? null
-      : buildFolderWorkspacePromptSection(resolvedFolderWorkspaceRoot)
+    // Work mode (coding/document/chat) is selected by the model through
+    // select_work_mode. The renderer's regex may suggest a coding root, but it
+    // never pre-arms the coding gate for the run.
     const directGroupReplyPromptSection = directGroupReply
       ? buildDirectGroupReplyPromptSection(directGroupReply)
       : null
@@ -759,8 +750,7 @@ export function setupIPC (): void {
                   reasoningEffort: runtimeContext.providerConfig?.reasoningEffort,
                   temperature: runtimeContext.providerConfig?.temperature,
                   systemPromptSections: [
-                    ...(folderWorkspacePromptSection ? [folderWorkspacePromptSection] : []),
-                    ...(codingWorkspacePromptSection ? [codingWorkspacePromptSection] : []),
+                    ...(workspacePromptSection ? [workspacePromptSection] : []),
                     ...(activePagePromptSection ? [activePagePromptSection] : []),
                     ...(activeTerminalPromptSection ? [activeTerminalPromptSection] : []),
                     ...(activeCodeViewPromptSection ? [activeCodeViewPromptSection] : []),
@@ -783,9 +773,9 @@ export function setupIPC (): void {
           sessionId,
           targetProjectId: runtimeContext.effectiveTargetProjectId,
           workspaceRoot: effectiveWorkspaceRoot,
-          // A folder root alone no longer implies coding: document-only or
-          // normal turns in a folder workspace must not enter the coding gate.
-          codingMode: codingModeEnabled,
+          // Start neutral; select_work_mode (or the create_project/coding-tool
+          // fallback) activates coding mode inside the Rust agent loop.
+          codingMode: false,
           computerUseEnabled: computerUseEnabled === true,
           providerConfig: runtimeContext.providerConfig,
           abortSignal: abortController.signal,
@@ -795,8 +785,7 @@ export function setupIPC (): void {
           activeSkillContents: runtimeContext.activeSkillContents,
           systemPromptSections: [
             ...runtimeContext.systemPromptSections,
-            ...(folderWorkspacePromptSection ? [folderWorkspacePromptSection] : []),
-            ...(codingWorkspacePromptSection ? [codingWorkspacePromptSection] : []),
+            ...(workspacePromptSection ? [workspacePromptSection] : []),
             ...(activePagePromptSection ? [activePagePromptSection] : []),
             ...(activeTerminalPromptSection ? [activeTerminalPromptSection] : []),
             ...(directGroupReplyPromptSection ? [directGroupReplyPromptSection] : []),

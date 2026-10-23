@@ -39,7 +39,8 @@ pub mod skill_tools;
 pub mod subagent;
 pub mod todo;
 pub mod web;
-mod work_file_guard;
+pub mod work_file_guard;
+pub mod work_mode;
 
 pub use command::ExecuteCommandTool;
 pub use compat_tools::{
@@ -570,6 +571,11 @@ pub fn filter_tools<'a>(
 }
 
 /// Whether a tool belongs to Electron's generated canonical agent surface.
+/// Whether a path should be routed through the coding workflow.
+pub fn is_coding_file_path(path: &str) -> bool {
+    work_file_guard::is_coding_activation_path(path)
+}
+
 pub fn is_electron_tool_name(name: &str) -> bool {
     electron_contract::contains(name)
 }
@@ -678,6 +684,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(coding_lsp::CodingLspTool),
         Arc::new(coding_project::CodingProjectTool),
         Arc::new(coding_fix::CodingFixDependenciesTool),
+        Arc::new(work_mode::SelectWorkModeTool),
         Arc::new(FinalizeProjectTool),
         Arc::new(ClearProjectBuildFlagTool),
         Arc::new(GetProjectLogsTool),

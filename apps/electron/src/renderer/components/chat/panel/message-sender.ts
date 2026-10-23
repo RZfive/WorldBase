@@ -63,7 +63,6 @@ import {
 } from '../../workspace/workspace-store'
 import { codingStatusForCancelledRun, type CodingDiffState, type CodingStatus } from '../../../../shared/coding-status-types.js'
 import {
-  clearCodingState,
   flushCodingStateSave,
   saveCodingStateNow,
   scheduleCodingStateSave
@@ -147,9 +146,8 @@ export interface PreparedUserMessage {
 }
 
 export interface SendMessageOptions {
+  /** Optional coding root for this run; work mode itself is chosen by the model. */
   codingWorkspaceRoot?: string | null
-  /** Reset the previous coding trace when a new coding run starts. */
-  codingRun?: boolean
 }
 
 export function extractSelectionQuoteRefs (text: string, pattern: RegExp): { quoteIds: string[]; normalizedText: string } {
@@ -541,15 +539,6 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       toolRuns.push(created)
       syncAssistantToolRuns()
       return created
-    }
-
-    // Only a new coding run resets the previous coding trace. A normal or
-    // document-only follow-up keeps the last diagnostics/diff visible instead
-    // of blanking the system-managed tabs on every send.
-    if (sendOptions?.codingRun) {
-      clearCodingState(convId)
-      codingStatusByConversation.delete(convId)
-      codingDiffByConversation.delete(convId)
     }
 
     streamingConvIds.add(convId)
