@@ -1111,7 +1111,7 @@ function resolveWrittenFilePath (rawPath: string, candidateRoots: string[]): str
   if (path.isAbsolute(rawPath)) return path.normalize(rawPath)
   let fallback = ''
   for (const root of candidateRoots) {
-    const trimmedRoot = root.trim()
+    const trimmedRoot = typeof root === 'string' ? root.trim() : ''
     if (!trimmedRoot) continue
     const joined = path.join(trimmedRoot, rawPath)
     if (!fallback) fallback = joined

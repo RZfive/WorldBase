@@ -44,6 +44,7 @@ import { readUploadedAttachmentFromBuffer, readUploadedAttachmentFromPath, type 
 import { ensureDocumentRenderPreview } from './media/document-preview.js'
 import { DocumentFileWatcher } from './document-file-watcher.js'
 import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, notifyAiTaskStatus, refreshProviderReasoningMetadata, resolveAgentRuntimeContext, resolveMemoryEmbeddingRuntimeConfig, resolveProviderConfig } from './ai/agent-context.js'
+import { toRendererStreamEvent } from './ai/stream-event-contract.js'
 import { startSelectedRustHarness } from './ai/selected-execution-engine.js'
 import type { JsonRpcResult } from './rust-harness-client.js'
 import { getConversationTitleFromMessages, getLastUserMessageText, getMessageText } from './chat-message-utils.js'
@@ -542,6 +543,7 @@ export function setupIPC (): void {
     let textFlushTimer: ReturnType<typeof setTimeout> | null = null
 
     const sendEventToRenderer = (event: Record<string, unknown>) => {
+      event = toRendererStreamEvent(event)
       if (sender.isDestroyed()) return
 
       try {

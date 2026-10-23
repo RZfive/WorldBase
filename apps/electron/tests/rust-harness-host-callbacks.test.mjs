@@ -5,6 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 import './register-ts-hooks.mjs'
 import { RustHarnessEngine, codingEventsForGenericFileResult, codingEventsForToolResult, planModeExitedAfterNativeResult, shouldActivateCodingMode, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
+import { toRendererStreamEvent } from '../electron/main-process/ai/stream-event-contract.ts'
 import { codingStatusForCancelledRun } from '../src/shared/coding-status-types.ts'
 import {
   CODING_STATE_STORAGE_PREFIX,
@@ -1896,6 +1897,21 @@ test('coding tool results map into status and diff stream events', () => {
   assert.equal(apply.diff.files[1].changes.length, 2)
 })
 
+test('renderer stream contract maps coding status and diff field names', () => {
+  const status = { phase: 'edit' }
+  const diff = { files: [], updatedAt: 1 }
+  assert.deepEqual(toRendererStreamEvent({ type: 'coding_status', status }), {
+    type: 'coding_status',
+    codingStatus: status
+  })
+  assert.deepEqual(toRendererStreamEvent({ type: 'coding_diff', diff }), {
+    type: 'coding_diff',
+    codingDiff: diff
+  })
+  const token = { type: 'token', content: 'hello' }
+  assert.equal(toRendererStreamEvent(token), token)
+})
+
 test('AI-selected and implicit coding actions activate coding mode', () => {
   assert.equal(shouldActivateCodingMode('select_work_mode', { mode: 'coding' }), true)
   assert.equal(shouldActivateCodingMode('select_work_mode', { mode: 'document' }), false)
@@ -1950,6 +1966,61 @@ test('generic code writes map into coding status and diff', () => {
   )
   assert.equal(read.status, null)
   assert.equal(read.diff, null)
+})
+
+test('select_work_mode activates coding events for a following generic write', async () => {
+  const client = {
+    ...createNativeToolClient([{
+      name: 'select_work_mode',
+      description: 'Select work mode',
+      inputSchema: { type: 'object' },
+      electronNative: true
+    }, {
+      name: 'write_project_file',
+      description: 'Write a project file',
+      inputSchema: { type: 'object' },
+      electronNative: true
+    }]),
+    async chatStream (_sessionId, _conversationId, _text, _options, onFrame) {
+      onFrame({ kind: 'tool_call', name: 'select_work_mode', call_id: 'mode-1', args: { mode: 'coding' } })
+      onFrame({
+        kind: 'tool_result',
+        name: 'select_work_mode',
+        call_id: 'mode-1',
+        content: JSON.stringify({ mode: 'coding', coding: true, acknowledged: true })
+      })
+      onFrame({ kind: 'tool_call', name: 'write_project_file', call_id: 'write-1', args: { file_path: 'src/main.ts' } })
+      onFrame({
+        kind: 'tool_result',
+        name: 'write_project_file',
+        call_id: 'write-1',
+        content: JSON.stringify({
+          success: true,
+          file_path: 'src/main.ts',
+          before_content: 'const a = 1;\n',
+          after_content: 'const a = 2;\n',
+          content_truncated: false
+        })
+      })
+      onFrame({ kind: 'done', stopReason: 'completed' })
+      return { streamId: 'mode-activation-stream' }
+    }
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  const events = []
+  for await (const event of engine.chatStream([{ role: 'user', content: 'create an app' }])) {
+    events.push(event)
+  }
+
+  const statuses = events.filter(event => event.type === 'coding_status').map(event => event.status)
+  const diffs = events.filter(event => event.type === 'coding_diff').map(event => event.diff)
+  assert.ok(statuses.length >= 1)
+  assert.equal(statuses[0].phase, 'plan')
+  assert.equal(statuses.at(-1).phase, 'edit')
+  assert.deepEqual(statuses.at(-1).changedFiles, ['src/main.ts'])
+  assert.equal(diffs.at(-1).files[0].filePath, 'src/main.ts')
+  assert.equal(diffs.at(-1).files[0].changes[0].before, 'const a = 1;\n')
+  assert.equal(diffs.at(-1).files[0].changes[0].after, 'const a = 2;\n')
 })
 
 test('cancelled coding runs map to a blocked cancelled status stream event', async () => {
