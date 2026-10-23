@@ -101,17 +101,220 @@ function openActiveFile (): void {
   workspaceStore.visible.value = true
 }
 
-function buildDiffText (file: CodingDiffFile): string {
-  const lines = [file.filePath]
-  for (const change of file.changes) {
-    lines.push('')
-    lines.push(`# ${change.operation}`)
-    lines.push(`--- ${t('chatUi.codingDiffBefore')}`)
-    lines.push(change.before)
-    lines.push(`+++ ${t('chatUi.codingDiffAfter')}`)
-    lines.push(change.after)
+interface DiffRow {
+  kind: 'added' | 'removed' | 'context'
+  oldNumber: number | null
+  newNumber: number | null
+  text: string
+}
+
+interface ChangeView {
+  key: string
+  operation: string
+  startByte?: number
+  endByte?: number
+  rows: DiffRow[]
+  additions: number
+  deletions: number
+}
+
+/** Guard the O(n*m) LCS table; larger hunks fall back to a coarse replacement. */
+const MAX_DIFF_MATRIX_CELLS = 4_000_000
+
+const COPY_PREFIX: Record<DiffRow['kind'], string> = {
+  added: '+',
+  removed: '-',
+  context: ' '
+}
+
+function splitDiffLines (text: string): string[] {
+  const normalized = (text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  if (!normalized) return []
+  const lines = normalized.split('\n')
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop()
+  return lines
+}
+
+function coarseRows (
+  before: string[],
+  after: string[],
+  oldOffset: number,
+  newOffset: number
+): DiffRow[] {
+  const rows: DiffRow[] = []
+  before.forEach((text, index) => {
+    rows.push({ kind: 'removed', oldNumber: oldOffset + index + 1, newNumber: null, text })
+  })
+  after.forEach((text, index) => {
+    rows.push({ kind: 'added', oldNumber: null, newNumber: newOffset + index + 1, text })
+  })
+  return rows
+}
+
+function diffRowsForMiddle (
+  before: string[],
+  after: string[],
+  oldOffset: number,
+  newOffset: number
+): DiffRow[] {
+  const beforeLength = before.length
+  const afterLength = after.length
+  if (beforeLength === 0) {
+    return after.map((text, index) => ({
+      kind: 'added' as const,
+      oldNumber: null,
+      newNumber: newOffset + index + 1,
+      text
+    }))
   }
+  if (afterLength === 0) {
+    return before.map((text, index) => ({
+      kind: 'removed' as const,
+      oldNumber: oldOffset + index + 1,
+      newNumber: null,
+      text
+    }))
+  }
+  if ((beforeLength + 1) * (afterLength + 1) > MAX_DIFF_MATRIX_CELLS) {
+    return coarseRows(before, after, oldOffset, newOffset)
+  }
+
+  const width = afterLength + 1
+  const table = new Int32Array((beforeLength + 1) * width)
+  for (let i = beforeLength - 1; i >= 0; i -= 1) {
+    const row = i * width
+    const nextRow = row + width
+    for (let j = afterLength - 1; j >= 0; j -= 1) {
+      table[row + j] = before[i] === after[j]
+        ? table[nextRow + j + 1] + 1
+        : Math.max(table[nextRow + j], table[row + j + 1])
+    }
+  }
+
+  const rows: DiffRow[] = []
+  let i = 0
+  let j = 0
+  while (i < beforeLength && j < afterLength) {
+    if (before[i] === after[j]) {
+      rows.push({
+        kind: 'context',
+        oldNumber: oldOffset + i + 1,
+        newNumber: newOffset + j + 1,
+        text: before[i]
+      })
+      i += 1
+      j += 1
+    } else if (table[(i + 1) * width + j] >= table[i * width + j + 1]) {
+      rows.push({ kind: 'removed', oldNumber: oldOffset + i + 1, newNumber: null, text: before[i] })
+      i += 1
+    } else {
+      rows.push({ kind: 'added', oldNumber: null, newNumber: newOffset + j + 1, text: after[j] })
+      j += 1
+    }
+  }
+  while (i < beforeLength) {
+    rows.push({ kind: 'removed', oldNumber: oldOffset + i + 1, newNumber: null, text: before[i] })
+    i += 1
+  }
+  while (j < afterLength) {
+    rows.push({ kind: 'added', oldNumber: null, newNumber: newOffset + j + 1, text: after[j] })
+    j += 1
+  }
+  return rows
+}
+
+function buildUnifiedRows (beforeText: string, afterText: string): DiffRow[] {
+  const before = splitDiffLines(beforeText)
+  const after = splitDiffLines(afterText)
+
+  let prefix = 0
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) {
+    prefix += 1
+  }
+  let suffix = 0
+  while (
+    suffix < before.length - prefix &&
+    suffix < after.length - prefix &&
+    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix += 1
+  }
+
+  const rows: DiffRow[] = []
+  for (let index = 0; index < prefix; index += 1) {
+    rows.push({ kind: 'context', oldNumber: index + 1, newNumber: index + 1, text: before[index] })
+  }
+  rows.push(...diffRowsForMiddle(
+    before.slice(prefix, before.length - suffix),
+    after.slice(prefix, after.length - suffix),
+    prefix,
+    prefix
+  ))
+  for (let index = 0; index < suffix; index += 1) {
+    const oldIndex = before.length - suffix + index
+    const newIndex = after.length - suffix + index
+    rows.push({
+      kind: 'context',
+      oldNumber: oldIndex + 1,
+      newNumber: newIndex + 1,
+      text: before[oldIndex]
+    })
+  }
+  return rows
+}
+
+function changeKey (change: CodingDiffChange, index: number): string {
+  return `${change.operation}-${index}-${change.startByte ?? ''}-${change.endByte ?? ''}`
+}
+
+function toChangeView (change: CodingDiffChange, index: number): ChangeView {
+  const rows = buildUnifiedRows(change.before, change.after)
+  let additions = 0
+  let deletions = 0
+  for (const row of rows) {
+    if (row.kind === 'added') additions += 1
+    else if (row.kind === 'removed') deletions += 1
+  }
+  return {
+    key: changeKey(change, index),
+    operation: change.operation,
+    startByte: change.startByte,
+    endByte: change.endByte,
+    rows,
+    additions,
+    deletions
+  }
+}
+
+const changeViews = computed<ChangeView[]>(() => {
+  const file = activeFile.value
+  if (!file) return []
+  return file.changes.map(toChangeView)
+})
+
+function formatByteRange (change: CodingDiffChange): string {
+  if (change.startByte == null) return ''
+  return `${change.startByte}–${change.endByte ?? change.startByte}`
+}
+
+function buildDiffText (file: CodingDiffFile): string {
+  const lines: string[] = [file.filePath]
+  file.changes.forEach((change, index) => {
+    const range = formatByteRange(change)
+    const header = range ? `# ${change.operation} ${range}` : `# ${change.operation}`
+    lines.push('')
+    lines.push(file.changes.length > 1 ? `${header} (${index + 1}/${file.changes.length})` : header)
+    for (const row of buildUnifiedRows(change.before, change.after)) {
+      lines.push(`${COPY_PREFIX[row.kind]}${row.text}`)
+    }
+  })
   return lines.join('\n')
+}
+
+function markerFor (kind: DiffRow['kind']): string {
+  if (kind === 'added') return '+'
+  if (kind === 'removed') return '−'
+  return ' '
 }
 
 const copiedToken = ref('')
@@ -159,24 +362,8 @@ onBeforeUnmount(() => {
   if (copiedTimer) clearTimeout(copiedTimer)
 })
 
-interface DisplayLine {
-  number: number
-  text: string
-}
-
 function selectFile (index: number): void {
   activeIndex.value = index
-}
-
-function linesFor (text: string): DisplayLine[] {
-  const normalized = (text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-  const lines = normalized.split('\n')
-  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop()
-  return lines.map((line, index) => ({ number: index + 1, text: line }))
-}
-
-function changeKey (change: CodingDiffChange, index: number): string {
-  return `${change.operation}-${index}-${change.startByte ?? ''}-${change.endByte ?? ''}`
 }
 </script>
 
@@ -192,12 +379,12 @@ function changeKey (change: CodingDiffChange, index: number): string {
     </div>
 
     <div v-else class="diff-body">
-      <nav class="file-rail" :aria-label="t('chatUi.codingDiffTab')">
+      <nav class="file-tabs" :aria-label="t('chatUi.codingDiffTab')">
         <button
           v-for="(file, index) in files"
           :key="file.filePath"
           type="button"
-          class="file-entry"
+          class="file-tab"
           :class="{ active: index === activeIndex }"
           :title="file.filePath"
           :aria-current="index === activeIndex ? 'page' : undefined"
@@ -247,8 +434,8 @@ function changeKey (change: CodingDiffChange, index: number): string {
         </p>
 
         <article
-          v-for="(change, index) in activeFile.changes"
-          :key="changeKey(change, index)"
+          v-for="change in changeViews"
+          :key="change.key"
           class="change-block"
         >
           <div class="change-meta">
@@ -256,28 +443,29 @@ function changeKey (change: CodingDiffChange, index: number): string {
             <span v-if="change.startByte != null" class="byte-range">
               {{ change.startByte }}–{{ change.endByte ?? change.startByte }}
             </span>
+            <span class="change-stats" aria-hidden="true">
+              <span class="stat-add">+{{ change.additions }}</span>
+              <span class="stat-del">−{{ change.deletions }}</span>
+            </span>
           </div>
 
-          <div class="change-panes">
-            <section class="change-pane removed" :aria-label="t('chatUi.codingDiffBefore')">
-              <h3>{{ t('chatUi.codingDiffBefore') }}</h3>
-              <pre><code><span
-                v-for="line in linesFor(change.before)"
-                :key="`before-${line.number}`"
-                class="code-line"
-                data-kind="removed"
-              ><span class="gutter" aria-hidden="true">−</span><span class="line-number" aria-hidden="true">{{ line.number }}</span><span class="line-text">{{ line.text }}</span></span></code></pre>
-            </section>
-
-            <section class="change-pane added" :aria-label="t('chatUi.codingDiffAfter')">
-              <h3>{{ t('chatUi.codingDiffAfter') }}</h3>
-              <pre><code><span
-                v-for="line in linesFor(change.after)"
-                :key="`after-${line.number}`"
-                class="code-line"
-                data-kind="added"
-              ><span class="gutter" aria-hidden="true">+</span><span class="line-number" aria-hidden="true">{{ line.number }}</span><span class="line-text">{{ line.text }}</span></span></code></pre>
-            </section>
+          <div
+            class="change-diff"
+            role="group"
+            tabindex="0"
+            :aria-label="`${change.operation}${change.startByte != null ? ` · ${change.startByte}–${change.endByte ?? change.startByte}` : ''}`"
+          >
+            <div
+              v-for="(row, rowIndex) in change.rows"
+              :key="rowIndex"
+              class="diff-line"
+              :class="row.kind"
+            >
+              <span class="diff-gutter diff-marker" aria-hidden="true">{{ markerFor(row.kind) }}</span>
+              <span class="diff-gutter diff-line-number old" aria-hidden="true">{{ row.oldNumber ?? '' }}</span>
+              <span class="diff-gutter diff-line-number new" aria-hidden="true">{{ row.newNumber ?? '' }}</span>
+              <span class="diff-text">{{ row.text }}</span>
+            </div>
           </div>
         </article>
       </main>
@@ -302,7 +490,7 @@ function changeKey (change: CodingDiffChange, index: number): string {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 13px 16px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--app-border);
   background: var(--app-panel);
 }
@@ -343,50 +531,55 @@ function changeKey (change: CodingDiffChange, index: number): string {
 }
 
 .diff-body {
-  display: grid;
+  display: flex;
   flex: 1;
-  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
 
-.file-rail {
+/* File tabs stay on one line above the diff so the code column gets the full
+   panel width instead of losing ~200px to a vertical file rail. */
+.file-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
   min-width: 0;
-  min-height: 0;
-  max-width: 100%;
-  padding: 8px;
-  overflow: auto;
-  border-right: 1px solid var(--app-border);
+  padding: 6px 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--app-border);
   background: var(--app-panel-muted);
+  scrollbar-width: thin;
 }
 
-.file-entry {
-  display: flex;
-  width: 100%;
+.file-tab {
+  display: inline-flex;
+  flex: 0 1 auto;
+  max-width: min(300px, 46vw);
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 7px 8px;
+  gap: 6px;
+  padding: 5px 8px;
   border: 1px solid transparent;
   border-radius: 5px;
   background: transparent;
   color: var(--app-text-muted);
   cursor: pointer;
   text-align: left;
+  white-space: nowrap;
 }
 
-.file-entry:hover {
+.file-tab:hover {
   background: color-mix(in srgb, var(--app-panel) 70%, transparent);
 }
 
-.file-entry.active {
+.file-tab.active {
   border-color: var(--app-border);
   background: var(--app-panel);
   color: var(--app-text-strong);
 }
 
-.file-entry:focus-visible {
+.file-tab:focus-visible {
   outline: 2px solid var(--app-accent);
   outline-offset: -1px;
 }
@@ -415,8 +608,9 @@ function changeKey (change: CodingDiffChange, index: number): string {
 .diff-main {
   min-width: 0;
   min-height: 0;
-  padding: 14px 16px 24px;
-  overflow: auto;
+  padding: 12px 16px 24px;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .active-file-header {
@@ -490,7 +684,8 @@ function changeKey (change: CodingDiffChange, index: number): string {
 }
 
 .change-block {
-  padding: 14px 0;
+  min-width: 0;
+  padding: 12px 0;
   border-bottom: 1px solid var(--app-border);
 }
 
@@ -500,144 +695,131 @@ function changeKey (change: CodingDiffChange, index: number): string {
 
 .change-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 6px 8px;
+  min-width: 0;
+  margin-bottom: 6px;
 }
 
 .operation-chip {
   display: inline-flex;
   align-items: center;
-  height: 20px;
-  padding: 0 7px;
+  height: 18px;
+  padding: 0 6px;
   border: 1px solid var(--app-border);
   border-radius: 4px;
   background: var(--app-panel-muted);
   color: var(--app-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.64rem;
+  font-size: 0.6rem;
   font-weight: 600;
 }
 
 .byte-range {
   color: var(--app-text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.64rem;
+  font-size: 0.6rem;
 }
 
-.change-panes {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
+.change-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
 }
 
-.change-pane {
-  min-width: 0;
-  overflow: hidden;
+.stat-add {
+  color: var(--app-success);
+}
+
+.stat-del {
+  color: var(--app-danger);
+}
+
+.change-diff {
+  max-width: 100%;
+  max-height: 460px;
+  overflow: auto;
   border: 1px solid var(--app-border);
   border-radius: 5px;
-  background: var(--app-chat-canvas);
-}
-
-.change-pane h3 {
-  margin: 0;
-  padding: 6px 9px;
-  border-bottom: 1px solid var(--app-border);
-  background: var(--app-panel-muted);
-  color: var(--app-text-muted);
-  font-size: 0.66rem;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-}
-
-.change-pane pre {
-  max-height: 380px;
-  margin: 0;
-  padding: 7px 0;
-  overflow: auto;
-  background: var(--app-chat-canvas);
-  color: var(--app-text);
+  background: var(--app-panel);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   line-height: 1.5;
   tab-size: 2;
 }
 
-.change-pane code {
-  display: block;
-  min-width: max-content;
-  font: inherit;
+.change-diff:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
 }
 
-.code-line {
+.diff-line {
   display: flex;
+  width: max-content;
+  min-width: 100%;
   min-height: 1.5em;
+  border-left: 2px solid transparent;
   white-space: pre;
 }
 
-.code-line[data-kind='removed'] {
-  background: color-mix(in srgb, var(--app-danger) 9%, transparent);
-}
-
-.code-line[data-kind='added'] {
-  background: color-mix(in srgb, var(--app-success) 9%, transparent);
-}
-
-.gutter {
-  flex: 0 0 17px;
-  width: 17px;
-  padding-right: 5px;
-  text-align: center;
-  user-select: none;
-}
-
-.code-line[data-kind='removed'] .gutter {
-  color: var(--app-danger);
-}
-
-.code-line[data-kind='added'] .gutter {
+.diff-line.added {
+  border-left-color: var(--app-success);
+  background: var(--app-success-soft);
   color: var(--app-success);
 }
 
-.line-number {
-  flex: 0 0 38px;
-  width: 38px;
-  padding-right: 9px;
+.diff-line.removed {
+  border-left-color: var(--app-danger);
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
+}
+
+.diff-line.context {
+  color: var(--app-text);
+}
+
+.diff-gutter {
+  flex: 0 0 auto;
   color: var(--app-text-muted);
-  text-align: right;
+  font-variant-numeric: tabular-nums;
   user-select: none;
 }
 
-.line-text {
-  padding-right: 12px;
+.diff-marker {
+  width: 17px;
+  padding-right: 4px;
+  text-align: center;
+}
+
+.diff-line-number {
+  width: 38px;
+  padding-right: 7px;
+  text-align: right;
+}
+
+.diff-line-number.new {
+  border-right: 1px solid var(--app-border);
+}
+
+.diff-line.added .diff-gutter,
+.diff-line.removed .diff-gutter {
+  color: inherit;
+  opacity: 0.72;
+}
+
+.diff-text {
+  padding: 0 12px 0 8px;
   white-space: pre;
 }
 
-@media (min-width: 1000px) {
-  .change-panes {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
-}
-
 @media (max-width: 899px) {
-  .diff-body {
-    grid-template-columns: minmax(0, 1fr);
-    overflow: auto;
-  }
-
   .active-file-actions {
     justify-content: flex-start;
-  }
-
-  .file-rail {
-    max-height: 170px;
-    border-right: 0;
-    border-bottom: 1px solid var(--app-border);
-  }
-
-  .diff-main {
-    overflow: visible;
   }
 }
 

@@ -222,7 +222,7 @@ function togglePanel(): void {
             stroke-linecap="round"
             stroke-linejoin="round"
           >
-            <polyline points="6 9 12 15 18 9" />
+            <polyline points="6 15 12 9 18 15" />
           </svg>
         </span>
       </button>
@@ -334,6 +334,11 @@ function togglePanel(): void {
   );
   max-width: 100%;
   margin: 0 auto;
+  /* Reverse the column so the strip stays pinned at the bottom edge while the
+     expanded body grows upward above it, matching the todo capsule. The strip
+     remains first in the DOM so focus/ARIA order is unchanged. */
+  display: flex;
+  flex-direction: column-reverse;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
   border-radius: 11px;
@@ -347,6 +352,7 @@ function togglePanel(): void {
   width: 100%;
   height: 40px;
   min-height: 40px;
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: 7px auto minmax(0, 1fr) auto 16px;
   align-items: center;
@@ -519,7 +525,7 @@ function togglePanel(): void {
   max-height: 220px;
   overflow-y: auto;
   padding: 9px 12px 11px;
-  border-top: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
   scrollbar-width: thin;
   scrollbar-color: var(--app-scrollbar) transparent;
 }
