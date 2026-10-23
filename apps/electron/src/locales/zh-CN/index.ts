@@ -486,6 +486,7 @@ const zhCN = {
     projectAppStartFailed: '{name} 启动失败',
     projectAppMissing: '未找到该应用',
     projectPickerTitle: '打开一个内置应用',
+    projectPickerCodingTitle: '选择项目进入编码模式',
     projectPickerLoading: '正在加载应用列表…',
     projectPickerEmpty: '还没有可打开的应用',
     addWorkspaceTab: '新增标签页',

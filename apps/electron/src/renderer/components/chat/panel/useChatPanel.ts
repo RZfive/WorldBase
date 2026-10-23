@@ -736,6 +736,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     assignConversationProject,
     startProjectConversation,
     startBlankConversation,
+    targetProjectId,
     startOptimizationConversation,
     backgroundStreamMessages,
     updateBackgroundConversationWorkspace

@@ -485,6 +485,7 @@ const enUS: MessageSchema = {
     projectAppStartFailed: 'Failed to start {name}',
     projectAppMissing: 'App not found',
     projectPickerTitle: 'Open a built-in app',
+    projectPickerCodingTitle: 'Select a project to start coding',
     projectPickerLoading: 'Loading apps…',
     projectPickerEmpty: 'No apps available yet',
     addWorkspaceTab: 'Add tab',

@@ -33,6 +33,7 @@ import {
   shuffleKnowledgeSuggestion
 } from './suggestion-state'
 import type { WorkSuggestion } from '../../../../shared/daily-suggestion-types.js'
+import { isCodingTaskText } from '../../../../shared/coding-task-detection.js'
 import { getRecommendedProviderTemplate } from '../../../../shared/provider-templates.js'
 import { resolveModelStrength } from '../../../../shared/reasoning-effort'
 import type { ChatPanelEmit, ChatPanelProps, SidebarConversationItem } from './types'
@@ -57,7 +58,7 @@ import {
   workspaceStore,
   workspaceTerminalSurfaces
 } from '../../workspace/workspace-store'
-import { getWorkspaceTabDefinition, type WorkspaceTabInstance } from '../../workspace/tab-registry'
+import { createWorkspaceTabId, getWorkspaceTabDefinition, type WorkspaceTabInstance } from '../../workspace/tab-registry'
 import type {
   WorkspaceTabControlRequest,
   WorkspaceTabControlRequestEnvelope,
@@ -68,6 +69,8 @@ import type {
 const props = defineProps<ChatPanelProps>()
 const emit = defineEmits<ChatPanelEmit>()
 const { t } = useI18n()
+
+const autoOpenedCodingConversations = new Set<string>()
 
 const DEFAULT_APP_WINDOW_MIN_WIDTH = 800
 const CONVERSATION_SIDEBAR_WIDTH = 224
@@ -102,6 +105,7 @@ const {
   currentContextDetail,
   currentContextLabel,
   currentConversationId,
+  targetProjectId,
   currentLongTermGoal,
   currentPendingAuthCount,
   currentPendingAuthRequest,
@@ -1069,16 +1073,94 @@ async function revealWorkspaceTab (result: ReturnType<typeof ensureWorkspaceTab>
 function openCodingDiagnostics (): void {
   const conversationId = currentConversationId.value
   if (!conversationId) return
-  void openWorkspaceTab('coding', { conversationId })
+  void openCodingWorkspaceTab('coding', conversationId)
 }
 
 function openCodingDiff (): void {
   const conversationId = currentConversationId.value
   if (!conversationId) return
-  void openWorkspaceTab('coding-diff', { conversationId })
+  void openCodingWorkspaceTab('coding-diff', conversationId)
+}
+
+async function openCodingWorkspaceTab (
+  kind: 'coding' | 'coding-diff',
+  conversationId: string,
+  options?: { preserveDifferentCodingTabFocus?: boolean }
+): Promise<void> {
+  if (!conversationId) return
+
+  const activeTab = getActiveWorkspaceTab()
+  const preserveActiveTabId = options?.preserveDifferentCodingTabFocus &&
+    workspaceStore.visible.value &&
+    (activeTab?.kind === 'coding' || activeTab?.kind === 'coding-diff') &&
+    activeTab.state?.conversationId !== conversationId
+    ? activeTab.id
+    : null
+
+  const existingTab = findWorkspaceTabs(kind, { conversationId })[0]
+  const emptyTab = existingTab
+    ? null
+    : workspaceStore.tabs.value.find(tab => {
+        if (tab.kind !== kind) return false
+        const tabConversationId = tab.state?.conversationId
+        return typeof tabConversationId !== 'string' || !tabConversationId.trim()
+      }) || null
+  const tabToActivate = existingTab || emptyTab
+
+  if (tabToActivate) {
+    if (emptyTab) {
+      tabToActivate.state = { ...(tabToActivate.state || {}), conversationId }
+    }
+    activateWorkspaceTab(tabToActivate.id)
+    if (emptyTab) updateWorkspaceTabState()
+    await openWorkspace()
+  } else {
+    await revealWorkspaceTab(ensureWorkspaceTab(kind, { conversationId }))
+  }
+
+  if (preserveActiveTabId) activateWorkspaceTab(preserveActiveTabId)
+}
+
+function ensureCodingDiffTab (conversationId: string): void {
+  if (!conversationId || findWorkspaceTabs('coding-diff', { conversationId }).length > 0) return
+  const emptyTab = workspaceStore.tabs.value.find(tab => (
+    tab.kind === 'coding-diff' && !tab.state?.conversationId
+  ))
+  if (emptyTab) {
+    emptyTab.state = { ...(emptyTab.state || {}), conversationId }
+    updateWorkspaceTabState()
+    return
+  }
+  workspaceStore.tabs.value = [
+    ...workspaceStore.tabs.value,
+    {
+      id: createWorkspaceTabId('coding-diff'),
+      kind: 'coding-diff',
+      state: { conversationId }
+    }
+  ]
+}
+
+function handleWorkspaceAddTab (kind: string): void {
+  if (kind === 'coding' || kind === 'coding-diff') {
+    void openWorkspaceTab(kind, { conversationId: currentConversationId.value })
+    return
+  }
+
+  void openWorkspaceTab(kind)
 }
 
 async function openWorkspaceTab (kind: string, payload?: Record<string, unknown>): Promise<void> {
+  if (kind === 'coding' || kind === 'coding-diff') {
+    const payloadConversationId = typeof payload?.conversationId === 'string'
+      ? payload.conversationId.trim()
+      : ''
+    const conversationId = payloadConversationId || currentConversationId.value
+    if (!conversationId) return
+    await openCodingWorkspaceTab(kind, conversationId)
+    return
+  }
+
   if (kind === 'folder') {
     if (payload && typeof payload.rootPath === 'string' && payload.rootPath.trim()) {
       updateFolderWorkspaceState({
@@ -1223,11 +1305,18 @@ const projectPicker = reactive({
   visible: false,
   loading: false,
   error: '',
+  purpose: 'open' as 'open' | 'coding',
   entries: [] as ProjectPickerEntry[]
 })
 
-async function openProjectPicker (): Promise<void> {
+function closeProjectPicker (): void {
+  projectPicker.visible = false
+  projectPicker.purpose = 'open'
+}
+
+async function openProjectPicker (purpose: 'open' | 'coding' = 'open'): Promise<void> {
   projectPicker.visible = true
+  projectPicker.purpose = purpose
   projectPicker.error = ''
   if (projectPicker.entries.length > 0) return
 
@@ -1252,8 +1341,58 @@ async function openProjectPicker (): Promise<void> {
 }
 
 function pickProject (entry: ProjectPickerEntry): void {
+  const purpose = projectPicker.purpose
   projectPicker.visible = false
+  projectPicker.purpose = 'open'
+  if (purpose === 'coding') {
+    targetProjectId.value = entry.id
+    void openWorkspaceTab('project', { projectId: entry.id, name: entry.name })
+    void sendMessage()
+    return
+  }
   void openWorkspaceTab('project', { projectId: entry.id, name: entry.name })
+}
+
+function resolveActiveProjectId (): string | null {
+  const activeTab = getActiveWorkspaceTab()
+  const activeProjectId = activeTab?.kind === 'project' ? activeTab.state?.projectId : null
+  if (typeof activeProjectId === 'string' && activeProjectId.trim()) {
+    return activeProjectId.trim()
+  }
+
+  const projectIds = Array.from(new Set(
+    workspaceStore.tabs.value
+      .filter(tab => tab.kind === 'project')
+      .map(tab => tab.state?.projectId)
+      .filter((projectId): projectId is string => (
+        typeof projectId === 'string' && projectId.trim().length > 0
+      ))
+  ))
+  return projectIds.length === 1 ? projectIds[0] : null
+}
+
+function handleChatSend (): void {
+  if (isLoading.value || isUploadingFiles.value) return
+
+  const text = inputText.value
+  const hasProjectTag = /\[\[project:[^\]]+\]\]/.test(text)
+  const hasCodingContext = Boolean(
+    targetProjectId.value || buildCurrentFolderWorkspaceState()?.rootPath
+  )
+
+  if (hasProjectTag || !isCodingTaskText(text) || hasCodingContext) {
+    void sendMessage()
+    return
+  }
+
+  const activeProjectId = resolveActiveProjectId()
+  if (activeProjectId) {
+    targetProjectId.value = activeProjectId
+    void sendMessage()
+    return
+  }
+
+  void openProjectPicker('coding')
 }
 
 function closeWorkspaceTab (tabId: string): void {
@@ -1481,6 +1620,30 @@ watch(
 watch(currentConversationId, (conversationId) => {
   emit('currentConversationChange', conversationId)
 }, { immediate: true })
+
+watch(
+  [currentConversationId, currentCodingStatus],
+  ([conversationId, status]) => {
+    if (!status) {
+      if (conversationId) autoOpenedCodingConversations.delete(conversationId)
+      return
+    }
+    if (!isLoading.value || !conversationId) return
+    if (autoOpenedCodingConversations.has(conversationId)) return
+    autoOpenedCodingConversations.add(conversationId)
+    if (findWorkspaceTabs('coding', { conversationId }).length > 0) return
+    void openCodingWorkspaceTab('coding', conversationId, { preserveDifferentCodingTabFocus: true })
+  },
+  { immediate: true }
+)
+
+// Once an edit produces diff data, add the bound diff tab without stealing
+// focus from the diagnostics tab; the user can switch to it from the strip.
+watch(currentCodingDiff, (diff) => {
+  const conversationId = currentConversationId.value
+  if (!isLoading.value || !conversationId || !diff?.files.length) return
+  ensureCodingDiffTab(conversationId)
+}, { flush: 'post' })
 
 // A staged draft opens (or focuses) its document tab, which switches the tab
 // into live draft preview via the workspace store mirror.
@@ -1857,7 +2020,7 @@ watch(
             :active-group-session-id="activeGroupSessionId"
             :group-mention-hints="groupMentionHints"
             :is-group-conversation="isGroupConversation"
-            @send="sendMessage"
+            @send="handleChatSend"
             @stop="stopCurrentStream"
             @add-attachments="addAttachments"
             @remove-image="removeImage"
@@ -1880,9 +2043,13 @@ watch(
           />
 
           <Teleport to="body">
-            <div v-if="projectPicker.visible" class="project-picker-backdrop" @click="projectPicker.visible = false">
+            <div v-if="projectPicker.visible" class="project-picker-backdrop" @click="closeProjectPicker">
               <div class="project-picker" role="dialog" @click.stop>
-                <p class="project-picker-title">{{ $t('chatUi.projectPickerTitle') }}</p>
+                <p class="project-picker-title">
+                  {{ projectPicker.purpose === 'coding'
+                    ? $t('chatUi.projectPickerCodingTitle')
+                    : $t('chatUi.projectPickerTitle') }}
+                </p>
                 <div v-if="projectPicker.loading" class="project-picker-hint">{{ $t('chatUi.projectPickerLoading') }}</div>
                 <div v-else-if="projectPicker.error" class="project-picker-hint project-picker-error">{{ projectPicker.error }}</div>
                 <div v-else class="project-picker-list">
@@ -1897,7 +2064,7 @@ watch(
                     <span class="project-picker-name">{{ entry.name }}</span>
                   </button>
                 </div>
-                <button class="project-picker-close" type="button" @click="projectPicker.visible = false">
+                <button class="project-picker-close" type="button" @click="closeProjectPicker">
                   {{ $t('common.cancel') }}
                 </button>
               </div>
@@ -1914,7 +2081,7 @@ watch(
         @close="closeWorkspace"
         @close-tab="closeWorkspaceTab"
         @activate-tab="handleWorkspaceTabActivate"
-        @add-tab="kind => openWorkspaceTab(kind)"
+        @add-tab="handleWorkspaceAddTab"
         @update-width="handleWorkspaceWidthUpdate"
         @insert-selection-tag="insertDocumentTag"
         @update-tab-state="handleWorkspaceTabStateUpdate"

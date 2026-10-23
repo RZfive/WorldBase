@@ -1567,12 +1567,14 @@ fn coding_mode_prompt() -> String {
     "## Coding mode\n\
      - Treat this as implementation work on the active codebase, not as an isolated text answer.\n\
      - Discover the target project's real toolchain from its manifests and lockfiles. Frontend/Node projects are the first-class target; do not assume `cargo` commands apply to every project.\n\
-     - After changing code, run the strongest relevant verification available for that project (typecheck, lint, tests, build, runtime probe) before calling `finish_task` with `status: \"completed\"`.\n\
-     - Prefer the native `coding_verify` tool when it is available; it runs the detected project verification profile through the managed command policy.\n\
+     - For source edits, prefer `coding_edit` / `coding_apply` over generic `write_project_file`, `patch_project_file`, or shell edits so coding diff and diagnostics events are emitted.\n\
+     - Use generic write/edit tools only when coding tools do not support the file type or operation, or when a coding tool rejects it.\n\
+     - After edits, call `coding_verify`; if it fails, call `coding_diagnose` before repairing. Do not substitute raw shell verification for `coding_verify` when coding tools are available; it runs the detected project verification profile through the managed command policy.\n\
+     - Run the strongest relevant verification available for that project (typecheck, lint, tests, build, runtime probe) before calling `finish_task` with `status: \"completed\"`.\n\
      - Use `coding_project` for cross-file symbol/import context and to produce a rename plan before large refactors.\n\
      - Use `coding_lsp` for live language-server diagnostics when a server is installed; if unavailable, continue with `coding_verify` and `coding_diagnose`.\n\
      - `coding_verify` accepts optional `changed_files` and the harness fills it automatically in coding mode.\n\
-     - Use the native `coding_diagnose` tool to combine compiler output, LSP diagnostics, and package-manager errors into one structured report.\n\
+     - Use `coding_diagnose` to combine compiler output, LSP diagnostics, and package-manager errors into one structured report.\n\
      - If verification cannot run in the current capability set, say exactly which check is unavailable and report the result as partial/blocked rather than claiming it was verified.\n\
      - Never bypass permission prompts or workspace boundaries to make a verification command succeed."
         .into()
@@ -3817,6 +3819,12 @@ mod tests {
         assert!(prompt.contains("verification cannot run"));
         assert!(prompt.contains("finish_task"));
         assert!(prompt.contains("changed_files"));
+        assert!(prompt.contains("prefer `coding_edit` / `coding_apply`"));
+        assert!(prompt.contains("`write_project_file`, `patch_project_file`, or shell edits"));
+        assert!(prompt.contains("only when coding tools do not support the file type or operation"));
+        assert!(prompt.contains("when a coding tool rejects it"));
+        assert!(prompt.contains("After edits, call `coding_verify`; if it fails, call `coding_diagnose` before repairing"));
+        assert!(prompt.contains("Do not substitute raw shell verification for `coding_verify` when coding tools are available"));
     }
 
     #[test]
