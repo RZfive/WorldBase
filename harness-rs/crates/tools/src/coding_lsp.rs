@@ -5,6 +5,7 @@
 //! returns normalized `publishDiagnostics`. The tool never installs or
 //! downloads servers and never falls back to a shell.
 
+use crate::compat_tools::resolve_coding_workspace;
 use crate::{Tool, ToolServices};
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -32,7 +33,7 @@ impl Tool for CodingLspTool {
     }
 
     fn description(&self) -> &str {
-        "Start an installed language server for one project file, open the document, and return normalized LSP publishDiagnostics. Auto-detects common servers; never installs or downloads anything."
+        "Start an installed language server for one source file in the active managed project or folder workspace, open the document, and return normalized LSP publishDiagnostics. Auto-detects common servers; never installs or downloads anything."
     }
 
     fn input_schema(&self) -> Value {
@@ -41,7 +42,7 @@ impl Tool for CodingLspTool {
             "properties": {
                 "project_id": {
                     "type": "string",
-                    "description": "Managed project ID that owns the file."
+                    "description": "Optional managed project ID. Omit to use the conversation's active project or selected folder workspace."
                 },
                 "file_path": {
                     "type": "string",
@@ -81,7 +82,7 @@ impl Tool for CodingLspTool {
                     "description": "Include the raw publishDiagnostics payload in the result."
                 }
             },
-            "required": ["project_id", "file_path"]
+            "required": ["file_path"]
         })
     }
 
@@ -98,16 +99,12 @@ impl Tool for CodingLspTool {
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let project_id = require_project_id(&input)?;
+        let workspace = resolve_coding_workspace(&input, services)?;
         let file_path = require_file_path(&input)?;
-        let root = services
-            .projects
-            .project_root(project_id)
-            .with_context(|| format!("resolve project {project_id}"))?;
-        let path = services
-            .projects
-            .project_path(project_id, file_path)
-            .with_context(|| format!("resolve project file {file_path}"))?;
+        let root = workspace.root.clone();
+        let path = workspace
+            .file_path(services, file_path)
+            .with_context(|| format!("resolve source file {file_path}"))?;
         let text = tokio::fs::read_to_string(&path)
             .await
             .with_context(|| format!("read project file {file_path}"))?;
@@ -345,12 +342,6 @@ fn is_executable_file(path: &Path) -> bool {
     {
         true
     }
-}
-
-fn require_project_id(input: &Value) -> Result<&str> {
-    let project_id = crate::require_str(input, "project_id")?.trim();
-    anyhow::ensure!(!project_id.is_empty(), "project_id must not be empty");
-    Ok(project_id)
 }
 
 fn require_file_path(input: &Value) -> Result<&str> {

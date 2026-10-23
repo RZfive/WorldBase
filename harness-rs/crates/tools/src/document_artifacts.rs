@@ -1813,7 +1813,7 @@ pub fn ensure_document_write_allowed(workspace: &Path, absolute_path: &Path) -> 
             .and_then(|value| value.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("docx" | "doc" | "pptx" | "ppt" | "xlsx" | "xls")
+        Some("docx" | "doc" | "pptx" | "ppt" | "xlsx" | "xls" | "pdf")
     );
 
     // 已导入的文档：无论扩展名（含用户改名的场景）都拒绝直写。
@@ -1831,7 +1831,7 @@ pub fn ensure_document_write_allowed(workspace: &Path, absolute_path: &Path) -> 
     // 已存在的 Office 文件：重建必然破坏内容，同样拒绝。
     if office_extension && absolute_path.is_file() {
         anyhow::bail!(
-            "「{}」是已存在的 Office 文档，直接覆写会丢失图片与样式；请使用 doc_draft 生成修改草稿",
+            "「{}」是已存在的 Office/PDF 文档，直接覆写会丢失图片与样式；请使用 doc_draft 生成修改草稿",
             absolute_path
                 .file_name()
                 .and_then(|name| name.to_str())

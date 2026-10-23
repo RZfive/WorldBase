@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import './register-ts-hooks.mjs'
-import { RustHarnessEngine, codingEventsForToolResult, planModeExitedAfterNativeResult, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
+import { RustHarnessEngine, codingEventsForGenericFileResult, codingEventsForToolResult, planModeExitedAfterNativeResult, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
 import { codingStatusForCancelledRun } from '../src/shared/coding-status-types.ts'
 import {
   CODING_STATE_STORAGE_PREFIX,
@@ -1894,6 +1894,51 @@ test('coding tool results map into status and diff stream events', () => {
   assert.equal(apply.diff.files[0].filePath, 'src/main.ts')
   assert.equal(apply.diff.files[1].filePath, 'src/a.ts')
   assert.equal(apply.diff.files[1].changes.length, 2)
+})
+
+test('generic code writes map into coding status and diff', () => {
+  const written = codingEventsForGenericFileResult(
+    'write_workspace_file',
+    JSON.stringify({
+      success: true,
+      file_path: 'src/main.ts',
+      before_content: '',
+      after_content: 'const a = 1;\n',
+      content_truncated: false
+    }),
+    null,
+    null
+  )
+  assert.equal(written.status.phase, 'edit')
+  assert.deepEqual(written.status.changedFiles, ['src/main.ts'])
+  assert.deepEqual(written.diff.files[0], {
+    filePath: 'src/main.ts',
+    operationCount: 1,
+    changes: [{ operation: 'write', before: '', after: 'const a = 1;\n' }]
+  })
+
+  const truncated = codingEventsForGenericFileResult(
+    'patch_workspace_file',
+    JSON.stringify({
+      success: true,
+      file_path: 'src/large.ts',
+      content_truncated: true
+    }),
+    written.status,
+    written.diff
+  )
+  assert.equal(truncated.status.phase, 'edit')
+  assert.deepEqual(truncated.status.changedFiles, ['src/main.ts', 'src/large.ts'])
+  assert.equal(truncated.diff, null)
+
+  const read = codingEventsForGenericFileResult(
+    'read_workspace_file',
+    JSON.stringify({ file_path: 'src/main.ts', before_content: 'a', after_content: 'b' }),
+    null,
+    null
+  )
+  assert.equal(read.status, null)
+  assert.equal(read.diff, null)
 })
 
 test('cancelled coding runs map to a blocked cancelled status stream event', async () => {

@@ -1569,6 +1569,7 @@ fn coding_mode_prompt() -> String {
      - Discover the target project's real toolchain from its manifests and lockfiles. Frontend/Node projects are the first-class target; do not assume `cargo` commands apply to every project.\n\
      - For source edits, prefer `coding_edit` / `coding_apply` over generic `write_project_file`, `patch_project_file`, or shell edits so coding diff and diagnostics events are emitted.\n\
      - Use generic write/edit tools only when coding tools do not support the file type or operation, or when a coding tool rejects it.\n\
+     - In a selected folder workspace, omit `project_id`; coding tools resolve paths relative to that folder.\n\
      - After edits, call `coding_verify`; if it fails, call `coding_diagnose` before repairing. Do not substitute raw shell verification for `coding_verify` when coding tools are available; it runs the detected project verification profile through the managed command policy.\n\
      - Run the strongest relevant verification available for that project (typecheck, lint, tests, build, runtime probe) before calling `finish_task` with `status: \"completed\"`.\n\
      - Use `coding_project` for cross-file symbol/import context and to produce a rename plan before large refactors.\n\
@@ -3820,6 +3821,7 @@ mod tests {
         assert!(prompt.contains("finish_task"));
         assert!(prompt.contains("changed_files"));
         assert!(prompt.contains("prefer `coding_edit` / `coding_apply`"));
+        assert!(prompt.contains("In a selected folder workspace, omit `project_id`"));
         assert!(prompt.contains("`write_project_file`, `patch_project_file`, or shell edits"));
         assert!(prompt.contains("only when coding tools do not support the file type or operation"));
         assert!(prompt.contains("when a coding tool rejects it"));

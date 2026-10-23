@@ -72,16 +72,7 @@ fn char_boundary_after(text: &str, index: usize) -> usize {
 /// 一律不得以 Office 二进制包为目标——无论文件是否已存在，全文重建都会
 /// 损坏包内的图片与样式。
 fn assert_text_tool_not_office_target(file_path: &str) -> Result<()> {
-    let extension = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
-    if matches!(extension.as_str(), "docx" | "doc" | "pptx" | "ppt" | "xlsx" | "xls") {
-        let file_name = file_path
-            .split(['/', '\\'])
-            .filter(|part| !part.is_empty())
-            .last()
-            .unwrap_or("document");
-        anyhow::bail!("「{file_name}」是 Office 文档，文本写入工具无法处理（会损坏文件）。修改已有文档请使用 doc_draft 生成草稿；新建 Office 文档请使用 local_write_file 的 office_data 参数。");
-    }
-    Ok(())
+    crate::work_file_guard::assert_direct_write_allowed(file_path)
 }
 
 /// Mirror the Electron SafeWriter: copy an existing file into the shared
@@ -260,6 +251,7 @@ impl Tool for WriteFileTool {
         let content = require_str(&input, "content")?;
         let full = services.workspace_path(path);
         services.ensure_workspace_path(&full)?;
+        assert_text_tool_not_office_target(path)?;
         // 已导入文档 / 已存在 Office 文件禁止直写，改走 doc_draft。
         crate::document_artifacts::ensure_document_write_allowed(&services.workspace, &full)?;
         if let Some(parent) = full.parent() {
@@ -307,20 +299,30 @@ impl Tool for ProjectWriteFileTool {
         let (project_id, file_path, full) = project_file_path(&input, "file_path", services)?;
         let content = require_str(&input, "content")?;
         assert_text_tool_not_office_target(&file_path)?;
-        if full.is_file() {
+        let before = if full.is_file() {
             let project_root = services.projects.project_root(&project_id)?;
             backup_project_file_before_overwrite(&project_root, &full);
-        }
+            tokio::fs::read_to_string(&full).await.ok()
+        } else {
+            None
+        };
         if let Some(parent) = full.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(&full, content).await?;
         services.mark_file_read(&full.canonicalize().unwrap_or(full.clone()));
-        Ok(json!({
+        let mut result = json!({
             "success": true,
             "file_path": file_path,
             "message": format!("File {file_path} written successfully")
-        }))
+        });
+        crate::work_file_guard::attach_write_diff(
+            &mut result,
+            &file_path,
+            before.as_deref(),
+            content,
+        );
+        Ok(result)
     }
 }
 
@@ -355,6 +357,7 @@ impl Tool for EditFileTool {
         let new = require_str(&input, "new_string")?;
         let full = services.workspace_path(path);
         services.ensure_workspace_path(&full)?;
+        assert_text_tool_not_office_target(path)?;
         // 已导入文档 / 已存在 Office 文件禁止直写，改走 doc_draft。
         crate::document_artifacts::ensure_document_write_allowed(&services.workspace, &full)?;
         let content = tokio::fs::read_to_string(&full).await?;
@@ -410,6 +413,7 @@ impl Tool for ProjectEditFileTool {
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let (_, file_path, full) = project_file_path(&input, "file_path", services)?;
+        assert_text_tool_not_office_target(&file_path)?;
         let old = require_str(&input, "old_string")?;
         let new = require_str(&input, "new_string")?;
         let tracked_path = full.canonicalize().unwrap_or(full.clone());
@@ -445,20 +449,26 @@ impl Tool for ProjectEditFileTool {
         } else {
             original.replacen(old, new, 1)
         };
-        assert_text_tool_not_office_target(&file_path)?;
         if full.is_file() {
             let project_id = input["project_id"].as_str().unwrap_or_default();
             let project_root = services.projects.project_root(project_id)?;
             backup_project_file_before_overwrite(&project_root, &full);
         }
-        tokio::fs::write(&full, updated).await?;
+        tokio::fs::write(&full, &updated).await?;
         services.mark_file_read(&tracked_path);
-        Ok(json!({
+        let mut result = json!({
             "success": true,
             "file_path": file_path,
             "replacements": replacements,
             "message": format!("Replaced {replacements} occurrence(s) in {file_path}.")
-        }))
+        });
+        crate::work_file_guard::attach_write_diff(
+            &mut result,
+            &file_path,
+            Some(&original),
+            &updated,
+        );
+        Ok(result)
     }
 }
 
@@ -809,6 +819,8 @@ impl Tool for PatchFileTool {
         let path = require_str(&input, "path")?;
         let full = services.workspace_path(path);
         services.ensure_workspace_path(&full)?;
+        assert_text_tool_not_office_target(path)?;
+        crate::document_artifacts::ensure_document_write_allowed(&services.workspace, &full)?;
         let (patches_applied, _, _) = apply_line_patches(&full, &input).await?;
         Ok(json!({ "path": path, "patches_applied": patches_applied }))
     }
@@ -852,6 +864,7 @@ impl Tool for ProjectPatchFileTool {
         const SHAPE: &str = "patches must be an array of { start_line, end_line, content } objects.";
         let (project_id, file_path, full) = project_file_path(&input, "file_path", services)?;
         anyhow::ensure!(!file_path.trim().is_empty(), "file_path is required");
+        assert_text_tool_not_office_target(&file_path)?;
 
         let raw = input.get("patches").ok_or_else(|| anyhow::anyhow!("{SHAPE}"))?;
         let array = if let Some(array) = raw.as_array() {
@@ -927,21 +940,28 @@ impl Tool for ProjectPatchFileTool {
         }
         let new_lines = lines.len();
 
-        assert_text_tool_not_office_target(&file_path)?;
         if full.is_file() {
             let project_root = services.projects.project_root(&project_id)?;
             backup_project_file_before_overwrite(&project_root, &full);
         }
-        tokio::fs::write(&full, lines.join("\n")).await?;
+        let new_content = lines.join("\n");
+        tokio::fs::write(&full, &new_content).await?;
         let patches_applied = patches.len();
-        Ok(json!({
+        let mut result = json!({
             "success": true,
             "file_path": file_path,
             "patches_applied": patches_applied,
             "original_lines": total_lines,
             "new_lines": new_lines,
             "message": format!("Applied {patches_applied} patch(es) to {file_path}. File went from {total_lines} to {new_lines} lines.")
-        }))
+        });
+        crate::work_file_guard::attach_write_diff(
+            &mut result,
+            &file_path,
+            Some(&original),
+            &new_content,
+        );
+        Ok(result)
     }
 }
 
@@ -1159,10 +1179,10 @@ mod project_native_parity_tests {
                 &service,
             )
             .await;
-        assert!(blocked
-            .unwrap_err()
-            .to_string()
-            .contains("「report.docx」是 Office 文档，文本写入工具无法处理（会损坏文件）"));
+        let blocked_message = blocked.unwrap_err().to_string();
+        assert!(blocked_message.contains("「report.docx」是 Office/PDF 文档"));
+        assert!(blocked_message.contains("文本写入工具无法处理（会损坏文件）"));
+        assert!(blocked_message.contains("doc_draft"));
 
         let ok = ProjectWriteFileTool
             .execute(
@@ -1172,6 +1192,60 @@ mod project_native_parity_tests {
             .await
             .unwrap();
         assert_eq!(ok["message"], "File src/main.ts written successfully");
+        assert_eq!(ok["before_content"], "");
+    }
+
+    #[tokio::test]
+    async fn generic_project_writes_report_before_after_for_code_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+
+        let created = ProjectWriteFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "src/main.ts", "content": "const a = 1;\n" }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["before_content"], "");
+        assert_eq!(created["after_content"], "const a = 1;\n");
+        assert_eq!(created["content_truncated"], false);
+
+        let edited = ProjectEditFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "src/main.ts", "old_string": "1", "new_string": "2" }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited["before_content"], "const a = 1;\n");
+        assert_eq!(edited["after_content"], "const a = 2;\n");
+        assert_eq!(edited["content_truncated"], false);
+
+        let patched = ProjectPatchFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "src/main.ts", "patches": [
+                    { "start_line": 1, "end_line": 1, "content": "const a = 3;" }
+                ] }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(patched["before_content"], "const a = 2;\n");
+        assert_eq!(patched["after_content"], "const a = 3;\n");
+        assert_eq!(patched["content_truncated"], false);
+
+        let oversized = "x".repeat(crate::work_file_guard::MAX_WRITE_DIFF_BYTES + 1);
+        let truncated = ProjectWriteFileTool
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "src/large.ts", "content": oversized }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(truncated["content_truncated"], true);
+        assert!(truncated.get("before_content").is_none());
+        assert!(truncated.get("after_content").is_none());
     }
 
     #[tokio::test]
@@ -1286,8 +1360,7 @@ mod project_native_parity_tests {
             "Applied 2 patch(es) to list.txt. File went from 4 to 2 lines."
         );
 
-        // The office guard fires after the read, exactly like the Electron
-        // handler: an existing (readable) Office target is refused.
+        // Existing Office targets are refused before patch parsing or reads.
         std::fs::write(temp.path().join("projects/alpha/book.xlsx"), "PK").unwrap();
         let office = ProjectPatchFileTool
             .execute(
@@ -1297,10 +1370,9 @@ mod project_native_parity_tests {
                 &service,
             )
             .await;
-        assert!(office
-            .unwrap_err()
-            .to_string()
-            .contains("是 Office 文档，文本写入工具无法处理"));
+        let office_message = office.unwrap_err().to_string();
+        assert!(office_message.contains("是 Office/PDF 文档，文本写入工具无法处理"));
+        assert!(office_message.contains("doc_draft"));
     }
 
     #[tokio::test]

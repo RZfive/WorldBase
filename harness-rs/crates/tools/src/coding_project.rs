@@ -4,6 +4,7 @@
 //! in-memory `ProjectIndex`, and returns context, symbols, imports, or a
 //! read-only cross-file rename plan. It never writes files.
 
+use crate::compat_tools::resolve_coding_workspace;
 use crate::{Tool, ToolServices};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -48,14 +49,14 @@ impl Tool for CodingProjectTool {
     }
 
     fn description(&self) -> &str {
-        "Inspect a project across files: symbol lookup, import/importers, context selection for changed files, and a read-only cross-file rename plan. Read-only; never writes files."
+        "Inspect source files across the active managed project or folder workspace: symbol lookup, import/importers, context selection for changed files, and a read-only cross-file rename plan. Read-only; never writes files."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string", "description": "Managed project ID." },
+                "project_id": { "type": "string", "description": "Optional managed project ID. Omit to use the conversation's active project or selected folder workspace." },
                 "operation": {
                     "type": "string",
                     "enum": ["context", "symbols", "imports", "rename"],
@@ -75,7 +76,7 @@ impl Tool for CodingProjectTool {
                 "new_name": { "type": "string", "description": "New name for rename." },
                 "max_hops": { "type": "integer", "minimum": 0, "maximum": 8 }
             },
-            "required": ["project_id", "operation"]
+            "required": ["operation"]
         })
     }
 
@@ -92,9 +93,9 @@ impl Tool for CodingProjectTool {
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let project_id = require_str(&input, "project_id")?.trim().to_string();
+        let workspace = resolve_coding_workspace(&input, services)?;
         let operation = require_str(&input, "operation")?.trim().to_string();
-        let root = services.projects.project_root(&project_id)?;
+        let root = workspace.root;
         let sources = collect_sources(&root).await?;
         let index = ProjectIndex::from_sources(sources)?;
         let parse_errors = index

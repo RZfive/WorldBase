@@ -33,7 +33,6 @@ import {
   shuffleKnowledgeSuggestion
 } from './suggestion-state'
 import type { WorkSuggestion } from '../../../../shared/daily-suggestion-types.js'
-import { isCodingTaskText } from '../../../../shared/coding-task-detection.js'
 import { getRecommendedProviderTemplate } from '../../../../shared/provider-templates.js'
 import { resolveModelStrength } from '../../../../shared/reasoning-effort'
 import type { ChatPanelEmit, ChatPanelProps, SidebarConversationItem } from './types'
@@ -59,6 +58,7 @@ import {
   workspaceTerminalSurfaces
 } from '../../workspace/workspace-store'
 import { createWorkspaceTabId, getWorkspaceTabDefinition, type WorkspaceTabInstance } from '../../workspace/tab-registry'
+import { resolveWorkRunContext } from './work-run-context'
 import type {
   WorkspaceTabControlRequest,
   WorkspaceTabControlRequestEnvelope,
@@ -71,6 +71,8 @@ const emit = defineEmits<ChatPanelEmit>()
 const { t } = useI18n()
 
 const autoOpenedCodingConversations = new Set<string>()
+const autoFocusedCodingDiffAt = new Map<string, number>()
+const pendingCodingWorkspaceRoot = ref<string | null>(null)
 
 const DEFAULT_APP_WINDOW_MIN_WIDTH = 800
 const CONVERSATION_SIDEBAR_WIDTH = 224
@@ -1347,7 +1349,7 @@ function pickProject (entry: ProjectPickerEntry): void {
   if (purpose === 'coding') {
     targetProjectId.value = entry.id
     void openWorkspaceTab('project', { projectId: entry.id, name: entry.name })
-    void sendMessage()
+    void sendMessage(undefined, { codingRun: true })
     return
   }
   void openWorkspaceTab('project', { projectId: entry.id, name: entry.name })
@@ -1371,28 +1373,106 @@ function resolveActiveProjectId (): string | null {
   return projectIds.length === 1 ? projectIds[0] : null
 }
 
+function getDocumentTabsForRunContext (): WorkspaceTabInstance[] {
+  const tabs = getDocumentTabs()
+  const activeTab = getActiveWorkspaceTab()
+  if (activeTab?.kind !== 'document') return tabs
+  const activeIndex = tabs.findIndex(tab => tab.id === activeTab.id)
+  if (activeIndex <= 0) return tabs
+  return [tabs[activeIndex], ...tabs.slice(0, activeIndex), ...tabs.slice(activeIndex + 1)]
+}
+
+function resolveChatRunContext () {
+  const documentTabs = getDocumentTabsForRunContext().flatMap(tab => {
+    const filePath = getDocumentTabFilePath(tab)
+    if (!filePath) return []
+    const fileName = typeof tab.state?.fileName === 'string' ? tab.state.fileName : undefined
+    return [{ filePath, ...(fileName ? { fileName } : {}) }]
+  })
+
+  const activeTabKind = getActiveWorkspaceTab()?.kind ?? null
+  return resolveWorkRunContext({
+    text: inputText.value,
+    targetProjectId: targetProjectId.value,
+    folderRoot: buildCurrentFolderWorkspaceState()?.rootPath ?? null,
+    activeFolderFilePath: activeTabKind === 'folder' ? workspaceStore.folderActiveFilePath.value : null,
+    activeTabKind,
+    documentTabs,
+    attachmentPaths: pendingFiles.value
+      .map(file => file.filePath)
+      .filter((filePath): filePath is string => Boolean(filePath))
+  })
+}
+
+async function sendMessageWithCodingRoot (): Promise<void> {
+  const codingWorkspaceRoot = pendingCodingWorkspaceRoot.value
+  try {
+    await sendMessage(undefined, { codingWorkspaceRoot, codingRun: true })
+  } finally {
+    pendingCodingWorkspaceRoot.value = null
+  }
+}
+
+async function pickCodingFolderAndSend (): Promise<void> {
+  const api = window.electronAPI
+  if (!api?.pickFolderWorkspace) {
+    await openProjectPicker('coding')
+    return
+  }
+
+  const conversationId = currentConversationId.value
+  try {
+    const picked = await api.pickFolderWorkspace()
+    if (picked.canceled || !picked.rootPath) return
+    if (currentConversationId.value !== conversationId) return
+    pendingCodingWorkspaceRoot.value = picked.rootPath
+    await sendMessageWithCodingRoot()
+  } catch {
+    return
+  }
+}
+
 function handleChatSend (): void {
   if (isLoading.value || isUploadingFiles.value) return
 
   const text = inputText.value
   const hasProjectTag = /\[\[project:[^\]]+\]\]/.test(text)
-  const hasCodingContext = Boolean(
-    targetProjectId.value || buildCurrentFolderWorkspaceState()?.rootPath
-  )
-
-  if (hasProjectTag || !isCodingTaskText(text) || hasCodingContext) {
+  if (hasProjectTag) {
     void sendMessage()
+    return
+  }
+
+  const runContext = resolveChatRunContext()
+  if (!runContext.coding.enabled) {
+    pendingCodingWorkspaceRoot.value = null
+    void sendMessage()
+    return
+  }
+
+  if (runContext.coding.root) {
+    pendingCodingWorkspaceRoot.value = runContext.coding.root
+    void sendMessageWithCodingRoot()
+    return
+  }
+
+  if (targetProjectId.value) {
+    void sendMessage(undefined, { codingRun: true })
     return
   }
 
   const activeProjectId = resolveActiveProjectId()
   if (activeProjectId) {
     targetProjectId.value = activeProjectId
-    void sendMessage()
+    void sendMessage(undefined, { codingRun: true })
     return
   }
 
-  void openProjectPicker('coding')
+  if (runContext.documents.length === 0 && !runContext.folderRoot) {
+    void openProjectPicker('coding')
+    return
+  }
+
+  void pickCodingFolderAndSend()
 }
 
 function closeWorkspaceTab (tabId: string): void {
@@ -1625,24 +1705,43 @@ watch(
   [currentConversationId, currentCodingStatus],
   ([conversationId, status]) => {
     if (!status) {
-      if (conversationId) autoOpenedCodingConversations.delete(conversationId)
+      if (conversationId) {
+        autoOpenedCodingConversations.delete(conversationId)
+        autoFocusedCodingDiffAt.delete(conversationId)
+      }
       return
     }
     if (!isLoading.value || !conversationId) return
     if (autoOpenedCodingConversations.has(conversationId)) return
     autoOpenedCodingConversations.add(conversationId)
-    if (findWorkspaceTabs('coding', { conversationId }).length > 0) return
+    if (findWorkspaceTabs('coding', { conversationId }).length > 0) {
+      void openWorkspace()
+      return
+    }
     void openCodingWorkspaceTab('coding', conversationId, { preserveDifferentCodingTabFocus: true })
   },
   { immediate: true }
 )
 
-// Once an edit produces diff data, add the bound diff tab without stealing
-// focus from the diagnostics tab; the user can switch to it from the strip.
+watch(isLoading, (loading, previous) => {
+  if (!loading || previous) return
+  const conversationId = currentConversationId.value
+  if (!conversationId) return
+  autoOpenedCodingConversations.delete(conversationId)
+  autoFocusedCodingDiffAt.delete(conversationId)
+})
+
+// The first diff of a run opens and focuses the bound diff tab; later diffs
+// keep the user's current tab.
 watch(currentCodingDiff, (diff) => {
   const conversationId = currentConversationId.value
   if (!isLoading.value || !conversationId || !diff?.files.length) return
+  if (autoFocusedCodingDiffAt.has(conversationId)) return
+  autoFocusedCodingDiffAt.set(conversationId, diff.updatedAt)
   ensureCodingDiffTab(conversationId)
+  const diffTab = findWorkspaceTabs('coding-diff', { conversationId })[0]
+  if (diffTab) activateWorkspaceTab(diffTab.id)
+  void openWorkspace()
 }, { flush: 'post' })
 
 // A staged draft opens (or focuses) its document tab, which switches the tab

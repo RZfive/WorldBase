@@ -230,6 +230,65 @@ fn project_relative_path(
     services.projects.project_path(project_id, relative_path)
 }
 
+/// The filesystem scope used by coding tools. A managed project wins when the
+/// conversation or caller names one; otherwise the selected folder workspace
+/// is a first-class coding root instead of requiring a managed project.
+#[derive(Debug, Clone)]
+pub(crate) struct CodingWorkspace {
+    pub(crate) project_id: Option<String>,
+    pub(crate) root: PathBuf,
+}
+
+impl CodingWorkspace {
+    pub(crate) fn is_project(&self) -> bool {
+        self.project_id.is_some()
+    }
+
+    pub(crate) fn file_path(
+        &self,
+        services: &ToolServices,
+        relative_path: &str,
+    ) -> Result<PathBuf> {
+        if let Some(project_id) = self.project_id.as_deref() {
+            return services.projects.project_path(project_id, relative_path);
+        }
+        let path = services.folder_workspace_path(relative_path);
+        services.ensure_folder_workspace_path(&path)?;
+        Ok(path)
+    }
+}
+
+pub(crate) fn resolve_coding_workspace(
+    input: &Value,
+    services: &ToolServices,
+) -> Result<CodingWorkspace> {
+    let explicit_project = input
+        .get("project_id")
+        .or_else(|| input.get("project"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty());
+    let target_project = services
+        .target_project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty());
+    if let Some(project_id) = explicit_project.or(target_project) {
+        let root = services.projects.project_root(project_id)?;
+        return Ok(CodingWorkspace {
+            project_id: Some(project_id.to_string()),
+            root,
+        });
+    }
+    if let Some(root) = services.folder_workspace.as_ref() {
+        return Ok(CodingWorkspace {
+            project_id: None,
+            root: root.clone(),
+        });
+    }
+    anyhow::bail!("coding tools require a managed project or a selected folder workspace")
+}
+
 fn shell_program(command: &str) -> (String, Vec<String>) {
     if cfg!(target_os = "windows") {
         ("cmd".into(), vec!["/C".into(), command.into()])
@@ -2093,15 +2152,21 @@ impl Tool for WorkspaceWriteFileTool {
         let content = require_str(&input, "content")?.to_string();
         let rel = normalize_workspace_rel(require_str(&input, "file_path")?);
         anyhow::ensure!(!rel.is_empty(), "file_path is required");
+        crate::work_file_guard::assert_direct_write_allowed(&rel)?;
         let _root = selected_folder_workspace(services)?;
         let path = services.folder_workspace_path(&rel);
         services.ensure_folder_workspace_path(&path)?;
         let overwritten = path.is_file();
+        let before = if overwritten {
+            tokio::fs::read_to_string(&path).await.ok()
+        } else {
+            None
+        };
         write_workspace_file_atomic(&path, &content).await?;
         services.mark_file_read(&path.canonicalize().unwrap_or(path.clone()));
-        Ok(
-            json!({"success": true, "file_path": rel, "bytes_written": content.len(), "overwritten": overwritten}),
-        )
+        let mut result = json!({"success": true, "file_path": rel, "bytes_written": content.len(), "overwritten": overwritten});
+        crate::work_file_guard::attach_write_diff(&mut result, &rel, before.as_deref(), &content);
+        Ok(result)
     }
 }
 
@@ -2132,6 +2197,7 @@ impl Tool for WorkspaceEditFileTool {
             .unwrap_or(false);
         let rel = normalize_workspace_rel(require_str(&input, "file_path")?);
         anyhow::ensure!(!rel.is_empty(), "file_path is required");
+        crate::work_file_guard::assert_direct_write_allowed(&rel)?;
         anyhow::ensure!(
             !old.is_empty(),
             "old_string must not be empty. To create a new file, use write_workspace_file instead."
@@ -2171,9 +2237,9 @@ impl Tool for WorkspaceEditFileTool {
         };
         write_workspace_file_atomic(&path, &updated).await?;
         services.mark_file_read(&tracked_path);
-        Ok(
-            json!({"success": true, "file_path": rel, "replacements": if replace_all { occurrences } else { 1 }}),
-        )
+        let mut result = json!({"success": true, "file_path": rel, "replacements": if replace_all { occurrences } else { 1 }});
+        crate::work_file_guard::attach_write_diff(&mut result, &rel, Some(&content), &updated);
+        Ok(result)
     }
 }
 
@@ -2260,6 +2326,7 @@ impl Tool for WorkspacePatchFileTool {
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let rel = normalize_workspace_rel(require_str(&input, "file_path")?);
         anyhow::ensure!(!rel.is_empty(), "file_path is required");
+        crate::work_file_guard::assert_direct_write_allowed(&rel)?;
         let patches = normalize_workspace_patches(input.get("patches"))?;
         anyhow::ensure!(
             !patches.is_empty(),
@@ -2314,9 +2381,9 @@ impl Tool for WorkspacePatchFileTool {
         let new_content = lines.join("\n");
         write_workspace_file_atomic(&path, &new_content).await?;
         services.mark_file_read(&path.canonicalize().unwrap_or(path.clone()));
-        Ok(
-            json!({"success": true, "file_path": rel, "patches_applied": sorted.len(), "original_lines": total_lines, "new_lines": lines.len()}),
-        )
+        let mut result = json!({"success": true, "file_path": rel, "patches_applied": sorted.len(), "original_lines": total_lines, "new_lines": lines.len()});
+        crate::work_file_guard::attach_write_diff(&mut result, &rel, Some(&content), &new_content);
+        Ok(result)
     }
 }
 
@@ -9070,6 +9137,100 @@ mod workspace_native_parity_tests {
             .await
             .unwrap();
         assert_eq!(edited["replacements"], 1);
+    }
+
+    #[tokio::test]
+    async fn generic_workspace_writes_report_before_after_for_code_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+
+        let created = WorkspaceWriteFileTool
+            .execute(
+                json!({ "file_path": "src/main.ts", "content": "const a = 1;\n" }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["before_content"], "");
+        assert_eq!(created["after_content"], "const a = 1;\n");
+        assert_eq!(created["content_truncated"], false);
+
+        let edited = WorkspaceEditFileTool
+            .execute(
+                json!({ "file_path": "src/main.ts", "old_string": "1", "new_string": "2" }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited["before_content"], "const a = 1;\n");
+        assert_eq!(edited["after_content"], "const a = 2;\n");
+        assert_eq!(edited["content_truncated"], false);
+
+        let patched = WorkspacePatchFileTool
+            .execute(
+                json!({ "file_path": "src/main.ts", "patches": [
+                    { "start_line": 1, "end_line": 1, "content": "const a = 3;" }
+                ] }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(patched["before_content"], "const a = 2;\n");
+        assert_eq!(patched["after_content"], "const a = 3;\n");
+        assert_eq!(patched["content_truncated"], false);
+
+        let oversized = "x".repeat(crate::work_file_guard::MAX_WRITE_DIFF_BYTES + 1);
+        let truncated = WorkspaceWriteFileTool
+            .execute(
+                json!({ "file_path": "src/large.ts", "content": oversized }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(truncated["content_truncated"], true);
+        assert!(truncated.get("before_content").is_none());
+        assert!(truncated.get("after_content").is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_write_tools_reject_office_targets_with_doc_draft_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+
+        for (tool, input) in [
+            (
+                "write",
+                json!({ "file_path": "docs/report.DOCX", "content": "x" }),
+            ),
+            (
+                "edit",
+                json!({ "file_path": "docs/report.docx", "old_string": "x", "new_string": "y" }),
+            ),
+            (
+                "patch",
+                json!({ "file_path": "docs/report.pdf", "patches": [
+                    { "start_line": 1, "end_line": 1, "content": "x" }
+                ] }),
+            ),
+        ] {
+            let error = match tool {
+                "write" => WorkspaceWriteFileTool
+                    .execute(input, &service)
+                    .await
+                    .unwrap_err(),
+                "edit" => WorkspaceEditFileTool
+                    .execute(input, &service)
+                    .await
+                    .unwrap_err(),
+                _ => WorkspacePatchFileTool
+                    .execute(input, &service)
+                    .await
+                    .unwrap_err(),
+            };
+            let message = error.to_string();
+            assert!(message.contains("doc_draft"), "{tool}: {message}");
+        }
+        assert!(!temp.path().join("ws/docs/report.docx").exists());
     }
 
     #[tokio::test]

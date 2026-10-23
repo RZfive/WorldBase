@@ -189,6 +189,8 @@ export class RustHarnessEngine implements AIHarness {
     )
     const history = priorMessages
       .filter(message => message.role !== 'system' && message.role !== 'developer') as RustSyncMessage[]
+    const codingModeEnabled = options?.codingMode ??
+      Boolean(options?.targetProjectId || this.defaultTargetProjectId || options?.workspaceRoot)
     const queue: StreamEvent[] = []
     let terminal = false
     let wake: (() => void) | null = null
@@ -286,6 +288,22 @@ export class RustHarnessEngine implements AIHarness {
             codingDiff = codingEvents.diff
             emit({ type: 'coding_diff', diff: codingDiff })
           }
+          if (codingModeEnabled) {
+            const genericEvents = codingEventsForGenericFileResult(
+              stringValue(frame.name),
+              frame.content,
+              codingStatus,
+              codingDiff
+            )
+            if (genericEvents.status) {
+              codingStatus = genericEvents.status
+              emit({ type: 'coding_status', status: codingStatus })
+            }
+            if (genericEvents.diff) {
+              codingDiff = genericEvents.diff
+              emit({ type: 'coding_diff', diff: codingDiff })
+            }
+          }
         }
         // Successful write-style results surface as the same file_preview
         // events the renderer renders as a clickable written-file card. They
@@ -351,9 +369,7 @@ export class RustHarnessEngine implements AIHarness {
         customTools,
         workspaceRoot: options?.workspaceRoot,
         targetProjectId: options?.targetProjectId ?? this.defaultTargetProjectId,
-        codingMode:
-          options?.codingMode ??
-          Boolean(options?.targetProjectId || this.defaultTargetProjectId || options?.workspaceRoot),
+        codingMode: codingModeEnabled,
         memoryScopes: options?.memoryScopes,
         memoryQuery: textFromContent(pending.content),
         memoryEmbedding: options?.memoryEmbedding,
@@ -735,6 +751,49 @@ export function codingEventsForToolResult (
     },
     diff: null
   }
+}
+
+const GENERIC_FILE_WRITE_OPERATIONS = new Map<string, string>([
+  ['write_workspace_file', 'write'],
+  ['edit_workspace_file', 'edit'],
+  ['patch_workspace_file', 'patch'],
+  ['write_project_file', 'write'],
+  ['edit_project_file', 'edit'],
+  ['patch_project_file', 'patch']
+])
+
+export function codingEventsForGenericFileResult (
+  name: string,
+  content: unknown,
+  previousStatus: CodingStatus | null,
+  previousDiff: CodingDiffState | null
+): CodingToolResultEvents {
+  const operation = GENERIC_FILE_WRITE_OPERATIONS.get(name)
+  if (!operation) return { status: null, diff: null }
+  const parsed = asRecord(parseToolResult(content))
+  if (!parsed) return { status: null, diff: null }
+  const filePath = stringValue(parsed.file_path)
+  if (!filePath) return { status: null, diff: null }
+  const base = previousStatus ?? emptyCodingStatus()
+  const status: CodingStatus = {
+    ...base,
+    phase: 'edit',
+    changedFiles: uniqueStrings([...base.changedFiles, filePath]),
+    updatedAt: Date.now()
+  }
+  const before = typeof parsed.before_content === 'string' ? parsed.before_content : null
+  const after = typeof parsed.after_content === 'string' ? parsed.after_content : null
+  if (parsed.content_truncated === true || before === null || after === null) {
+    return { status, diff: null }
+  }
+  const next: CodingDiffState = previousDiff
+    ? { files: previousDiff.files.map(file => ({ ...file, changes: [...file.changes] })), updatedAt: Date.now() }
+    : { files: [], updatedAt: Date.now() }
+  const file = { filePath, operationCount: 1, changes: [{ operation, before, after }] }
+  const index = next.files.findIndex(entry => entry.filePath === filePath)
+  if (index >= 0) next.files[index] = file
+  else next.files.push(file)
+  return { status, diff: next }
 }
 
 function codingChangedFiles (parsed: Record<string, unknown>): string[] {

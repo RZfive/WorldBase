@@ -24,6 +24,12 @@ export interface WorkspaceTabDefinition {
   icon: string
   /** true → at most one tab of this kind may exist at a time. */
   singleton: boolean
+  /**
+   * Whether the user may open this tab from the add-tab menu. Defaults to
+   * true; system-managed tabs set it to false while staying programmatically
+   * creatable and restorable.
+   */
+  userAddable?: boolean
   minWidth: number
   maxWidth: number
   defaultWidth: number
@@ -59,6 +65,10 @@ export function getWorkspaceTabDefinition (kind: string): WorkspaceTabDefinition
 
 export function listWorkspaceTabDefinitions (): WorkspaceTabDefinition[] {
   return Array.from(definitions.values())
+}
+
+export function listUserAddableWorkspaceTabDefinitions (): WorkspaceTabDefinition[] {
+  return listWorkspaceTabDefinitions().filter(definition => definition.userAddable !== false)
 }
 
 export function createWorkspaceTabId (kind: string): string {

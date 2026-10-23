@@ -4,7 +4,9 @@
 //! planned commands through the existing managed-command policy, and returns
 //! structured evidence. It does not implement a second command runtime.
 
-use crate::compat_tools::{project_path, run_managed_command, CommandPolicy};
+use crate::compat_tools::{
+    resolve_coding_workspace, run_managed_command, CodingWorkspace, CommandPolicy,
+};
 use crate::{Tool, ToolServices};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -28,7 +30,7 @@ impl Tool for CodingVerifyTool {
     }
 
     fn description(&self) -> &str {
-        "Run the detected project verification profile (typecheck, lint, tests, and build) through the managed project command policy. Use this after code edits before reporting a coding task as completed."
+        "Run the detected verification profile (typecheck, lint, tests, and build) for the active managed project or selected folder workspace. Use this after code edits before reporting a coding task as completed."
     }
 
     fn input_schema(&self) -> Value {
@@ -37,7 +39,7 @@ impl Tool for CodingVerifyTool {
             "properties": {
                 "project_id": {
                     "type": "string",
-                    "description": "Managed project ID whose verification profile should run."
+                    "description": "Optional managed project ID. Omit to use the conversation's active project or selected folder workspace."
                 },
                 "changed_files": {
                     "type": "array",
@@ -52,7 +54,7 @@ impl Tool for CodingVerifyTool {
                     "description": "Compatibility alias for changed_files."
                 }
             },
-            "required": ["project_id"]
+            // project_id is optional: folder workspaces are first-class coding roots.
         })
     }
 
@@ -69,7 +71,8 @@ impl Tool for CodingVerifyTool {
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let (project_id, root) = project_path(&input, services)?;
+        let workspace = resolve_coding_workspace(&input, services)?;
+        let root = workspace.root.clone();
         let changed_files = changed_files_from_input(&input, &root)?;
         let profile = detect_profile(&root)?;
         let selected = select_minimal_profile(&profile, &changed_files);
@@ -85,7 +88,8 @@ impl Tool for CodingVerifyTool {
         {
             return Ok(json!({
                 "passed": true,
-                "projectId": project_id,
+                "projectId": workspace.project_id.as_deref(),
+                "workspaceKind": workspace_kind(&workspace),
                 "selection": selection,
                 "profile": profile_payload(&selected),
                 "outcomes": [],
@@ -96,7 +100,8 @@ impl Tool for CodingVerifyTool {
         if profile.commands.is_empty() {
             return Ok(json!({
                 "passed": false,
-                "projectId": project_id,
+                "projectId": workspace.project_id.as_deref(),
+                "workspaceKind": workspace_kind(&workspace),
                 "reason": "no_supported_verification_profile",
                 "selection": selection,
                 "profile": profile_payload(&profile),
@@ -108,7 +113,7 @@ impl Tool for CodingVerifyTool {
         let policy = CodingPolicy::default();
         let executor = ProjectCommandExecutor {
             services,
-            project_id: &project_id,
+            workspace: &workspace,
             root: &root,
         };
         let evidence = run_profile_with_timeout(
@@ -121,7 +126,8 @@ impl Tool for CodingVerifyTool {
 
         Ok(json!({
             "passed": evidence.passed,
-            "projectId": project_id,
+            "projectId": workspace.project_id.as_deref(),
+            "workspaceKind": workspace_kind(&workspace),
             "selection": selection,
             "profile": profile_payload(&evidence.profile),
             "outcomes": evidence.outcomes.iter().map(outcome_payload).collect::<Vec<_>>(),
@@ -208,7 +214,7 @@ fn selection_payload(profile: &VerificationProfile, changed_file_count: usize) -
 
 struct ProjectCommandExecutor<'a> {
     services: &'a ToolServices,
-    project_id: &'a str,
+    workspace: &'a CodingWorkspace,
     root: &'a Path,
 }
 
@@ -243,15 +249,20 @@ impl VerificationExecutor for ProjectCommandExecutor<'_> {
         };
         let spill_dir: PathBuf = self.services.store.data_dir().join("tool-results");
         let started = std::time::Instant::now();
+        let (project_id, policy) = if self.workspace.is_project() {
+            (self.workspace.project_id.as_deref(), CommandPolicy::Project)
+        } else {
+            (None, CommandPolicy::Workspace)
+        };
         let value = run_managed_command(
             &program,
             self.root,
             (timeout_ms / 1_000).max(1),
-            Some(self.project_id),
+            project_id,
             false,
             Some(self.root),
             Some(self.services.projects.clone()),
-            CommandPolicy::Project,
+            policy,
             Some(&spill_dir),
         )
         .await?;
@@ -286,6 +297,14 @@ impl VerificationExecutor for ProjectCommandExecutor<'_> {
                 .is_some_and(|abort| abort.is_cancelled()),
             duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         })
+    }
+}
+
+fn workspace_kind(workspace: &CodingWorkspace) -> &'static str {
+    if workspace.is_project() {
+        "managed_project"
+    } else {
+        "folder"
     }
 }
 

@@ -4,6 +4,8 @@
 //! against a fresh syntax tree. This tool owns the project path boundary, the
 //! stale-file check, and the single final write.
 
+use crate::compat_tools::resolve_coding_workspace;
+use crate::work_file_guard::assert_coding_target;
 use crate::{require_str, Tool, ToolServices};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -60,15 +62,15 @@ impl Tool for CodingEditTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a symbol-aware edit (replace, insert_after, delete, rename) to a JavaScript/TypeScript/TSX project file. The edit is re-parsed before writing and rejected if the file changed since it was read."
+        "Apply a symbol-aware edit (replace, insert_after, delete, rename) to a JavaScript/TypeScript/TSX file in the active managed project or folder workspace. The edit is re-parsed before writing and rejected if the file changed since it was read."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string", "description": "Managed project ID." },
-                "file_path": { "type": "string", "description": "File path relative to the project root." },
+                "project_id": { "type": "string", "description": "Optional managed project ID. Omit to use the conversation's active project or selected folder workspace." },
+                "file_path": { "type": "string", "description": "File path relative to the active project or folder workspace root." },
                 "operation": {
                     "type": "string",
                     "enum": ["replace", "insert_after", "delete", "rename"],
@@ -99,7 +101,7 @@ impl Tool for CodingEditTool {
                     "description": "New identifier. Required for rename."
                 }
             },
-            "required": ["project_id", "file_path", "operation", "selector"]
+            "required": ["file_path", "operation", "selector"]
         })
     }
 
@@ -130,15 +132,16 @@ async fn execute_edit(
         "coding_edit is disabled while plan mode is active"
     );
 
-    let project_id = require_str(&input, "project_id")?.trim().to_string();
+    let workspace = resolve_coding_workspace(&input, services)?;
     let file_path = require_str(&input, "file_path")?.trim().to_string();
     anyhow::ensure!(!file_path.is_empty(), "file_path must not be empty");
+    assert_coding_target(&file_path)?;
     let operation = EditOperation::parse(require_str(&input, "operation")?)?;
     let query = parse_query(&input)?;
 
     // Reject unsupported extensions before touching the filesystem.
     LanguageId::from_path(Path::new(&file_path))?;
-    let full = services.projects.project_path(&project_id, &file_path)?;
+    let full = workspace.file_path(services, &file_path)?;
     let original = tokio::fs::read_to_string(&full)
         .await
         .with_context(|| format!("read {}", full.display()))?;
@@ -325,12 +328,33 @@ mod tests {
         let schema = tool.input_schema();
         assert_eq!(
             schema["required"],
-            json!(["project_id", "file_path", "operation", "selector"])
+            json!(["file_path", "operation", "selector"])
         );
         assert_eq!(
             schema["properties"]["operation"]["enum"],
             json!(["replace", "insert_after", "delete", "rename"])
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_document_targets_with_doc_draft_guidance() {
+        let temp = tempfile::tempdir().unwrap();
+        let (service, _) = services(temp.path());
+
+        let error = run(
+            json!({
+                "project_id": "alpha",
+                "file_path": "docs/report.docx",
+                "operation": "replace",
+                "selector": { "kind": "function", "name": "add" },
+                "replacement": "function add() {}"
+            }),
+            &service,
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("doc_draft"), "{message}");
     }
 
     #[tokio::test]

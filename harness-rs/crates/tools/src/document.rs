@@ -425,6 +425,9 @@ impl Tool for DocDraftTool {
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let artifact_id = optional_string_alias(&input, &["artifact_id", "artifactId"])?;
         let file_path = optional_string_alias(&input, &["file_path", "filePath"])?;
+        if let Some(target) = file_path.as_deref() {
+            crate::work_file_guard::assert_document_target(target)?;
+        }
         let kind = strict_required_string(&input, "kind")?;
         let summary = optional_string_alias(&input, &["summary"])?;
 
@@ -852,6 +855,28 @@ mod tests {
         zip.start_file("ppt/media/image1.png", options).unwrap();
         zip.write_all(TINY_PNG).unwrap();
         zip.finish().unwrap();
+    }
+
+    #[tokio::test]
+    async fn doc_draft_rejects_code_targets_with_coding_tool_guidance() {
+        let temp = tempfile::tempdir().unwrap();
+        let tool_services = e2e_services(temp.path());
+        let source = tool_services.workspace.join("src/main.ts");
+
+        let error = DocDraftTool
+            .execute(
+                json!({
+                    "file_path": source.to_str().unwrap(),
+                    "kind": "markdown",
+                    "content": "# not a document"
+                }),
+                &tool_services,
+            )
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("coding_edit"), "{message}");
+        assert!(message.contains("coding_apply"), "{message}");
     }
 
     #[tokio::test]

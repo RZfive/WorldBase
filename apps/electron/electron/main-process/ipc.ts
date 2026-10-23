@@ -100,6 +100,23 @@ function buildFolderWorkspacePromptSection (workspaceRoot: string | null): strin
   ].join('\n')
 }
 
+function buildCodingWorkspacePromptSection (workspaceRoot: string | null): string | null {
+  if (!workspaceRoot) return null
+  const rootName = getFolderWorkspaceRootName(workspaceRoot)
+  return [
+    '## Coding workspace',
+    `The user selected a local coding workspace for this conversation: ${rootName}`,
+    `Absolute workspace path: ${workspaceRoot}`,
+    '- Inspect the workspace with list_workspace_files, read_workspace_file, grep_workspace, and glob_workspace.',
+    '- This folder may contain both documents and code. Route by file type, not by folder.',
+    '- Edit supported source files with coding_edit or coding_apply, and verify with coding_verify. If verification fails, run coding_diagnose before repairing.',
+    '- For code/config types coding tools do not support, use the workspace/project write or patch tools; their code changes still produce a diff.',
+    '- Documents go through doc_draft. Never write Office/PDF documents directly with file-write tools.',
+    '- Use relative paths inside the selected workspace. Do not use absolute paths as tool arguments.',
+    '- Plan mode still applies: read/search tools are allowed, while workspace write/delete/run tools are blocked until planning exits.'
+  ].join('\n')
+}
+
 async function resolveFolderWorkspaceRootForRequest (workspaceRoot?: string | null): Promise<string | null> {
   const requestedRoot = typeof workspaceRoot === 'string' ? workspaceRoot.trim() : ''
   if (!requestedRoot) return null
@@ -337,6 +354,8 @@ export function setupIPC (): void {
   // AI chat (non-streaming, kept for backward compat)
   ipcMain.handle('ai:chat', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string, activeTerminalContext?: ActiveTerminalContext) => {
     const resolvedFolderWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(folderWorkspaceRoot)
+    // The non-streaming legacy path has no coding-root argument; keep the
+    // generic folder prompt so it cannot silently claim coding mode.
     const folderWorkspacePromptSection = buildFolderWorkspacePromptSection(resolvedFolderWorkspaceRoot)
     const baseRuntimeContext = await resolveAgentRuntimeContext({
       messages,
@@ -442,7 +461,7 @@ export function setupIPC (): void {
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext, codingWorkspaceRoot?: string) => {
     const sender = event.sender
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const channel = `ai:stream-event:${sessionId}`
@@ -456,7 +475,13 @@ export function setupIPC (): void {
     })
     const executionPreferences = settingsStore!.getAIExecutionPreferences()
     const resolvedFolderWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(folderWorkspaceRoot)
-    const folderWorkspacePromptSection = buildFolderWorkspacePromptSection(resolvedFolderWorkspaceRoot)
+    const resolvedCodingWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(codingWorkspaceRoot)
+    const effectiveWorkspaceRoot = resolvedCodingWorkspaceRoot ?? resolvedFolderWorkspaceRoot
+    // Only an explicit coding root supplies a coding workspace section. The
+    // generic folder prompt is suppressed below whenever the run is coding.
+    const codingWorkspacePromptSection = resolvedCodingWorkspaceRoot
+      ? buildCodingWorkspacePromptSection(effectiveWorkspaceRoot)
+      : null
     const baseRuntimeContext = await resolveAgentRuntimeContext({
       messages,
       agentId,
@@ -488,6 +513,16 @@ export function setupIPC (): void {
           requestedTemperature: temperature
         })
       : baseRuntimeContext
+    // Coding mode is explicit for this path: a coding root or a bound managed
+    // project. A folder root alone must not force document-only turns into the
+    // coding gate, and coding runs must never receive the generic folder edit
+    // instructions that conflict with coding tools.
+    const codingModeEnabled = Boolean(
+      resolvedCodingWorkspaceRoot || runtimeContext.effectiveTargetProjectId
+    )
+    const folderWorkspacePromptSection = codingModeEnabled
+      ? null
+      : buildFolderWorkspacePromptSection(resolvedFolderWorkspaceRoot)
     const directGroupReplyPromptSection = directGroupReply
       ? buildDirectGroupReplyPromptSection(directGroupReply)
       : null
@@ -718,13 +753,14 @@ export function setupIPC (): void {
                   hostConversationId: conversationId,
                   authMode: authModeRef.current,
                   getAuthMode: () => authModeRef.current,
-                  workspaceRoot: resolvedFolderWorkspaceRoot,
+                  workspaceRoot: effectiveWorkspaceRoot,
                   targetProjectId: runtimeContext.effectiveTargetProjectId,
                   enableThinking: runtimeContext.providerConfig?.enableThinking,
                   reasoningEffort: runtimeContext.providerConfig?.reasoningEffort,
                   temperature: runtimeContext.providerConfig?.temperature,
                   systemPromptSections: [
                     ...(folderWorkspacePromptSection ? [folderWorkspacePromptSection] : []),
+                    ...(codingWorkspacePromptSection ? [codingWorkspacePromptSection] : []),
                     ...(activePagePromptSection ? [activePagePromptSection] : []),
                     ...(activeTerminalPromptSection ? [activeTerminalPromptSection] : []),
                     ...(activeCodeViewPromptSection ? [activeCodeViewPromptSection] : []),
@@ -746,7 +782,10 @@ export function setupIPC (): void {
           conversationId,
           sessionId,
           targetProjectId: runtimeContext.effectiveTargetProjectId,
-          workspaceRoot: resolvedFolderWorkspaceRoot,
+          workspaceRoot: effectiveWorkspaceRoot,
+          // A folder root alone no longer implies coding: document-only or
+          // normal turns in a folder workspace must not enter the coding gate.
+          codingMode: codingModeEnabled,
           computerUseEnabled: computerUseEnabled === true,
           providerConfig: runtimeContext.providerConfig,
           abortSignal: abortController.signal,
@@ -757,6 +796,7 @@ export function setupIPC (): void {
           systemPromptSections: [
             ...runtimeContext.systemPromptSections,
             ...(folderWorkspacePromptSection ? [folderWorkspacePromptSection] : []),
+            ...(codingWorkspacePromptSection ? [codingWorkspacePromptSection] : []),
             ...(activePagePromptSection ? [activePagePromptSection] : []),
             ...(activeTerminalPromptSection ? [activeTerminalPromptSection] : []),
             ...(directGroupReplyPromptSection ? [directGroupReplyPromptSection] : []),

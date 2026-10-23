@@ -6,6 +6,8 @@
 //! or an edit dependency are serialized by the planner.
 
 use crate::coding_edit::{build_proposal, parse_query, read_source_unchanged, EditOperation};
+use crate::compat_tools::{resolve_coding_workspace, CodingWorkspace};
+use crate::work_file_guard::assert_coding_target;
 use crate::{require_str, Tool, ToolServices};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -33,7 +35,7 @@ impl Tool for CodingApplyTool {
         json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string", "description": "Managed project ID." },
+                "project_id": { "type": "string", "description": "Optional managed project ID. Omit to use the conversation's active project or selected folder workspace." },
                 "edits": {
                     "type": "array",
                     "minItems": 1,
@@ -42,7 +44,7 @@ impl Tool for CodingApplyTool {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "file_path": { "type": "string", "description": "File path relative to the project root." },
+                            "file_path": { "type": "string", "description": "File path relative to the active project or folder workspace root." },
                             "operation": {
                                 "type": "string",
                                 "enum": ["replace", "insert_after", "delete", "rename"],
@@ -82,7 +84,7 @@ impl Tool for CodingApplyTool {
                     }
                 }
             },
-            "required": ["project_id", "edits"]
+            "required": ["edits"]
         })
     }
 
@@ -137,8 +139,7 @@ async fn execute_apply(
         "coding_apply is disabled while plan mode is active"
     );
 
-    let project_id = require_str(&input, "project_id")?.trim().to_string();
-    anyhow::ensure!(!project_id.is_empty(), "project_id must not be empty");
+    let workspace = resolve_coding_workspace(&input, services)?;
     let edits = input
         .get("edits")
         .and_then(Value::as_array)
@@ -161,13 +162,14 @@ async fn execute_apply(
             !file_path.is_empty(),
             "edits[{index}].file_path must not be empty"
         );
+        assert_coding_target(file_path)?;
         let operation = EditOperation::parse(require_str(edit, "operation")?)?;
         let query = parse_query(edit)?;
 
         LanguageId::from_path(Path::new(file_path))?;
-        let full_path = services.projects.project_path(&project_id, file_path)?;
+        let full_path = workspace.file_path(services, file_path)?;
         let normalized_path = normalize_project_path(Path::new(file_path))?;
-        let depends_on = parse_dependencies(edit, index, &project_id, services)?;
+        let depends_on = parse_dependencies(edit, index, &workspace, services)?;
 
         let group_index = match group_by_path.get(&normalized_path) {
             Some(index) => *index,
@@ -377,7 +379,7 @@ async fn write_file(full_path: PathBuf, source: Vec<u8>, label: PathBuf) -> Resu
 fn parse_dependencies(
     edit: &Value,
     edit_index: usize,
-    project_id: &str,
+    workspace: &CodingWorkspace,
     services: &ToolServices,
 ) -> Result<Vec<PathBuf>> {
     let Some(raw) = edit.get("depends_on") else {
@@ -397,7 +399,7 @@ fn parse_dependencies(
             !value.is_empty(),
             "edits[{edit_index}].depends_on[{dependency_index}] must not be empty"
         );
-        services.projects.project_path(project_id, value)?;
+        workspace.file_path(services, value)?;
         dependencies.push(normalize_project_path(Path::new(value))?);
     }
     Ok(dependencies)
@@ -528,12 +530,30 @@ mod tests {
         assert_eq!(tool.domain(), "desktop");
         assert_eq!(tool.permission(), "ask");
         let schema = tool.input_schema();
-        assert_eq!(schema["required"], json!(["project_id", "edits"]));
+        assert_eq!(schema["required"], json!(["edits"]));
         assert_eq!(schema["properties"]["edits"]["maxItems"], json!(MAX_EDITS));
         assert_eq!(
             schema["properties"]["edits"]["items"]["properties"]["operation"]["enum"],
             json!(["replace", "insert_after", "delete", "rename"])
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_document_targets_with_doc_draft_guidance() {
+        let temp = tempfile::tempdir().unwrap();
+        let (services, _project) = services(temp.path());
+
+        let error = run(
+            json!({
+                "project_id": "alpha",
+                "edits": [replace_edit("docs/report.xlsx", "sheet", "function sheet() {}")]
+            }),
+            &services,
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("doc_draft"), "{message}");
     }
 
     #[tokio::test]

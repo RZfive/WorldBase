@@ -6,7 +6,9 @@
 //! commands, lifecycle scripts, or package specs that point at paths, URLs, or
 //! git repositories.
 
-use crate::compat_tools::{project_path, run_managed_command, CommandPolicy};
+use crate::compat_tools::{
+    resolve_coding_workspace, run_managed_command, CodingWorkspace, CommandPolicy,
+};
 use crate::{Tool, ToolServices};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -49,7 +51,7 @@ impl Tool for CodingFixDependenciesTool {
             "properties": {
                 "project_id": {
                     "type": "string",
-                    "description": "Managed project ID whose package.json and lockfiles are analyzed and where commands run."
+                    "description": "Optional managed project ID. Omit to use the conversation's active project or selected folder workspace."
                 },
                 "issues": {
                     "type": "array",
@@ -77,7 +79,7 @@ impl Tool for CodingFixDependenciesTool {
                     "description": "Per-command foreground timeout. Defaults to the coding policy timeout and is capped at 300 seconds."
                 }
             },
-            "required": ["project_id"]
+
         })
     }
 
@@ -98,7 +100,8 @@ impl Tool for CodingFixDependenciesTool {
             anyhow::bail!("coding_fix_dependencies is not available in plan mode");
         }
 
-        let (project_id, root) = project_path(&input, services)?;
+        let workspace = resolve_coding_workspace(&input, services)?;
+        let root = workspace.root.clone();
         let manifest = load_manifest(&root).await?;
         let package_manager = detect_for_root(manifest.as_ref(), &root);
         let commands = dependency_commands(&input, manifest.as_ref(), package_manager)?;
@@ -120,7 +123,7 @@ impl Tool for CodingFixDependenciesTool {
             .unwrap_or(true);
         if dry_run {
             return Ok(output_payload(
-                &project_id,
+                &workspace,
                 package_manager,
                 true,
                 &planned,
@@ -140,13 +143,13 @@ impl Tool for CodingFixDependenciesTool {
         let timeout_seconds = timeout_seconds(&input);
         let executor = ManagedCommandExecutor {
             services,
-            project_id: &project_id,
+            workspace: &workspace,
             root: &root,
             timeout_seconds,
         };
         let execution = run_commands(&planned, &executor, services.abort.as_ref()).await;
         Ok(output_payload(
-            &project_id,
+            &workspace,
             package_manager,
             false,
             &planned,
@@ -251,7 +254,7 @@ fn timeout_seconds(input: &Value) -> u64 {
 }
 
 fn output_payload(
-    project_id: &str,
+    workspace: &CodingWorkspace,
     package_manager: Option<PackageManager>,
     dry_run: bool,
     planned: &[String],
@@ -299,7 +302,8 @@ fn output_payload(
     };
 
     json!({
-        "projectId": project_id,
+        "projectId": workspace.project_id.as_deref(),
+        "workspaceKind": if workspace.is_project() { "managed_project" } else { "folder" },
         "packageManager": package_manager_label(package_manager),
         "dryRun": dry_run,
         "plannedCommands": planned,
@@ -672,7 +676,7 @@ async fn run_commands(
 
 struct ManagedCommandExecutor<'a> {
     services: &'a ToolServices,
-    project_id: &'a str,
+    workspace: &'a CodingWorkspace,
     root: &'a Path,
     timeout_seconds: u64,
 }
@@ -699,15 +703,20 @@ impl FixCommandExecutor for ManagedCommandExecutor<'_> {
 
         let spill_dir = self.services.store.data_dir().join("tool-results");
         let started = Instant::now();
+        let (project_id, policy) = if self.workspace.is_project() {
+            (self.workspace.project_id.as_deref(), CommandPolicy::Project)
+        } else {
+            (None, CommandPolicy::Workspace)
+        };
         let value = run_managed_command(
             command,
             self.root,
             self.timeout_seconds,
-            Some(self.project_id),
+            project_id,
             false,
             Some(self.root),
             Some(self.services.projects.clone()),
-            CommandPolicy::Project,
+            policy,
             Some(&spill_dir),
         )
         .await?;
@@ -1406,7 +1415,8 @@ mod tests {
                 "projectId",
                 "stoppedAt",
                 "stoppedCommand",
-                "summary"
+                "summary",
+                "workspaceKind"
             ]
         );
 

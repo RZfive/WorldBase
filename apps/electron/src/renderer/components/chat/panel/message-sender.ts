@@ -146,6 +146,12 @@ export interface PreparedUserMessage {
   text: string
 }
 
+export interface SendMessageOptions {
+  codingWorkspaceRoot?: string | null
+  /** Reset the previous coding trace when a new coding run starts. */
+  codingRun?: boolean
+}
+
 export function extractSelectionQuoteRefs (text: string, pattern: RegExp): { quoteIds: string[]; normalizedText: string } {
   const quoteIds: string[] = []
   const normalizedText = text.replace(pattern, (_match, quoteId: string, rawLabel?: string) => {
@@ -327,7 +333,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     }
   }
 
-  async function sendMessage (prepared?: PreparedUserMessage) {
+  async function sendMessage (prepared?: PreparedUserMessage, sendOptions?: SendMessageOptions) {
     if (isLoading.value || isUploadingFiles.value) return
 
     let messageContent: ChatMessage['content']
@@ -537,9 +543,15 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       return created
     }
 
-    clearCodingState(convId)
-    codingStatusByConversation.delete(convId)
-    codingDiffByConversation.delete(convId)
+    // Only a new coding run resets the previous coding trace. A normal or
+    // document-only follow-up keeps the last diagnostics/diff visible instead
+    // of blanking the system-managed tabs on every send.
+    if (sendOptions?.codingRun) {
+      clearCodingState(convId)
+      codingStatusByConversation.delete(convId)
+      codingDiffByConversation.delete(convId)
+    }
+
     streamingConvIds.add(convId)
     activeStreamSessionIds.set(convId, sessionId)
 
@@ -809,7 +821,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
           buildCurrentFolderWorkspaceState()?.rootPath,
           computerUseEnabled.value,
           getActiveTerminalContext() ?? undefined,
-          getActiveCodeContext() ?? undefined
+          getActiveCodeContext() ?? undefined,
+          sendOptions?.codingWorkspaceRoot ?? undefined
         )
 
         if (streamingConvIds.has(convId)) {

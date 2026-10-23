@@ -1,7 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-const { detectCodingTask, isCodingTaskText } = await import('../src/shared/coding-task-detection.ts')
+const {
+  detectCodingTask,
+  detectWorkIntent,
+  isCodingTaskText,
+  isDocumentTaskText
+} = await import('../src/shared/coding-task-detection.ts')
 
 test('detects fenced code blocks', () => {
   assert.equal(isCodingTaskText('请检查这段代码：```ts\nconst value = 1\n```'), true)
@@ -60,6 +65,72 @@ test('returns the documented reason for each result', () => {
     reason: 'strong code signal'
   })
   assert.deepEqual(detectCodingTask('推荐一部电影'), {
+    isCoding: false,
+    reason: 'no coding signals'
+  })
+})
+
+test('detects document edits as document intent', () => {
+  const documentRequests = [
+    '修改这份 PDF 文件',
+    '润色 report.docx',
+    '把 PPT 第二页标题改一下',
+    '读取 data.xlsx',
+    '总结一下这份文档',
+    '更新表格里的数据',
+    '插入一段文字到 Word 文档',
+    '删除 PDF 第二页',
+    '替换幻灯片里的标题',
+    '翻译 report.docx',
+    '润色这段文字'
+  ]
+
+  for (const text of documentRequests) {
+    const detection = detectWorkIntent(text)
+    assert.equal(detection.intent, 'document', text)
+    assert.equal(detection.coding, false, text)
+    assert.equal(isDocumentTaskText(text), true, text)
+    assert.equal(isCodingTaskText(text), false, text)
+  }
+})
+
+test('keeps coding detection for code requests', () => {
+  const codingRequests = [
+    '修复登录接口报错的 bug',
+    '实现一个新的表单组件',
+    'Refactor the authentication function',
+    '请修改 src/App.tsx 和 package.json',
+    '读取 data.xlsx 生成 src/report.ts'
+  ]
+
+  for (const text of codingRequests) {
+    const detection = detectWorkIntent(text)
+    assert.equal(detection.intent, 'coding', text)
+    assert.equal(detection.coding, true, text)
+    assert.equal(isDocumentTaskText(text), false, text)
+    assert.equal(isCodingTaskText(text), true, text)
+  }
+})
+
+test('strong code signals win over document wording', () => {
+  const detection = detectWorkIntent('修改这份 PDF 文档里的 src/report.ts')
+  assert.equal(detection.intent, 'coding')
+  assert.equal(detection.reason, 'strong code signal')
+  assert.equal(isDocumentTaskText('修改这份 PDF 文档里的 src/report.ts'), false)
+})
+
+test('returns normal intent for conversational text', () => {
+  const detection = detectWorkIntent('今天天气怎么样')
+  assert.deepEqual(detection, {
+    intent: 'normal',
+    coding: false,
+    reason: 'no coding signals'
+  })
+  assert.equal(isDocumentTaskText('今天天气怎么样'), false)
+})
+
+test('keeps the coding-only compatibility API for document tasks', () => {
+  assert.deepEqual(detectCodingTask('修改这份 PDF 文件'), {
     isCoding: false,
     reason: 'no coding signals'
   })

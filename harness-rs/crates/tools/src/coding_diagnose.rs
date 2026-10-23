@@ -4,6 +4,7 @@
 //! payloads, and optional package-manager output into one deterministic report
 //! with a repair plan. It never writes files or executes package commands.
 
+use crate::compat_tools::resolve_coding_workspace;
 use crate::{Tool, ToolServices};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -33,7 +34,7 @@ impl Tool for CodingDiagnoseTool {
             "properties": {
                 "project_id": {
                     "type": "string",
-                    "description": "Managed project ID. Used to read package.json when manifest is omitted."
+                    "description": "Optional managed project ID. Omit to use the conversation's active project or selected folder workspace."
                 },
                 "diagnostics": {
                     "type": "array",
@@ -144,16 +145,10 @@ async fn load_manifest(input: &Value, services: &ToolServices) -> Result<Option<
     if let Some(manifest) = input.get("manifest") {
         return parse_package_manifest(manifest).map(Some);
     }
-    let Some(project_id) = input
-        .get("project_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|project_id| !project_id.is_empty())
-    else {
+    let Ok(workspace) = resolve_coding_workspace(input, services) else {
         return Ok(None);
     };
-    let root = services.projects.project_root(project_id)?;
-    let path = root.join("package.json");
+    let path = workspace.root.join("package.json");
     if !path.is_file() {
         return Ok(None);
     }

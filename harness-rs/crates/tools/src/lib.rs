@@ -39,6 +39,7 @@ pub mod skill_tools;
 pub mod subagent;
 pub mod todo;
 pub mod web;
+mod work_file_guard;
 
 pub use command::ExecuteCommandTool;
 pub use compat_tools::{
