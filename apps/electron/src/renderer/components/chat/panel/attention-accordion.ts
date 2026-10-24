@@ -1,6 +1,6 @@
 import { computed, ref, watch, type Ref } from 'vue'
 
-export type AttentionPanelId = 'auth' | 'sudo' | 'ask' | 'todo' | 'coding'
+export type AttentionPanelId = 'auth' | 'sudo' | 'ask' | 'todo'
 
 /** Priority order for auto-expansion. Todo is passive background info and is
  * never auto-expanded; actionable requests surface in this order. */

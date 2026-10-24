@@ -5,7 +5,6 @@ import DocumentFileTab from './tabs/DocumentFileTab.vue'
 import BrowserWorkspaceTab from './tabs/BrowserWorkspaceTab.vue'
 import TerminalWorkspaceTab from './tabs/TerminalWorkspaceTab.vue'
 import ProjectAppWorkspaceTab from './tabs/ProjectAppWorkspaceTab.vue'
-import CodingStatusTab from './tabs/CodingStatusTab.vue'
 import CodingDiffTab from './tabs/CodingDiffTab.vue'
 
 /**
@@ -46,13 +45,6 @@ const PROJECT_APP_ICON = `
   <circle cx="7" cy="6.5" r="0.9" fill="currentColor"/>
   <circle cx="10" cy="6.5" r="0.9" fill="currentColor"/>
   <path d="m10.5 13-1.8 1.8 1.8 1.8M14 16.5h1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-`
-
-const CODING_STATUS_ICON = `
-  <rect x="3.5" y="4" width="17" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/>
-  <path d="M7 9h5M7 13h4M7 16h2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-  <circle cx="17" cy="15.5" r="2.6" fill="none" stroke="currentColor" stroke-width="2"/>
-  <path d="M17 14v3M15.5 15.5h3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
 `
 
 const CODING_DIFF_ICON = `
@@ -183,20 +175,6 @@ export function ensureBuiltinWorkspaceTabsRegistered (): void {
       { id: 'copyUrl', labelKey: 'chatUi.workspaceActionCopyUrl' },
       { id: 'aiOperate', labelKey: 'chatUi.workspaceActionAiOperate' }
     ]
-  })
-
-  registerWorkspaceTab({
-    kind: 'coding',
-    titleKey: 'chatUi.codingStatusTab',
-    icon: CODING_STATUS_ICON,
-    singleton: false,
-    userAddable: false,
-    minWidth: 720,
-    maxWidth: 1600,
-    defaultWidth: 1040,
-    component: CodingStatusTab,
-    matches: (tab, payload) => tab.state?.conversationId === payload?.conversationId,
-    resolveProps: (tab) => ({ conversationId: String(tab.state?.conversationId || '') })
   })
 
   registerWorkspaceTab({

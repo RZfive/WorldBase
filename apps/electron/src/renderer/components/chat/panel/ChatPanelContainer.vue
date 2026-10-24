@@ -14,7 +14,6 @@ import QuickAskPopover from '../layout/QuickAskPopover.vue'
 import { generateId } from './message-blocks'
 import WorkspacePanel from '../../workspace/WorkspacePanel.vue'
 import PinnedTodoPanel from '../layout/PinnedTodoPanel.vue'
-import CodingStatusPanel from '../layout/CodingStatusPanel.vue'
 import AskUserPanel from '../layout/AskUserPanel.vue'
 import AuthPermissionPanel from '../layout/AuthPermissionPanel.vue'
 import SudoPasswordPanel from '../layout/SudoPasswordPanel.vue'
@@ -70,7 +69,6 @@ const props = defineProps<ChatPanelProps>()
 const emit = defineEmits<ChatPanelEmit>()
 const { t } = useI18n()
 
-const autoOpenedCodingConversations = new Set<string>()
 const autoFocusedCodingDiffAt = new Map<string, number>()
 
 const DEFAULT_APP_WINDOW_MIN_WIDTH = 800
@@ -397,17 +395,13 @@ const pendingAttentionPanels = computed<AttentionPanelId[]>(() => {
   if (currentSudoPasswordRequest.value) ids.push('sudo')
   if (currentAskUserRequest.value) ids.push('ask')
   if (activeTodoItems.value.length > 0) ids.push('todo')
-  if (currentCodingStatus.value) ids.push('coding')
   return ids
 })
 const attentionSignature = computed(() => [
   currentPendingAuthRequest.value?.requestId ?? '-',
   currentSudoPasswordRequest.value?.requestId ?? '-',
   currentAskUserRequest.value?.requestId ?? '-',
-  activeTodoItems.value.length > 0 ? 'todo' : '-',
-  currentCodingStatus.value
-    ? `${currentCodingStatus.value.phase}:${currentCodingStatus.value.updatedAt}`
-    : '-'
+  activeTodoItems.value.length > 0 ? 'todo' : '-'
 ].join('|'))
 const { expandedPanel: expandedAttentionPanel, togglePanel: toggleAttentionPanel } =
   createAttentionAccordion(
@@ -1071,38 +1065,20 @@ async function revealWorkspaceTab (result: ReturnType<typeof ensureWorkspaceTab>
  * Entry point for both the add-tab menu and AI `open_workspace_tab` calls;
  * a payload-less document open routes through the file picker.
  */
-function openCodingDiagnostics (): void {
-  const conversationId = currentConversationId.value
-  if (!conversationId) return
-  void openCodingWorkspaceTab('coding', conversationId)
-}
-
 function openCodingDiff (): void {
   const conversationId = currentConversationId.value
   if (!conversationId) return
-  void openCodingWorkspaceTab('coding-diff', conversationId)
+  void openCodingWorkspaceTab(conversationId)
 }
 
-async function openCodingWorkspaceTab (
-  kind: 'coding' | 'coding-diff',
-  conversationId: string,
-  options?: { preserveDifferentCodingTabFocus?: boolean }
-): Promise<void> {
+async function openCodingWorkspaceTab (conversationId: string): Promise<void> {
   if (!conversationId) return
 
-  const activeTab = getActiveWorkspaceTab()
-  const preserveActiveTabId = options?.preserveDifferentCodingTabFocus &&
-    workspaceStore.visible.value &&
-    (activeTab?.kind === 'coding' || activeTab?.kind === 'coding-diff') &&
-    activeTab.state?.conversationId !== conversationId
-    ? activeTab.id
-    : null
-
-  const existingTab = findWorkspaceTabs(kind, { conversationId })[0]
+  const existingTab = findWorkspaceTabs('coding-diff', { conversationId })[0]
   const emptyTab = existingTab
     ? null
     : workspaceStore.tabs.value.find(tab => {
-        if (tab.kind !== kind) return false
+        if (tab.kind !== 'coding-diff') return false
         const tabConversationId = tab.state?.conversationId
         return typeof tabConversationId !== 'string' || !tabConversationId.trim()
       }) || null
@@ -1116,10 +1092,8 @@ async function openCodingWorkspaceTab (
     if (emptyTab) updateWorkspaceTabState()
     await openWorkspace()
   } else {
-    await revealWorkspaceTab(ensureWorkspaceTab(kind, { conversationId }))
+    await revealWorkspaceTab(ensureWorkspaceTab('coding-diff', { conversationId }))
   }
-
-  if (preserveActiveTabId) activateWorkspaceTab(preserveActiveTabId)
 }
 
 function ensureCodingDiffTab (conversationId: string): void {
@@ -1143,7 +1117,7 @@ function ensureCodingDiffTab (conversationId: string): void {
 }
 
 function handleWorkspaceAddTab (kind: string): void {
-  if (kind === 'coding' || kind === 'coding-diff') {
+  if (kind === 'coding-diff') {
     void openWorkspaceTab(kind, { conversationId: currentConversationId.value })
     return
   }
@@ -1152,13 +1126,13 @@ function handleWorkspaceAddTab (kind: string): void {
 }
 
 async function openWorkspaceTab (kind: string, payload?: Record<string, unknown>): Promise<void> {
-  if (kind === 'coding' || kind === 'coding-diff') {
+  if (kind === 'coding-diff') {
     const payloadConversationId = typeof payload?.conversationId === 'string'
       ? payload.conversationId.trim()
       : ''
     const conversationId = payloadConversationId || currentConversationId.value
     if (!conversationId) return
-    await openCodingWorkspaceTab(kind, conversationId)
+    await openCodingWorkspaceTab(conversationId)
     return
   }
 
@@ -1625,33 +1599,10 @@ watch(currentConversationId, (conversationId) => {
   emit('currentConversationChange', conversationId)
 }, { immediate: true })
 
-watch(
-  [currentConversationId, currentCodingStatus],
-  ([conversationId, status]) => {
-    if (!status) {
-      if (conversationId) {
-        autoOpenedCodingConversations.delete(conversationId)
-        autoFocusedCodingDiffAt.delete(conversationId)
-      }
-      return
-    }
-    if (!isLoading.value || !conversationId) return
-    if (autoOpenedCodingConversations.has(conversationId)) return
-    autoOpenedCodingConversations.add(conversationId)
-    if (findWorkspaceTabs('coding', { conversationId }).length > 0) {
-      void openWorkspace()
-      return
-    }
-    void openCodingWorkspaceTab('coding', conversationId, { preserveDifferentCodingTabFocus: true })
-  },
-  { immediate: true }
-)
-
 watch(isLoading, (loading, previous) => {
   if (!loading || previous) return
   const conversationId = currentConversationId.value
   if (!conversationId) return
-  autoOpenedCodingConversations.delete(conversationId)
   autoFocusedCodingDiffAt.delete(conversationId)
 })
 
@@ -1913,7 +1864,6 @@ watch(
             @update:reasoning-strength="handleReasoningStrengthChange"
             @update:temperature="handleTemperatureChange"
             @update:selected-agent-id="handleAgentSelectionChange"
-            @open-coding-diagnostics="openCodingDiagnostics"
             @open-coding-diff="openCodingDiff"
             @cancel-coding="stopCurrentStream"
             @retry-coding="retryLastUserMessage"
@@ -1998,19 +1948,6 @@ watch(
               @toggle="toggleAttentionPanel('ask')"
               @submit="(requestId, answers) => respondToAskUserRequest(requestId, answers)"
               @cancel="(requestId) => respondToAskUserRequest(requestId, null)"
-            />
-
-            <CodingStatusPanel
-              v-if="currentCodingStatus"
-              :status="currentCodingStatus"
-              :diff-file-count="currentCodingDiff?.files.length || 0"
-              :is-loading="isLoading"
-              :expanded="expandedAttentionPanel === 'coding'"
-              @toggle="toggleAttentionPanel('coding')"
-              @open-diagnostics="openCodingDiagnostics"
-              @open-diff="openCodingDiff"
-              @cancel="stopCurrentStream"
-              @retry="retryLastUserMessage"
             />
 
             <PinnedTodoPanel

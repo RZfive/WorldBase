@@ -6,8 +6,6 @@ import ChatHeader from './components/chat/layout/ChatHeader.vue'
 import MessageList from './components/chat/messages/MessageList.vue'
 import ChatInput from './components/chat/layout/ChatInput.vue'
 import PinnedTodoPanel from './components/chat/layout/PinnedTodoPanel.vue'
-import CodingStatusPanel from './components/chat/layout/CodingStatusPanel.vue'
-import CodingStatusTab from './components/workspace/tabs/CodingStatusTab.vue'
 import CodingDiffTab from './components/workspace/tabs/CodingDiffTab.vue'
 import AuthPermissionPanel from './components/chat/layout/AuthPermissionPanel.vue'
 import AskUserPanel from './components/chat/layout/AskUserPanel.vue'
@@ -147,7 +145,6 @@ const App = defineComponent({
     }
     // ?coding=1 exposes the real diagnostics tab; switch to the diff tab to
     // exercise the new per-file open/copy actions.
-    const workspacePane = ref<'status' | 'diff'>('status')
     // ?new=1 renders a brand-new conversation (interactive agent picker in
     // the header); default is a bound conversation (subdued agent badge).
     const isNew = params.get('new') === '1'
@@ -158,21 +155,19 @@ const App = defineComponent({
       if (auth) ids.push('auth')
       if (ask) ids.push('ask')
       ids.push('todo')
-      if (coding) ids.push('coding')
       return ids
     })
     const accordion = createAttentionAccordion(
       () => pendingAttentionPanels.value,
-      () => `${auth ? 'r1' : '-'}|${ask ? 'q1' : '-'}|todo|${coding ? 'coding' : '-'}`
+      () => `${auth ? 'r1' : '-'}|${ask ? 'q1' : '-'}|todo`
     )
     return () => h('div',{class:'preview-shell'},[
       h(ConversationSidebar,{agentItems,groupItems,longTermGoalItems:goalItems,conversationItems,conversationListLoaded:true,onNewConversation:()=>{},onToggleCollapse:()=>{},onSelectConversation:()=>{},onOpenAgent:()=>{},onOpenGroup:()=>{},onOpenLongTermGoal:()=>{},onNewLongTermGoal:()=>{},onDeleteLongTermGoal:()=>{},onDeleteConversation:()=>{},onRenameConversation:()=>{}}),
       h('main',{class:'preview-chat'},[
-        h(ChatHeader,{contextLabel:isNew?'💬 新对话':'🤖 主 Agent',contextDetail:'',availableChannelBindings:[],selectedChannelBindingId:'',providers:[{id:'anthropic',name:'Anthropic',models:['Opus 4.8']}],activeProviderId:'anthropic',selectedModel:'Opus 4.8',showProviderSelector:true,reasoningStrength:'high',temperature:null,providerDefaultTemperature:1,isGroupConversation:false,showAgentSelector:isNew,availableAgents:[{id:'a1',name:'前端工程师',icon:'🤖'},{id:'a2',name:'文案作者',icon:'✍️'}],selectedAgentId:'',codingStatus:coding?previewCodingStatus:null,codingDiffFileCount:coding?2:0,codingLoading,onSelectProviderModel:()=>{},'onUpdate:reasoningStrength':()=>{},'onUpdate:temperature':()=>{},'onUpdate:selectedAgentId':()=>{},onOpenCodingDiagnostics:()=>{},onOpenCodingDiff:()=>{},onCancelCoding:()=>{},onRetryCoding:()=>{}}),
+        h(ChatHeader,{contextLabel:isNew?'💬 新对话':'🤖 主 Agent',contextDetail:'',availableChannelBindings:[],selectedChannelBindingId:'',providers:[{id:'anthropic',name:'Anthropic',models:['Opus 4.8']}],activeProviderId:'anthropic',selectedModel:'Opus 4.8',showProviderSelector:true,reasoningStrength:'high',temperature:null,providerDefaultTemperature:1,isGroupConversation:false,showAgentSelector:isNew,availableAgents:[{id:'a1',name:'前端工程师',icon:'🤖'},{id:'a2',name:'文案作者',icon:'✍️'}],selectedAgentId:'',codingStatus:coding?previewCodingStatus:null,codingDiffFileCount:coding?2:0,codingLoading,onSelectProviderModel:()=>{},'onUpdate:reasoningStrength':()=>{},'onUpdate:temperature':()=>{},'onUpdate:selectedAgentId':()=>{},onOpenCodingDiff:()=>{},onCancelCoding:()=>{},onRetryCoding:()=>{}}),
         h(MessageList,{messages,isLoading,filePreview:{active:false,filePath:'',lineCount:0,added:0,removed:0},assistantName:'前端工程师'}),
         h('div',{class:'preview-dock'},[
         h('div',{class:'preview-attention'},[
-          ...(coding ? [h(CodingStatusPanel,{status:previewCodingStatus,diffFileCount:2,isLoading:codingLoading,expanded:accordion.expandedPanel.value==='coding',onToggle:()=>accordion.togglePanel('coding'),onOpenDiagnostics:()=>{},onOpenDiff:()=>{},onCancel:()=>{},onRetry:()=>{}})] : []),
           h(PinnedTodoPanel,{items:[{id:1,title:'定位表格渲染瓶颈',status:'completed'},{id:2,title:'实现虚拟滚动窗口',status:'in-progress'},{id:3,title:'补充性能回归数据',status:'not-started'}],isLoading:true,expanded:accordion.expandedPanel.value==='todo',onToggle:()=>accordion.togglePanel('todo')}),
           ...(auth ? [h(AuthPermissionPanel,{request:{requestId:'r1',title:'运行命令',detail:'local_run_command · 只读'},pendingCount:1,expanded:accordion.expandedPanel.value==='auth',onToggle:()=>accordion.togglePanel('auth'),onRespond:()=>{}})] : []),
           ...(ask ? [h(AskUserPanel,{request:{requestId:'q1',questions:[
@@ -188,13 +183,10 @@ const App = defineComponent({
       ]),
       ...(coding ? [h('aside',{class:'preview-workspace'},[
         h('div',{class:'preview-workspace-tabs'},[
-          h('button',{type:'button',class:{active:workspacePane.value==='status'},onClick:()=>{workspacePane.value='status'}},'Diagnostics'),
-          h('button',{type:'button',class:{active:workspacePane.value==='diff'},onClick:()=>{workspacePane.value='diff'}},'Diff')
+          h('button',{type:'button',class:{active:true}},'Diff')
         ]),
         h('div',{class:'preview-workspace-body'},[
-          workspacePane.value==='status'
-            ? h(CodingStatusTab,{conversationId:previewConversationId})
-            : h(CodingDiffTab,{conversationId:previewConversationId})
+          h(CodingDiffTab,{conversationId:previewConversationId})
         ])
       ])] : [])
     ])

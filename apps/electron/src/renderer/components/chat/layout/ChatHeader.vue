@@ -6,6 +6,7 @@ import {
   isCodingStatusActive,
   isCodingStatusRetryable,
   type CodingCommandOutcome,
+  type CodingDiagnostic,
   type CodingStatus,
 } from '../../../../shared/coding-status-types.js'
 import ProviderModelDropdown from './ProviderModelDropdown.vue'
@@ -62,7 +63,6 @@ const emit = defineEmits<{
   (e: 'update:reasoning-strength', value: ReasoningStrength): void
   (e: 'update:temperature', value: number | null): void
   (e: 'update:selected-agent-id', id: string): void
-  (e: 'openCodingDiagnostics'): void
   (e: 'openCodingDiff'): void
   (e: 'cancelCoding'): void
   (e: 'retryCoding'): void
@@ -80,7 +80,7 @@ const showAgentPicker = computed(() => Boolean(
 
 // The trigger reads the selected agent (falling back to the default agent
 // label) instead of a static prompt, so the header states who will answer.
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const agentPickerLabel = computed(() => {
   if (props.selectedAgentId) {
     const found = (props.availableAgents || []).find(agent => agent.id === props.selectedAgentId)
@@ -108,6 +108,17 @@ const CODING_PHASE_LABEL_KEYS: Record<CodingStatus['phase'], string> = {
   complete: 'chatUi.codingPhaseComplete',
   blocked: 'chatUi.codingPhaseBlocked',
 }
+
+const CODING_PROGRESS_PHASES: ReadonlyArray<CodingStatus['phase']> = [
+  'plan',
+  'inspect',
+  'edit',
+  'verify',
+  'diagnose',
+  'repair',
+  'complete',
+]
+const CODING_PROGRESS_TOTAL = CODING_PROGRESS_PHASES.length
 
 const codingPillRef = ref<HTMLElement | null>(null)
 const codingPopoverOpen = ref(false)
@@ -150,17 +161,44 @@ const codingDotClass = computed(() => {
   if (phase === 'verify' || phase === 'diagnose') return 'is-active'
   return ''
 })
-const codingPillMeta = computed(() => {
+const codingPhaseIndex = computed(() => (
+  props.codingStatus
+    ? CODING_PROGRESS_PHASES.findIndex(phase => phase === props.codingStatus?.phase)
+    : -1
+))
+const codingProgressValue = computed(() => Math.max(0, codingPhaseIndex.value + 1))
+const codingProgressLabel = computed(() => (
+  codingPhaseIndex.value >= 0
+    ? `${codingProgressValue.value}/${CODING_PROGRESS_TOTAL}`
+    : `—/${CODING_PROGRESS_TOTAL}`
+))
+const codingDiffHint = computed(() => {
+  if (codingDiffCount.value <= 0) return ''
+  return locale.value.startsWith('zh')
+    ? `差异 ${codingDiffCount.value}`
+    : `Diff ${codingDiffCount.value}`
+})
+const codingDiffHintTitle = computed(() => (
+  t('chatUi.codingDiffFileCount', { count: codingDiffCount.value })
+))
+const codingDiagnostics = computed(() => props.codingStatus?.diagnostics ?? [])
+const codingVisibleDiagnostics = computed(() => codingDiagnostics.value.slice(0, 3))
+const codingHiddenDiagnosticCount = computed(() => (
+  Math.max(0, codingDiagnostics.value.length - codingVisibleDiagnostics.value.length)
+))
+const codingPillTitle = computed(() => {
+  const parts = [codingPhaseLabel.value, codingProgressLabel.value]
   if (codingErrorCount.value > 0) {
-    return t('chatUi.codingErrorsCount', { count: codingErrorCount.value })
+    parts.push(t('chatUi.codingErrorsCount', { count: codingErrorCount.value }))
   }
+  if (codingDiffHint.value) parts.push(codingDiffHint.value)
   if (codingMaxRepairRounds.value > 0) {
-    return t('chatUi.codingRepairRound', {
+    parts.push(t('chatUi.codingRepairRound', {
       current: codingRepairRound.value,
       max: codingMaxRepairRounds.value,
-    })
+    }))
   }
-  return ''
+  return parts.filter(Boolean).join(' · ')
 })
 
 function formatCodingCommand (command: CodingCommandOutcome): string {
@@ -175,14 +213,22 @@ function formatCodingDuration (durationMs: number): string {
   return `${Math.floor(durationMs / 60_000)}m ${Math.round((durationMs % 60_000) / 1_000)}s`
 }
 
+function codingProgressState (index: number): 'completed' | 'current' | 'pending' {
+  if (codingPhaseIndex.value < 0) return 'pending'
+  if (index < codingPhaseIndex.value) return 'completed'
+  if (index === codingPhaseIndex.value) return 'current'
+  return 'pending'
+}
+
+function codingDiagnosticLocation (diagnostic: CodingDiagnostic): string {
+  const file = diagnostic.file?.trim()
+  if (!file) return ''
+  return diagnostic.line != null ? `${file}:${diagnostic.line}` : file
+}
+
 function toggleCodingPopover (): void {
   if (!showCodingPill.value) return
   codingPopoverOpen.value = !codingPopoverOpen.value
-}
-
-function openCodingDiagnostics (): void {
-  codingPopoverOpen.value = false
-  emit('openCodingDiagnostics')
 }
 
 function openCodingDiff (): void {
@@ -262,7 +308,7 @@ onBeforeUnmount(() => {
           aria-haspopup="dialog"
           :aria-expanded="codingPopoverOpen"
           :aria-controls="codingPopoverOpen ? 'header-coding-popover' : undefined"
-          :title="`${codingPhaseLabel}${codingPillMeta ? ' · ' + codingPillMeta : ''}`"
+          :title="codingPillTitle"
           @click.stop="toggleCodingPopover"
         >
           <span
@@ -271,7 +317,17 @@ onBeforeUnmount(() => {
             aria-hidden="true"
           />
           <span class="header-coding-phase">{{ codingPhaseLabel }}</span>
-          <span v-if="codingPillMeta" class="header-coding-meta">{{ codingPillMeta }}</span>
+          <span class="header-coding-progress-count">{{ codingProgressLabel }}</span>
+          <span v-if="codingErrorCount > 0" class="header-coding-error-badge">
+            {{ $t('chatUi.codingErrorsCount', { count: codingErrorCount }) }}
+          </span>
+          <span
+            v-if="codingDiffCount > 0"
+            class="header-coding-diff"
+            :title="codingDiffHintTitle"
+          >
+            {{ codingDiffHint }}
+          </span>
           <svg
             class="header-coding-caret"
             :class="{ 'is-open': codingPopoverOpen }"
@@ -299,13 +355,34 @@ onBeforeUnmount(() => {
               :class="[codingDotClass, { 'is-pulsing': codingPulsing }]"
               aria-hidden="true"
             />
-            <strong>{{ codingPhaseLabel }}</strong>
+            <span class="header-coding-popover-title">{{ $t('chatUi.codingStatusAria') }}</span>
             <span v-if="codingErrorCount > 0" class="header-coding-popover-danger">
               {{ $t('chatUi.codingErrorsCount', { count: codingErrorCount }) }}
             </span>
             <span v-if="codingMaxRepairRounds > 0" class="header-coding-popover-muted">
               {{ $t('chatUi.codingRepairRound', { current: codingRepairRound, max: codingMaxRepairRounds }) }}
             </span>
+          </div>
+
+          <div
+            class="header-coding-progress"
+            role="progressbar"
+            :aria-label="codingPhaseLabel"
+            :aria-valuemin="0"
+            :aria-valuemax="CODING_PROGRESS_TOTAL"
+            :aria-valuenow="codingProgressValue"
+            :aria-valuetext="codingProgressLabel"
+          >
+            <span class="header-coding-progress-track" aria-hidden="true">
+              <span
+                v-for="(phase, index) in CODING_PROGRESS_PHASES"
+                :key="phase"
+                class="header-coding-progress-segment"
+                :data-state="codingProgressState(index)"
+              />
+            </span>
+            <span class="header-coding-progress-phase">{{ codingPhaseLabel }}</span>
+            <span class="header-coding-progress-count">{{ codingProgressLabel }}</span>
           </div>
 
           <div class="header-coding-popover-row">
@@ -329,10 +406,37 @@ onBeforeUnmount(() => {
             </span>
           </div>
 
+          <div v-if="codingDiagnostics.length > 0" class="header-coding-diagnostics">
+            <div class="header-coding-diagnostics-head">
+              <span>{{ $t('chatUi.codingDiagnostics') }}</span>
+              <span v-if="codingHiddenDiagnosticCount > 0" class="header-coding-diagnostics-more">
+                +{{ codingHiddenDiagnosticCount }}
+              </span>
+            </div>
+            <div
+              v-for="(diagnostic, index) in codingVisibleDiagnostics"
+              :key="`${diagnostic.severity}-${index}-${diagnostic.code || diagnostic.message}`"
+              class="header-coding-diagnostic"
+            >
+              <span
+                class="header-coding-diagnostic-dot"
+                :data-severity="diagnostic.severity"
+                aria-hidden="true"
+              />
+              <span class="header-coding-diagnostic-message" :title="diagnostic.message">
+                {{ diagnostic.message }}
+              </span>
+              <span
+                v-if="codingDiagnosticLocation(diagnostic)"
+                class="header-coding-diagnostic-location"
+                :title="codingDiagnosticLocation(diagnostic)"
+              >
+                {{ codingDiagnosticLocation(diagnostic) }}
+              </span>
+            </div>
+          </div>
+
           <div class="header-coding-popover-actions">
-            <button type="button" class="header-coding-action" @click="openCodingDiagnostics">
-              {{ $t('chatUi.codingOpenDiagnostics') }}
-            </button>
             <button
               type="button"
               class="header-coding-action"
@@ -554,7 +658,7 @@ onBeforeUnmount(() => {
   position: relative;
   flex: 0 1 auto;
   min-width: 0;
-  max-width: min(210px, 30vw);
+  max-width: min(260px, 32vw);
 }
 
 .header-coding-pill {
@@ -638,13 +742,31 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.header-coding-meta {
+.header-coding-progress-count {
+  flex: none;
+  color: var(--app-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.header-coding-error-badge {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-danger) 12%, transparent);
+  color: var(--app-danger);
+  font-size: 0.6rem;
+  font-weight: 650;
+}
+
+.header-coding-diff {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--app-text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.63rem;
+  font-size: 0.62rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -664,8 +786,8 @@ onBeforeUnmount(() => {
   top: calc(100% + 6px);
   right: 0;
   z-index: 60;
-  width: min(300px, calc(100vw - 32px));
-  max-width: calc(100vw - 24px);
+  width: min(340px, calc(100vw - 32px));
+  max-width: min(360px, calc(100vw - 24px));
   max-height: min(70vh, calc(100vh - 70px));
   padding: 10px 12px;
   overflow-y: auto;
@@ -688,9 +810,10 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
 }
 
-.header-coding-popover-head strong {
+.header-coding-popover-title {
   color: var(--app-text-strong);
-  font-size: 0.76rem;
+  font-size: 0.72rem;
+  font-weight: 650;
 }
 
 .header-coding-popover-danger {
@@ -702,6 +825,42 @@ onBeforeUnmount(() => {
 .header-coding-popover-muted {
   color: var(--app-text-muted);
   font-size: 0.67rem;
+}
+
+.header-coding-progress {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-top: 8px;
+}
+
+.header-coding-progress-track {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 3px;
+  min-width: 0;
+}
+
+.header-coding-progress-segment {
+  flex: 1 1 0;
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-text-muted) 22%, transparent);
+}
+
+.header-coding-progress-segment[data-state='completed'] {
+  background: var(--app-success);
+}
+
+.header-coding-progress-segment[data-state='current'] {
+  background: var(--app-accent);
+}
+
+.header-coding-progress-phase {
+  flex: none;
+  color: var(--app-text-strong);
+  font-size: 0.66rem;
+  font-weight: 600;
 }
 
 .header-coding-popover-row {
@@ -745,6 +904,75 @@ onBeforeUnmount(() => {
   min-width: 0;
   color: var(--app-text-soft);
   overflow-wrap: anywhere;
+}
+
+.header-coding-diagnostics {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--app-border) 62%, transparent);
+}
+
+.header-coding-diagnostics-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--app-text-muted);
+  font-size: 0.64rem;
+  font-weight: 600;
+}
+
+.header-coding-diagnostics-more {
+  color: var(--app-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.62rem;
+}
+
+.header-coding-diagnostic {
+  display: grid;
+  grid-template-columns: 6px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding-top: 5px;
+}
+
+.header-coding-diagnostic-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--app-text-muted);
+}
+
+.header-coding-diagnostic-dot[data-severity='error'] {
+  background: var(--app-danger);
+}
+
+.header-coding-diagnostic-dot[data-severity='warning'] {
+  background: var(--app-warning);
+}
+
+.header-coding-diagnostic-dot[data-severity='info'] {
+  background: var(--app-accent);
+}
+
+.header-coding-diagnostic-message {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-text-soft);
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header-coding-diagnostic-location {
+  max-width: 140px;
+  overflow: hidden;
+  color: var(--app-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.61rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .header-coding-popover-actions {
@@ -800,27 +1028,31 @@ onBeforeUnmount(() => {
 
 @media (max-width: 760px) {
   .header-coding {
-    max-width: min(168px, 38vw);
+    max-width: min(220px, 40vw);
   }
 
-  .header-coding-meta {
+  .header-coding-diff {
     display: none;
   }
 
   .header-coding-popover {
     right: 0;
-    width: min(280px, calc(100vw - 20px));
+    width: min(320px, calc(100vw - 20px));
     max-width: calc(100vw - 20px);
   }
 }
 
 @media (max-width: 480px) {
   .header-coding {
-    max-width: min(124px, 42vw);
+    max-width: min(150px, 46vw);
   }
 
   .header-coding-pill {
     padding: 0 7px;
+  }
+
+  .header-coding-error-badge {
+    display: none;
   }
 }
 

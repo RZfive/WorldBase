@@ -369,31 +369,29 @@ function selectFile (index: number): void {
 
 <template>
   <div class="coding-diff">
-    <header class="diff-header">
-      <h1>{{ t('chatUi.codingDiffTab') }}</h1>
-      <span class="file-count">{{ t('chatUi.codingDiffFileCount', { count: files.length }) }}</span>
-    </header>
-
     <div v-if="files.length === 0" class="diff-empty">
       <p>{{ t('chatUi.codingDiffEmpty') }}</p>
     </div>
 
     <div v-else class="diff-body">
-      <nav class="file-tabs" :aria-label="t('chatUi.codingDiffTab')">
-        <button
-          v-for="(file, index) in files"
-          :key="file.filePath"
-          type="button"
-          class="file-tab"
-          :class="{ active: index === activeIndex }"
-          :title="file.filePath"
-          :aria-current="index === activeIndex ? 'page' : undefined"
-          @click="selectFile(index)"
-        >
-          <span class="file-path">{{ file.filePath }}</span>
-          <span class="file-operation-count">{{ file.operationCount }}</span>
-        </button>
-      </nav>
+      <div class="file-tabs-row">
+        <nav class="file-tabs" :aria-label="t('chatUi.codingDiffTab')">
+          <button
+            v-for="(file, index) in files"
+            :key="file.filePath"
+            type="button"
+            class="file-tab"
+            :class="{ active: index === activeIndex }"
+            :title="file.filePath"
+            :aria-current="index === activeIndex ? 'page' : undefined"
+            @click="selectFile(index)"
+          >
+            <span class="file-path">{{ file.filePath }}</span>
+            <span class="file-operation-count">{{ file.operationCount }}</span>
+          </button>
+        </nav>
+        <span class="file-tabs-count">{{ t('chatUi.codingDiffFileCount', { count: files.length }) }}</span>
+      </div>
 
       <main v-if="activeFile" class="diff-main">
         <header class="active-file-header">
@@ -485,30 +483,6 @@ function selectFile (index: number): void {
   color: var(--app-text);
 }
 
-.diff-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--app-border);
-  background: var(--app-panel);
-}
-
-.diff-header h1 {
-  margin: 0;
-  color: var(--app-text-strong);
-  font-size: 0.95rem;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-}
-
-.file-count {
-  color: var(--app-text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.69rem;
-}
-
 .diff-empty {
   display: flex;
   flex: 1;
@@ -541,16 +515,33 @@ function selectFile (index: number): void {
 
 /* File tabs stay on one line above the diff so the code column gets the full
    panel width instead of losing ~200px to a vertical file rail. */
-.file-tabs {
+.file-tabs-row {
   display: flex;
   flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-panel-muted);
+}
+
+.file-tabs {
+  display: flex;
+  flex: 1 1 auto;
   gap: 4px;
   min-width: 0;
   padding: 6px 10px;
   overflow-x: auto;
-  border-bottom: 1px solid var(--app-border);
-  background: var(--app-panel-muted);
   scrollbar-width: thin;
+}
+
+.file-tabs-count {
+  flex: 0 0 auto;
+  padding-right: 12px;
+  color: var(--app-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.69rem;
+  white-space: nowrap;
 }
 
 .file-tab {
