@@ -41,6 +41,8 @@
     "test:image-library-mirror": "node scripts/run-electron-node-test.mjs tests/image-library-mirror.test.mjs",
     "test:rust-harness-host-callbacks": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/rust-harness-host-callbacks.test.mjs",
     "test:harness-tool-contracts": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs scripts/generate-rust-tool-contracts.mjs --check",
+    "test:page-automation": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/page-automation-builtin.test.mjs tests/page-automation-security.test.mjs",
+    "test:page-automation-security": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/page-automation-security.test.mjs",
     "test:rust-lan-routing": "node --experimental-strip-types --test tests/rust-lan-routing.test.mjs",
     "test:rust-project-log-routing": "node --experimental-strip-types --test tests/rust-project-log-routing.test.mjs",
     "test:provider-models": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/provider-model-service.test.mjs",

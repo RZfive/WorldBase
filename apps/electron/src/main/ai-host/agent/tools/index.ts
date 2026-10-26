@@ -8,11 +8,11 @@ import type { ProjectDataAccess } from '../../../project-data-access/data-access
 import type { SettingsStore } from '../../../settings/settings-store.js'
 import type { ScheduledTaskService } from '../../../scheduler/scheduled-task-service.js'
 import type { BrowserWindow } from 'electron'
+import type { PageAutomationServices } from '../../engine-contracts.js'
 
-import type { BrowserAutomationAction, BrowserAutomationArticle, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../../../shared/page-automation-types.js'
 import type { WorkspaceTabControlRequest, WorkspaceTabControlResult } from '../../../../shared/workspace-control-types.js'
 
-export interface ToolServices {
+export interface ToolServices extends PageAutomationServices {
   dataAccess: ProjectDataAccess
   /** Mirror a UI-created document artifact into the Rust artifact store. */
   persistDocumentArtifact?: (artifact: Record<string, unknown> & { id: string }) => void
@@ -24,8 +24,6 @@ export interface ToolServices {
    * instead of whichever conversation is currently displayed.
    */
   conversationId?: string
-  readActivePage?: (mode?: 'interactive' | 'article') => Promise<BrowserAutomationSnapshot | BrowserAutomationArticle>
-  interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
   /** Round-trip to the renderer workspace store for AI tab list/activate/close. */
   requestWorkspaceTabControl?: (request: WorkspaceTabControlRequest) => Promise<WorkspaceTabControlResult>
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
@@ -58,11 +56,11 @@ export function registerAllTools (agent: AgentCore, services: ToolServices): voi
     }),
   ]
 
-  if (services.readActivePage) {
+  if (services.readActivePage || services.runPageAutomation) {
     tools.push(toolReadCurrentPage(services))
   }
 
-  if (services.readActivePage && services.interactWithActivePage) {
+  if ((services.readActivePage || services.runPageAutomation) && (services.interactWithActivePage || services.runPageAutomation)) {
     tools.push(toolInteractCurrentPage(services), toolFillCurrentPageForm(services), toolSaveCurrentPageAsDocument(services))
   }
 

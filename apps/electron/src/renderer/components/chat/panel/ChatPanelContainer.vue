@@ -1397,12 +1397,13 @@ function handleWorkspaceTabActivate (tabId: string): void {
   activateWorkspaceTab(tabId)
 }
 
-// The active browser tab doubles as the AI's "current page": its surface is
-// forwarded to the app shell, which prefers embedded app pages over it.
+// The active browser/project tab doubles as the AI's "current page": its
+// surface is forwarded to the app shell, which prefers embedded app pages
+// over it. Project tabs share the same webview automation surface.
 const workspaceBrowserSurface = computed(() => {
   if (!workspaceStore.visible.value) return null
   const tab = getActiveWorkspaceTab()
-  if (!tab || tab.kind !== 'browser') return null
+  if (!tab || (tab.kind !== 'browser' && tab.kind !== 'project')) return null
   return workspaceBrowserSurfaces.get(tab.id) || null
 })
 
@@ -1411,6 +1412,7 @@ watch(workspaceBrowserSurface, (surface) => {
   if (surface && tab) {
     emit('pageSurfaceChange', {
       appId: `wsb-${tab.id}`,
+      kind: surface.kind,
       title: surface.title || surface.url,
       url: surface.url,
       handle: surface.handle

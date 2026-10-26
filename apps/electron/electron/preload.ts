@@ -3,7 +3,7 @@ import type { ComputerUsePermissionTarget } from '../src/shared/computer-use-per
 import type { ConversationMetadataPatch } from '../src/shared/conversation-metadata.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
-import type { ActivePageAutomationContext, BrowserPageContextMenuPayload, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
+import type { ActivePageAutomationContext, BrowserPageContextMenuPayload, BrowserPageScreenshotRequest, BrowserPageScreenshotResult, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { WorkspaceTabControlRequestEnvelope, WorkspaceTabControlResponseEnvelope } from '../src/shared/workspace-control-types.js'
 import type {
   TerminalDataEvent,
@@ -20,6 +20,39 @@ import type { ActiveCodeViewContext, ConversationFolderWorkspaceState, FolderWor
 import type { LongTermGoalChangeSet, LongTermGoalDefinition, LongTermGoalIntervention, LongTermGoalMessageResult, LongTermGoalRun, LongTermGoalSaveInput, LongTermGoalSnapshot, LongTermGoalStreamEvent } from '../src/shared/long-term-goal-types.js'
 import type { DocumentEditExportRequest, DocumentEditExportResult, DocumentEditImagePickResult, DocumentEditSourceState } from '../src/shared/document-edit-types.js'
 import type { DailySuggestionPreferences, DailySuggestionSnapshot } from '../src/shared/daily-suggestion-types.js'
+
+interface BrowserPageEmulationViewportRequest {
+  width: number
+  height: number
+  deviceScaleFactor?: number
+  mobile?: boolean
+}
+
+interface BrowserPageEmulationRequest {
+  webContentsId: number
+  media?: 'screen' | 'print'
+  colorScheme?: 'light' | 'dark' | 'no-preference'
+  reducedMotion?: 'reduce' | 'no-preference'
+  userAgent?: string
+  viewport?: BrowserPageEmulationViewportRequest
+  reset?: boolean
+}
+
+interface BrowserPageEmulationResult {
+  ok: true
+  emulated: {
+    media?: string
+    colorScheme?: string
+    reducedMotion?: string
+    userAgent?: string | null
+    viewport?: {
+      width: number
+      height: number
+      deviceScaleFactor: number
+      mobile: boolean
+    }
+  }
+}
 
 interface ChatMessage {
   role: string
@@ -534,6 +567,8 @@ export interface ElectronAPI {
   onPageAutomationRequest: (callback: (payload: PageAutomationRequestEnvelope) => void) => () => void
   onBrowserPageContextMenu: (callback: (payload: BrowserPageContextMenuPayload) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
+  captureBrowserPageScreenshot: (request: BrowserPageScreenshotRequest) => Promise<BrowserPageScreenshotResult>
+  emulateBrowserPage: (request: BrowserPageEmulationRequest) => Promise<BrowserPageEmulationResult>
   onWorkspaceTabControl: (callback: (payload: WorkspaceTabControlRequestEnvelope) => void) => () => void
   resolveWorkspaceTabControl: (payload: WorkspaceTabControlResponseEnvelope) => void
   getAboutInfo: () => Promise<AppAboutInfo>
@@ -855,6 +890,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => {
     ipcRenderer.send('pageAutomation:response', payload)
   },
+  captureBrowserPageScreenshot: (request: BrowserPageScreenshotRequest) => ipcRenderer.invoke('pageAutomation:captureScreenshot', request),
+  emulateBrowserPage: (request: BrowserPageEmulationRequest) => ipcRenderer.invoke('pageAutomation:emulate', request),
   getAboutInfo: () => ipcRenderer.invoke('app:getAboutInfo'),
   getAppUpdateState: () => ipcRenderer.invoke('appUpdate:getState'),
   getAppUpdateConfig: () => ipcRenderer.invoke('appUpdate:getConfig'),

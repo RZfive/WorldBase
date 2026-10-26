@@ -9,6 +9,10 @@ import type { ChatMessage, MessageContent } from '../chat/panel/types'
 import type {
   BrowserAutomationAction,
   BrowserAutomationActionResult,
+  BrowserAutomationArticle,
+  BrowserAutomationDiagnostics,
+  BrowserAutomationScreenshot,
+  BrowserAutomationSearchResults,
   BrowserAutomationSnapshot
 } from '../../../shared/page-automation-types.js'
 import type { ActiveCodeViewContext } from '../../../shared/folder-workspace-types.js'
@@ -21,14 +25,24 @@ export const DEFAULT_WORKSPACE_WIDTH = DEFAULT_FOLDER_WORKSPACE_WIDTH
 /** Automation handle exposed by a browser tab's embedded webview. */
 export interface WorkspaceBrowserHandle {
   captureAutomationSnapshot: () => Promise<BrowserAutomationSnapshot>
-  captureArticleSnapshot?: () => Promise<import('../../../shared/page-automation-types.js').BrowserAutomationArticle>
+  captureArticleSnapshot?: () => Promise<BrowserAutomationArticle>
+  captureSearchResults?: () => Promise<BrowserAutomationSearchResults>
+  captureScreenshot?: (options?: { fullPage?: boolean; maxWidth?: number; format?: 'png' | 'jpeg'; quality?: number }) => Promise<BrowserAutomationScreenshot>
+  captureDiagnostics?: (options?: { clear?: boolean }) => Promise<BrowserAutomationDiagnostics>
   runAutomationAction: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
   /** Guest webContents id of the tab's page, or null before it attaches. */
   getWebContentsId?: () => number | null
+  /** Current guest URL, or null before the webview attaches. */
+  getURL?: () => string | null
+  /** Whether the guest main frame is currently loading. */
+  isLoading?: () => boolean
+  /** Resolves once the guest is mounted and no longer loading. */
+  waitForReady?: (timeoutMs?: number) => Promise<void>
 }
 
-/** Live page state of a browser tab; kept current by BrowserWorkspaceTab. */
+/** Live page state of a browser/project tab; kept current by the tab shell. */
 export interface WorkspaceBrowserSurface {
+  kind: 'browser' | 'project'
   url: string
   title: string
   handle: WorkspaceBrowserHandle | null

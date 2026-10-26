@@ -25,11 +25,15 @@ import type {
   BrowserAutomationAction,
   BrowserAutomationArticle,
   BrowserAutomationActionResult,
+  BrowserAutomationDiagnostics,
+  BrowserAutomationScreenshot,
+  BrowserAutomationSearchResults,
   BrowserAutomationSnapshot,
   PageAutomationRendererResult,
   PageAutomationRequestEnvelope,
   PageAutomationResponseEnvelope
 } from './shared/page-automation-types'
+import { validateAiBrowserTarget } from './shared/web-target-validation'
 import { applyThemePreference, getAppliedThemePreference, watchSystemThemeChange } from './renderer/utils/theme'
 import { applyChatFontPreferences, loadChatFontPreferences } from './renderer/utils/chat-font-preferences'
 import { createWebAppId, getWebAppNameFromUrl, normalizeWebUrlInput, type SavedWebApp } from './renderer/utils/web-app'
@@ -101,7 +105,13 @@ interface ActivePageSurfaceSummary {
 interface BrowserAutomationViewHandle {
   captureAutomationSnapshot: () => Promise<BrowserAutomationSnapshot>
   captureArticleSnapshot?: () => Promise<BrowserAutomationArticle>
+  captureSearchResults?: () => Promise<BrowserAutomationSearchResults>
+  captureScreenshot?: (options?: { fullPage?: boolean; maxWidth?: number; format?: 'png' | 'jpeg'; quality?: number }) => Promise<BrowserAutomationScreenshot>
+  captureDiagnostics?: (options?: { clear?: boolean }) => Promise<BrowserAutomationDiagnostics>
   runAutomationAction: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
+  getURL?: () => string | null
+  isLoading?: () => boolean
+  waitForReady?: (timeoutMs?: number) => Promise<void>
 }
 
 /** Maximum seconds to wait for a project's port to become available after starting. */
@@ -296,7 +306,7 @@ const activePageAutomationContext = computed<ActivePageAutomationContext | null>
   if (workspaceSurface) {
     return {
       appId: workspaceSurface.appId,
-      kind: 'browser',
+      kind: workspaceSurface.kind,
       title: workspaceSurface.title,
       url: workspaceSurface.url,
       origin: resolveUrlOrigin(workspaceSurface.url)
@@ -338,6 +348,8 @@ let schedulerReportRequestedCleanup: (() => void) | null = null
 let pageAutomationRequestCleanup: (() => void) | null = null
 /** Bumped on every AI-originated workspace tab request; consumed by the chat shell once. */
 let workspaceTabRequestSeq = 0
+/** Timestamp of the latest AI tab open/activate, used to wait for its page surface. */
+let lastWorkspaceTabRequestAt = 0
 const workspaceTabRequest = ref<{ kind: string; payload?: Record<string, unknown>; conversationId?: string; seq: number } | null>(null)
 /** Bumped on every AI workspace tab list/activate/close request; resolved through the chat shell. */
 let workspaceTabControlSeq = 0
@@ -433,25 +445,186 @@ function findWorkspaceTabIdByWebContentsId (webContentsId: number): string | nul
   return null
 }
 
+function resolveWorkspaceAutomationHandle (tabId: string): BrowserAutomationViewHandle | null {
+  const surface = workspaceBrowserSurfaces.get(tabId)
+  return (surface?.handle as unknown as BrowserAutomationViewHandle | null) || null
+}
+
+/** Per-tab promise chains keep two AI runs from interleaving page actions. */
+const pageAutomationQueues = new Map<string, Promise<unknown>>()
+
+function enqueuePageAutomation<T> (key: string, task: () => Promise<T>): Promise<T> {
+  const previous = pageAutomationQueues.get(key) ?? Promise.resolve()
+  const next = previous.catch(() => undefined).then(task)
+  pageAutomationQueues.set(key, next)
+  const cleanup = () => {
+    if (pageAutomationQueues.get(key) === next) pageAutomationQueues.delete(key)
+  }
+  void next.then(cleanup, cleanup)
+  return next
+}
+
+function comparablePageUrl (value: string | null | undefined): string | null {
+  if (!value) return null
+  try {
+    const parsed = new URL(value)
+    return `${parsed.origin}${parsed.pathname}${parsed.search}`
+  } catch {
+    return value
+  }
+}
+
+function pageUrlsMatch (current: string | null, expected: string | null): boolean {
+  if (!current) return false
+  if (!expected) return true
+  return comparablePageUrl(current) === comparablePageUrl(expected)
+}
+
+async function waitForPageReady (
+  handle: BrowserAutomationViewHandle,
+  readExpectedUrl: () => string | null,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  if (handle.waitForReady) await handle.waitForReady(timeoutMs)
+  if (!handle.getURL) return
+
+  while (true) {
+    const current = handle.getURL()
+    const expected = readExpectedUrl()
+    if (pageUrlsMatch(current, expected)) return
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out after ${timeoutMs}ms waiting for the page to load${expected ? ` (expected ${expected}, current ${current || 'unknown'})` : ''}.`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
+
+async function resolvePageAutomationHandle (tabId?: string): Promise<BrowserAutomationViewHandle | null> {
+  // A tab open/activate request is asynchronous: the webview mounts after the
+  // panel animation and state restoration. Wait instead of failing the first
+  // page tool call and letting the model fall back to an external MCP.
+  // Explicit tab targets and recent open/activate requests also cover project
+  // startup (up to 15s), so use the longer bound there.
+  const recentlyRequested = Date.now() - lastWorkspaceTabRequestAt < 10000
+  const waitMs = tabId || recentlyRequested ? 15000 : 1500
+  const deadline = Date.now() + waitMs
+  while (true) {
+    const handle = tabId ? resolveWorkspaceAutomationHandle(tabId) : getActiveBrowserAutomationHandle()
+    if (handle) return handle
+    if (Date.now() >= deadline) return null
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
+
+function describeAutomationTargets (): string {
+  const entries = [...workspaceBrowserSurfaces]
+    .map(([tabId, surface]) => `${surface.kind} tab_id=${tabId} "${surface.title || surface.url}"`)
+  return entries.length > 0 ? entries.join('; ') : 'none'
+}
+
+async function executePageAutomationOnHandle (
+  handle: BrowserAutomationViewHandle,
+  request: PageAutomationRequestEnvelope['request']
+): Promise<PageAutomationRendererResult> {
+  if (request.type === 'snapshot') {
+    if (request.mode === 'article') {
+      if (!handle.captureArticleSnapshot) throw new Error('Article extraction is unavailable for this page surface.')
+      return await handle.captureArticleSnapshot()
+    }
+    if (request.mode === 'search_results') {
+      if (!handle.captureSearchResults) throw new Error('Search-result extraction is unavailable for this page surface.')
+      return await handle.captureSearchResults()
+    }
+    return await handle.captureAutomationSnapshot()
+  }
+
+  if (request.type === 'screenshot') {
+    if (!handle.captureScreenshot) throw new Error('Page screenshots are unavailable for this page surface.')
+    return await handle.captureScreenshot({
+      fullPage: request.fullPage,
+      maxWidth: request.maxWidth,
+      format: request.format,
+      quality: request.quality
+    })
+  }
+
+  if (request.type === 'diagnostics') {
+    if (!handle.captureDiagnostics) throw new Error('Page diagnostics are unavailable for this page surface.')
+    return await handle.captureDiagnostics({ clear: request.clear })
+  }
+
+  return await handle.runAutomationAction(request.action)
+}
+
 async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelope) {
   const respond = window.electronAPI?.respondPageAutomationRequest
   if (!respond) return
 
+  const requestedConversationId = typeof payload.conversationId === 'string'
+    ? payload.conversationId.trim()
+    : ''
+  if (!requestedConversationId || requestedConversationId !== chatCurrentConversationId.value) {
+    respond({
+      requestId: payload.requestId,
+      ok: false,
+      error: 'Page tools are unavailable for background or unknown-conversation runs. Bring this conversation to the foreground and retry the page action.'
+    })
+    return
+  }
+
   let response: PageAutomationResponseEnvelope
   try {
-    const handle = getActiveBrowserAutomationHandle()
-    if (!handle) {
-      throw new Error(t('appShell.pageAutomationNoActivePage'))
-    }
+    const requestedTabId = typeof payload.tabId === 'string' ? payload.tabId.trim() : ''
+    // Capture the active workspace tab id at request time so an implicit
+    // request and an explicit request for the same tab share one queue.
+    const activeWorkspaceTabId = workspacePageSurface.value?.appId?.startsWith('wsb-')
+      ? workspacePageSurface.value.appId.slice(4)
+      : ''
+    const targetTabId = requestedTabId || activeWorkspaceTabId
+    const queueKey = targetTabId || 'active'
+    const result = await enqueuePageAutomation(queueKey, async () => {
+      const handle = await resolvePageAutomationHandle(targetTabId || undefined)
+      if (!handle) {
+        throw new Error(`${t('appShell.pageAutomationNoActivePage')} Open page surfaces: ${describeAutomationTargets()}. Use open_workspace_tab or manage_workspace_tabs to activate one first.`)
+      }
 
-    let result: PageAutomationRendererResult
-    if (payload.request.type === 'snapshot') {
-      result = payload.request.mode === 'article' && handle.captureArticleSnapshot
-        ? await handle.captureArticleSnapshot()
-        : await handle.captureAutomationSnapshot()
-    } else {
-      result = await handle.runAutomationAction(payload.request.action)
-    }
+      if (targetTabId) {
+        const surface = workspaceBrowserSurfaces.get(targetTabId)
+        if (!surface?.handle || (surface.handle as unknown as BrowserAutomationViewHandle) !== handle) {
+          throw new Error(`The requested tab_id "${targetTabId}" is no longer the mounted automation surface. Call manage_workspace_tabs(action="list") and retry with a current tab_id.`)
+        }
+      }
+
+      const targetSurface = targetTabId
+        ? workspaceBrowserSurfaces.get(targetTabId)
+        : workspacePageSurface.value
+      const isProject = targetSurface?.kind === 'project'
+      const recentlyRequested = Date.now() - lastWorkspaceTabRequestAt < 10000
+      const readyTimeoutMs = isProject || recentlyRequested ? 15000 : 6000
+      const readExpectedUrl = () => targetTabId
+        ? workspaceBrowserSurfaces.get(targetTabId)?.url || null
+        : workspacePageSurface.value?.url || activePageAutomationContext.value?.url || null
+
+      await waitForPageReady(handle, readExpectedUrl, readyTimeoutMs)
+
+      // A general browser tab may have reached a local/private page through a
+      // redirect, popup, or manual address-bar edit. Re-check the final URL
+      // after readiness; project tabs are intentionally allowed to run on
+      // 127.0.0.1 and keep using the same page tools.
+      const targetKind = targetSurface?.kind || activePageAutomationContext.value?.kind
+      if (targetKind !== 'project') {
+        const currentUrl = handle.getURL?.() || readExpectedUrl() || null
+        if (currentUrl && currentUrl !== 'about:blank') {
+          const validation = validateAiBrowserTarget(currentUrl)
+          if (!validation.ok) {
+            throw new Error(`AI page tools cannot read or operate local/private or unsupported pages in a general browser tab (${validation.reason}) Use open_workspace_tab(kind="project") for local app pages.`)
+          }
+        }
+      }
+
+      return await executePageAutomationOnHandle(handle, payload.request)
+    })
 
     response = {
       requestId: payload.requestId,
@@ -1414,6 +1587,7 @@ onMounted(async () => {
         launchpadPageChatActive.value = false
       }
       workspaceTabRequestSeq += 1
+      lastWorkspaceTabRequestAt = Date.now()
       workspaceTabRequest.value = { kind, payload, conversationId, seq: workspaceTabRequestSeq }
     })
   }
@@ -1424,6 +1598,7 @@ onMounted(async () => {
       // yank the user out of the current view. Background-conversation
       // requests neither switch views nor steal focus.
       const conversationId = envelope.request.conversationId
+      if (envelope.request.action !== 'list') lastWorkspaceTabRequestAt = Date.now()
       if (envelope.request.action !== 'list' && (!conversationId || conversationId === chatCurrentConversationId.value)) {
         if (currentView.value !== 'chat') openChat()
         launchpadPageChatActive.value = false

@@ -200,6 +200,36 @@
 
 ---
 
+### 14. `read_current_page` / `interact_current_page` — 工作区页面工具
+
+这组工具统一作用于工作区内嵌浏览器页（kind=browser）和运行中的项目页（kind=project）。新建页面用 `open_workspace_tab(kind="browser", url=...)`；多个页面并存时，先用 `manage_workspace_tabs(action="list")` 获取 `tab_id`，再传给页面工具定向操作；省略 `tab_id` 时作用于当前活跃页。
+
+**读取模式（`read_current_page`）**
+
+| mode | 用途 |
+|------|------|
+| `interactive`（默认） | 标题、URL、可读文本、带稳定 ref（`e1`/`e2`/…）的可交互元素与表单选择器 |
+| `article` | Readability 风格正文提取，返回 markdown |
+| `search_results` | 从 bing/ddg/google 搜索结果页提取 `title` / `url` / `snippet` |
+| `screenshot` | 视口或整页截图，用于视觉验收（`full_page` / `max_width` / `format` / `quality`） |
+| `diagnostics` | console、运行时错误、fetch/XHR/resource 网络请求、viewport/滚动/历史状态 |
+
+**操作动作（`interact_current_page`）**
+
+`click`、`input`、`select`、`batch_input`、`extract`、`evaluate`（支持 async）、`hover`、`focus`、`press_key`、`scroll`、`wait`、`wait_for`、`find`、`navigate`、`reload`、`back`、`forward`、`resize`、`emulate`、`batch`。优先使用快照返回的 ref；批量表单用 `fill_current_page_form`。
+
+**页面仿真（`emulate`）**
+
+`interact_current_page(action="emulate")` 支持 `media`（`screen` / `print`）、`color_scheme`（`light` / `dark` / `no-preference`）、`reduced_motion`（`reduce` / `no-preference`）、`user_agent`，以及 `width` / `height` / `device_scale_factor` / `mobile` 视口仿真；`reset=true` 恢复面板默认视口和仿真状态。典型验证流程：先 `emulate`，再 `read_current_page(mode="screenshot")` / `mode="diagnostics"` 检查暗色、减少动效、打印样式或移动端布局，最后 `emulate(reset=true)`。截图与仿真均由内置工具完成，不需要 chrome/playwright MCP。
+
+**路由规则：内置优先**
+
+1. **L0 静态**：公共网页先用 `web_search` / `fetch_webpage`；
+2. **L1 内置**：被拦截、需要登录态或需要交互时，用 `open_workspace_tab(kind="browser")` 打开页面，再用上述页面工具；项目页用 `open_project_app`；
+3. **L2 外部**：chrome/playwright MCP 仅用于内置能力缺失的 CDP-level 场景（CDP 网络拦截、性能 trace、CI/多浏览器矩阵）。导航、截图、console/network 读取、viewport 调整、页面仿真（emulate）、DOM/脚本检查一律使用内置工具，不要启动 chrome/playwright MCP。
+
+---
+
 ## Agent 执行流程示例 (增强版)
 
 ```

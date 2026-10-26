@@ -26,6 +26,7 @@ const services = {
   settingsStore: {},
   readActivePage: noOp,
   interactWithActivePage: noOp,
+  runPageAutomation: noOp,
   mcpService: new MCPService(),
   scheduledTaskService: {}
 }

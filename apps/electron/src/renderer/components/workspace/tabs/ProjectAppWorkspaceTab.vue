@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
 import BrowserWebView, { type BrowserContextAddPayload } from '../../app/BrowserWebView.vue'
 import { workspaceBrowserSurfaces } from '../workspace-store'
 import { addWebQuote } from '../../chat/panel/web-quote-state'
@@ -68,6 +68,8 @@ async function resolveRuntime (allowStart: boolean): Promise<void> {
     if (status?.status === 'running' && status.port) {
       resolvedPort.value = status.port
       phase.value = 'running'
+      await nextTick()
+      registerSurface()
       return
     }
 
@@ -80,6 +82,8 @@ async function resolveRuntime (allowStart: boolean): Promise<void> {
           stopPolling()
           resolvedPort.value = latest.port
           phase.value = 'running'
+          await nextTick()
+          registerSurface()
           return
         }
         if (Date.now() > deadline) {
@@ -111,6 +115,8 @@ function startRuntimeWatch (): void {
       const latest = await fetchStatus()
       if (latest?.status === 'running' && latest.port && latest.port !== resolvedPort.value) {
         resolvedPort.value = latest.port
+        await nextTick()
+        registerSurface()
       } else if (latest?.status && latest.status !== 'running' && latest.status !== 'starting') {
         phase.value = 'error'
         errorMessage.value = latest.status
@@ -123,6 +129,7 @@ function startRuntimeWatch (): void {
 function registerSurface (): void {
   if (phase.value !== 'running' || !appUrl.value) return
   workspaceBrowserSurfaces.set(props.tab.id, {
+    kind: 'project',
     url: appUrl.value,
     title: projectName.value,
     handle: browserRef.value
@@ -133,6 +140,7 @@ function handleStateChange (payload: BrowserAppStatePayload): void {
   if (!props.tab.state) props.tab.state = {}
   props.tab.state.port = resolvedPort.value
   workspaceBrowserSurfaces.set(props.tab.id, {
+    kind: 'project',
     url: appUrl.value || payload.url,
     title: projectName.value,
     handle: browserRef.value

@@ -17,6 +17,15 @@ import type { ScheduledTaskService } from '../scheduler/scheduled-task-service.j
 import type { ImageLibraryStore } from '../settings/image-library-store.js'
 import type { UsageStore } from '../settings/usage-store.js'
 import type { FolderWorkspaceChangeEvent } from '../../shared/folder-workspace-types.js'
+import type {
+  BrowserAutomationAction,
+  BrowserAutomationArticle,
+  BrowserAutomationActionResult,
+  BrowserAutomationSearchResults,
+  BrowserAutomationSnapshot,
+  PageAutomationRendererRequest,
+  PageAutomationRendererResult
+} from '../../shared/page-automation-types.js'
 
 export interface CustomToolRegistration {
   definition: ToolDefinition
@@ -25,7 +34,19 @@ export interface CustomToolRegistration {
   domain?: 'electron_host_override' | 'host'
 }
 
-export interface AIEngineServices {
+/**
+ * Page-automation surface shared by the Rust facade and the Electron host
+ * tools. `runPageAutomation` is the forward path; the per-mode callbacks stay
+ * for older hosts/tests that cannot issue renderer requests directly.
+ */
+export interface PageAutomationServices {
+  readActivePage?: (mode?: 'interactive' | 'article' | 'search_results', tabId?: string, conversationId?: string) => Promise<BrowserAutomationSnapshot | BrowserAutomationArticle | BrowserAutomationSearchResults>
+  interactWithActivePage?: (action: BrowserAutomationAction, tabId?: string, conversationId?: string) => Promise<BrowserAutomationActionResult>
+  /** Raw renderer round-trip for snapshots, screenshots, diagnostics and actions. */
+  runPageAutomation?: (request: PageAutomationRendererRequest, tabId?: string, conversationId?: string) => Promise<PageAutomationRendererResult>
+}
+
+export interface AIEngineServices extends PageAutomationServices {
   dataAccess: ProjectDataAccess
   documentStore?: DocumentStore
   /** Mirror a UI-created document artifact into the Rust artifact store. */
@@ -33,8 +54,6 @@ export interface AIEngineServices {
   settingsStore?: SettingsStore
   imageLibraryStore?: ImageLibraryStore
   getMainWindow?: () => BrowserWindow | null
-  readActivePage?: (mode?: 'interactive' | 'article') => Promise<BrowserAutomationSnapshot | BrowserAutomationArticle>
-  interactWithActivePage?: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
   /** Round-trip to the renderer workspace store for AI tab list/activate/close. */
   requestWorkspaceTabControl?: (request: import('../../shared/workspace-control-types.js').WorkspaceTabControlRequest) => Promise<import('../../shared/workspace-control-types.js').WorkspaceTabControlResult>
   notifySkillsChanged?: (event: { action: string; count?: number; id?: string }) => void
@@ -44,8 +63,6 @@ export interface AIEngineServices {
   /** 持久化 token 用量统计；注入后每次 provider 调用会记录真实 token。 */
   usageStore?: UsageStore
 }
-
-import type { BrowserAutomationAction, BrowserAutomationArticle, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../shared/page-automation-types.js'
 
 export interface AIConfigInput {
   apiKey?: string

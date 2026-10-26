@@ -44,19 +44,27 @@
     },
     {
       "name": "fill_current_page_form",
-      "description": "Batch-fill form fields on the currently active in-app browser page. Provide an array of field entries with selectors from read_current_page and the text to enter. This is a convenience wrapper around interact_current_page action=batch_input.",
+      "description": "Batch-fill form fields on the active in-app browser/project page. Provide an array of field entries with selectors or refs from read_current_page and the text to enter. This is the built-in replacement for chrome/playwright browser MCP form helpers and a convenience wrapper around interact_current_page action=batch_input.",
       "parameters": {
         "type": "object",
         "properties": {
+          "tab_id": {
+            "type": "string",
+            "description": "Optional workspace tab id from manage_workspace_tabs. Omit to use the active page tab."
+          },
           "fields": {
             "type": "array",
-            "description": "Array of {selector, text, append?} objects. Selectors come from read_current_page formFields or interactiveElements.",
+            "description": "Array of {selector|ref, text, append?} objects.",
             "items": {
               "type": "object",
               "properties": {
                 "selector": {
                   "type": "string",
                   "description": "CSS selector of the input, textarea, or select element."
+                },
+                "ref": {
+                  "type": "string",
+                  "description": "Stable ref from read_current_page."
                 },
                 "text": {
                   "type": "string",
@@ -68,7 +76,6 @@
                 }
               },
               "required": [
-                "selector",
                 "text"
               ]
             }
@@ -81,7 +88,7 @@
     },
     {
       "name": "interact_current_page",
-      "description": "Interact with the currently active in-app browser page. Supports click, input, select, batch_input, extract, evaluate, hover, focus, press_key, scroll, and wait actions. Use selectors returned by read_current_page.",
+      "description": "Operate the active in-app browser/project page. Actions: click, input, select, batch_input, extract, evaluate, hover, focus, press_key (real keyboard), scroll, wait, wait_for, find (semantic element lookup), navigate, reload, back, forward, resize (viewport), emulate (print/screen media, prefers-color-scheme, prefers-reduced-motion, user agent, mobile viewport/device scale), batch (multiple actions in one round trip). For wait_for, selector/ref/text are evaluated in the current document, while state/url wait across navigations. Action \"emulate\" is the built-in replacement for chrome-devtools-mcp \"emulate\". These built-in page tools replace chrome/playwright browser MCP for navigation, screenshots, console/network reads, viewport resizing/emulation, DOM inspection, and script evaluation; use external browser MCP only for capabilities the built-in surface lacks (CDP-level network interception, performance tracing, or CI browser matrices). Use selectors or stable refs from read_current_page.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -98,21 +105,38 @@
               "focus",
               "press_key",
               "scroll",
-              "wait"
+              "wait",
+              "wait_for",
+              "find",
+              "navigate",
+              "reload",
+              "back",
+              "forward",
+              "resize",
+              "emulate",
+              "batch"
             ],
-            "description": "The type of interaction to perform on the active page."
+            "description": "Action to perform on the active page. \"emulate\" is the built-in replacement for chrome-devtools-mcp \"emulate\" (media, color scheme, reduced motion, user agent, mobile viewport)."
+          },
+          "tab_id": {
+            "type": "string",
+            "description": "Optional workspace tab id from manage_workspace_tabs. Omit to use the active page tab."
           },
           "selector": {
             "type": "string",
-            "description": "Required for click, input, select, hover, focus. CSS selector of the target element. Optional for extract (defaults to full page) and press_key (defaults to focused element)."
+            "description": "CSS selector of the target element. Selectors come from read_current_page or action \"find\"."
+          },
+          "ref": {
+            "type": "string",
+            "description": "Stable element ref from read_current_page/find (e1, e2, ...). Prefer it over fragile CSS selectors."
           },
           "text": {
             "type": "string",
-            "description": "Required for input. Text to type into the selected field."
+            "description": "Required for input. Text to type into the target field."
           },
           "append": {
             "type": "boolean",
-            "description": "For input/batch_input: if true, append text instead of replacing the current value."
+            "description": "For input/batch_input: append text instead of replacing the current value."
           },
           "top": {
             "type": "number",
@@ -124,7 +148,7 @@
           },
           "timeout_ms": {
             "type": "integer",
-            "description": "Required for wait. Milliseconds to wait before continuing."
+            "description": "For wait/wait_for/navigate/reload/back/forward/evaluate: timeout in milliseconds."
           },
           "value": {
             "type": "string",
@@ -140,11 +164,14 @@
           },
           "fields": {
             "type": "array",
-            "description": "Required for batch_input. Array of {selector, text, append?} objects to fill multiple fields at once.",
+            "description": "Required for batch_input. Array of {selector|ref, text, append?} objects.",
             "items": {
               "type": "object",
               "properties": {
                 "selector": {
+                  "type": "string"
+                },
+                "ref": {
                   "type": "string"
                 },
                 "text": {
@@ -155,14 +182,13 @@
                 }
               },
               "required": [
-                "selector",
                 "text"
               ]
             }
           },
           "offset": {
             "type": "integer",
-            "description": "For extract: zero-based character offset to start reading from. Use with max_chars to paginate."
+            "description": "For extract: zero-based character offset to start reading from."
           },
           "max_chars": {
             "type": "integer",
@@ -170,11 +196,108 @@
           },
           "script": {
             "type": "string",
-            "description": "For evaluate: a JavaScript expression to run in the page context. Return a JSON-serializable value."
+            "description": "For evaluate: JavaScript expression, async function, or statements to run in the page. Async and top-level await are supported; the result is serialized."
           },
           "key": {
             "type": "string",
-            "description": "Required for press_key. The key to press (e.g. \"Enter\", \"Tab\", \"a\")."
+            "description": "Required for press_key. Key name (e.g. \"Enter\", \"Tab\", \"ArrowLeft\", \"a\")."
+          },
+          "modifiers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "Alt",
+                "Control",
+                "Meta",
+                "Shift"
+              ]
+            },
+            "description": "Optional key modifiers for press_key."
+          },
+          "role": {
+            "type": "string",
+            "description": "For find: accessible role filter (button, link, textbox, checkbox, ...)."
+          },
+          "name": {
+            "type": "string",
+            "description": "For find: accessible-name substring filter."
+          },
+          "url": {
+            "type": "string",
+            "description": "For navigate: target URL. For wait_for: URL substring to wait for."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "load",
+              "domcontentloaded"
+            ],
+            "description": "For wait_for: document load state to wait for."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "For find: maximum matches to return (default 20, max 50)."
+          },
+          "ignore_cache": {
+            "type": "boolean",
+            "description": "For reload: bypass the HTTP cache."
+          },
+          "width": {
+            "type": "integer",
+            "description": "For resize/emulate: viewport width in CSS pixels. emulate accepts 320-4096; a missing dimension keeps the current viewport size."
+          },
+          "height": {
+            "type": "integer",
+            "description": "For resize/emulate: viewport height in CSS pixels. emulate accepts 320-4096; a missing dimension keeps the current viewport size."
+          },
+          "reset": {
+            "type": "boolean",
+            "description": "For resize/emulate: reset the agent viewport and page emulation back to the panel defaults."
+          },
+          "media": {
+            "type": "string",
+            "enum": [
+              "screen",
+              "print"
+            ],
+            "description": "For emulate: emulated CSS media type. Use \"print\" to verify print styles."
+          },
+          "color_scheme": {
+            "type": "string",
+            "enum": [
+              "light",
+              "dark",
+              "no-preference"
+            ],
+            "description": "For emulate: emulate prefers-color-scheme."
+          },
+          "reduced_motion": {
+            "type": "string",
+            "enum": [
+              "reduce",
+              "no-preference"
+            ],
+            "description": "For emulate: emulate prefers-reduced-motion."
+          },
+          "user_agent": {
+            "type": "string",
+            "description": "For emulate: override the page user agent. Must be non-empty."
+          },
+          "device_scale_factor": {
+            "type": "number",
+            "description": "For emulate: device pixel ratio from 0.5 to 4 (default 1 when a viewport is supplied)."
+          },
+          "mobile": {
+            "type": "boolean",
+            "description": "For emulate: mobile viewport flag."
+          },
+          "actions": {
+            "type": "array",
+            "description": "Required for batch. Array of action objects, each with an \"action\" field and its own parameters.",
+            "items": {
+              "type": "object"
+            }
           }
         },
         "required": [
@@ -184,7 +307,7 @@
     },
     {
       "name": "manage_workspace_tabs",
-      "description": "List, switch to, or close tabs in the user's right-side workspace panel. Switching tabs retargets your UI tools: after activating a terminal tab, read_active_terminal / write_active_terminal operate on that terminal; after activating a browser tab, read_current_page / interact_current_page operate on that page. Actions: \"list\" returns every open tab with id, kind, title and its url/cwd/file_path/project_id; \"activate\" focuses an existing tab (by tab_id from a previous list, or by kind plus url/cwd/file_path) and reveals the panel — use it to show a terminal or web page to the user, or to retarget your terminal/page tools; it never creates tabs (use open_workspace_tab for that); \"close\" closes one tab (closing the last tab hides the panel, and closing a terminal tab kills its session).",
+      "description": "List, switch to, or close tabs in the user's right-side workspace panel. Switching tabs retargets your UI tools: after activating a terminal tab, read_active_terminal / write_active_terminal operate on that terminal; after activating a browser or project tab, read_current_page / interact_current_page operate on that page (pass its id as tab_id when several pages are open). Actions: \"list\" returns every open tab with id, kind, title and its url/cwd/file_path/project_id; \"activate\" focuses an existing tab (by tab_id from a previous list, or by kind plus url/cwd/file_path) and reveals the panel — use it to show a terminal or web page to the user, or to retarget your terminal/page tools; it never creates tabs (use open_workspace_tab for that); \"close\" closes one tab (closing the last tab hides the panel, and closing a terminal tab kills its session).",
       "parameters": {
         "type": "object",
         "properties": {
@@ -256,7 +379,7 @@
     },
     {
       "name": "open_workspace_tab",
-      "description": "Open a tab in the user's right-side workspace panel next to the chat. Use kind \"folder\" with root_path to bind a code directory; kind \"document\" with file_path to open one document (PDF/Excel/Word/...); kind \"browser\" with url to open a web page the user can watch and you can operate with the page tools (read_current_page / interact_current_page); kind \"terminal\" to open a shell terminal you can operate with read_active_terminal / write_active_terminal; kind \"project\" with project_id to open one of the user's developed apps (you can operate its UI with the page tools). The panel stays visible after the reply finishes.",
+      "description": "Open a tab in the user's right-side workspace panel next to the chat. Use kind \"folder\" with root_path to bind a code directory; kind \"document\" with file_path to open one document (PDF/Excel/Word/...); kind \"browser\" with url to open a web page the user can watch and you can operate with the page tools (read_current_page / interact_current_page, including screenshots, diagnostics, navigation and viewport resize); kind \"terminal\" to open a shell terminal you can operate with read_active_terminal / write_active_terminal; kind \"project\" with project_id to open one of the user's developed apps (you can operate its UI with the page tools). The panel stays visible after the reply finishes.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -299,7 +422,7 @@
     },
     {
       "name": "read_current_page",
-      "description": "Inspect the currently active in-app browser page. Two modes: mode \"interactive\" (default) returns the live page title, URL, a readable text preview, likely interactive elements, and form fields with selectors — use it before operating the page. mode \"article\" returns a readability-style extraction of the primary page content as markdown — use it for reading and information retrieval. When a web_search/web_fetch result reports access \"blocked\"/\"degraded\", open the page with open_workspace_tab(kind=\"browser\") and read it here with mode \"article\".",
+      "description": "Inspect the active in-app browser/project page. Modes: \"interactive\" (default) returns title, URL, readable text, interactive elements with stable refs/selectors, and form fields; \"article\" returns readability-style primary content as markdown; \"search_results\" extracts result titles/URLs/snippets from a search engine page; \"screenshot\" returns a current viewport (or full-page) image for visual verification; \"diagnostics\" returns console output, uncaught errors, recent fetch/XHR/resource activity, viewport and history state. These built-in page tools replace chrome/playwright browser MCP for navigation, screenshots, console/network reads, viewport changes, DOM inspection, and script evaluation; use external browser MCP only for capabilities the built-in surface lacks (CDP-level network interception, performance tracing, or CI browser matrices). When web_search/web_fetch reports access \"blocked\"/\"degraded\", open the page with open_workspace_tab(kind=\"browser\") and read it here with mode \"article\".",
       "parameters": {
         "type": "object",
         "properties": {
@@ -307,20 +430,51 @@
             "type": "string",
             "enum": [
               "interactive",
-              "article"
+              "article",
+              "search_results",
+              "screenshot",
+              "diagnostics"
             ],
-            "description": "interactive (default): DOM snapshot with interactive elements and form selectors. article: readable primary-content text for retrieval."
+            "description": "interactive (default): DOM snapshot with refs and form selectors. article: readable primary-content text. search_results: title/URL/snippet list from the current search page. screenshot: image of the page for visual design verification. diagnostics: console/errors/network/viewport state."
           },
           "max_chars": {
             "type": "integer",
             "description": "Maximum characters from the live page text preview to return (interactive mode). Default 8000, maximum 60000."
+          },
+          "tab_id": {
+            "type": "string",
+            "description": "Optional workspace tab id from manage_workspace_tabs. Omit to use the active page tab."
+          },
+          "full_page": {
+            "type": "boolean",
+            "description": "screenshot only: capture the full scrollable page instead of the visible viewport."
+          },
+          "max_width": {
+            "type": "integer",
+            "description": "screenshot only: maximum image width in pixels (default 1280, max 4096)."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "png",
+              "jpeg"
+            ],
+            "description": "screenshot only: image format. Default png."
+          },
+          "quality": {
+            "type": "integer",
+            "description": "screenshot only: JPEG quality 10-100 (default 80)."
+          },
+          "clear_diagnostics": {
+            "type": "boolean",
+            "description": "diagnostics only: clear the buffered console/error/network entries after returning the current snapshot."
           }
         }
       }
     },
     {
       "name": "save_current_page_as_document",
-      "description": "Save the full text of the currently active in-app browser page as a document artifact. Returns an artifact_id that can be read with read_document in chunks, searched, and revisited later. Useful for long pages or when the model needs to search or repeatedly reference the page content.",
+      "description": "Save the full text of the active in-app browser/project page as a document artifact. Long pages are extracted in chunks; if a safety cap is reached the result includes truncated/expected length metadata plus guidance for reading the remainder. Returns an artifact_id that can be read with read_document in chunks, searched, and revisited later. Useful for long pages or when the model needs to search or repeatedly reference the page content. Prefer this built-in tool over external browser MCP when you need a durable, searchable copy of page content.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -328,9 +482,17 @@
             "type": "string",
             "description": "Optional CSS selector to extract only a portion of the page. Defaults to the full page body."
           },
+          "ref": {
+            "type": "string",
+            "description": "Optional stable ref from read_current_page to extract only that element."
+          },
           "file_name": {
             "type": "string",
             "description": "Optional display name for the saved document. Defaults to \"current-page\"."
+          },
+          "tab_id": {
+            "type": "string",
+            "description": "Optional workspace tab id from manage_workspace_tabs. Omit to use the active page tab."
           }
         }
       }

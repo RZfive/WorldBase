@@ -10,6 +10,42 @@ type AppUpdateState = import('./shared/app-update-types.js').AppUpdateState
 type AppUpdateWebsiteKind = import('./shared/app-update-types.js').AppUpdateWebsiteKind
 type PageAutomationRequestEnvelope = import('./shared/page-automation-types.js').PageAutomationRequestEnvelope
 type PageAutomationResponseEnvelope = import('./shared/page-automation-types.js').PageAutomationResponseEnvelope
+type BrowserPageScreenshotRequest = import('./shared/page-automation-types.js').BrowserPageScreenshotRequest
+type BrowserPageScreenshotResult = import('./shared/page-automation-types.js').BrowserPageScreenshotResult
+
+interface BrowserPageEmulationViewportRequest {
+  width: number
+  height: number
+  deviceScaleFactor?: number
+  mobile?: boolean
+}
+
+interface BrowserPageEmulationRequest {
+  webContentsId: number
+  media?: 'screen' | 'print'
+  colorScheme?: 'light' | 'dark' | 'no-preference'
+  reducedMotion?: 'reduce' | 'no-preference'
+  userAgent?: string
+  viewport?: BrowserPageEmulationViewportRequest
+  reset?: boolean
+}
+
+interface BrowserPageEmulationResult {
+  ok: true
+  emulated: {
+    media?: string
+    colorScheme?: string
+    reducedMotion?: string
+    userAgent?: string | null
+    viewport?: {
+      width: number
+      height: number
+      deviceScaleFactor: number
+      mobile: boolean
+    }
+  }
+}
+
 type WorkspaceTabControlRequest = import('./shared/workspace-control-types.js').WorkspaceTabControlRequest
 type WorkspaceTabControlRequestEnvelope = import('./shared/workspace-control-types.js').WorkspaceTabControlRequestEnvelope
 type WorkspaceTabControlResponseEnvelope = import('./shared/workspace-control-types.js').WorkspaceTabControlResponseEnvelope
@@ -1140,6 +1176,8 @@ interface ElectronAPI {
   onPageAutomationRequest: (callback: (payload: PageAutomationRequestEnvelope) => void) => () => void
   onBrowserPageContextMenu: (callback: (payload: BrowserPageContextMenuPayload) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
+  captureBrowserPageScreenshot: (request: BrowserPageScreenshotRequest) => Promise<BrowserPageScreenshotResult>
+  emulateBrowserPage: (request: BrowserPageEmulationRequest) => Promise<BrowserPageEmulationResult>
   getAboutInfo: () => Promise<AppAboutInfo>
   getAppUpdateState: () => Promise<AppUpdateState>
   getAppUpdateConfig: () => Promise<AppUpdateConfig>

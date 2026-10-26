@@ -14,7 +14,11 @@ import type {
 } from '../../../../shared/workspace-control-types.js'
 import type {
   BrowserAutomationAction,
+  BrowserAutomationArticle,
   BrowserAutomationActionResult,
+  BrowserAutomationDiagnostics,
+  BrowserAutomationScreenshot,
+  BrowserAutomationSearchResults,
   BrowserAutomationSnapshot
 } from '../../../../shared/page-automation-types.js'
 import type {
@@ -123,11 +127,19 @@ export interface ChatPanelEmit {
  */
 export interface WorkspacePageSurfaceSummary {
   appId: string
+  kind: 'browser' | 'project'
   title: string
   url: string
   handle: {
     captureAutomationSnapshot: () => Promise<BrowserAutomationSnapshot>
+    captureArticleSnapshot?: () => Promise<BrowserAutomationArticle>
+    captureSearchResults?: () => Promise<BrowserAutomationSearchResults>
+    captureScreenshot?: (options?: { fullPage?: boolean; maxWidth?: number; format?: 'png' | 'jpeg'; quality?: number }) => Promise<BrowserAutomationScreenshot>
+    captureDiagnostics?: (options?: { clear?: boolean }) => Promise<BrowserAutomationDiagnostics>
     runAutomationAction: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
+    getURL?: () => string | null
+    isLoading?: () => boolean
+    waitForReady?: (timeoutMs?: number) => Promise<void>
   } | null
 }
 

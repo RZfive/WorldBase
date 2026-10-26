@@ -37,6 +37,7 @@ function handleStateChange (payload: BrowserAppStatePayload): void {
   props.tab.state.url = payload.url
   props.tab.title = payload.title || payload.url || props.tab.id
   workspaceBrowserSurfaces.set(props.tab.id, {
+    kind: 'browser',
     url: payload.url,
     title: props.tab.title,
     handle: browserRef.value
@@ -45,6 +46,7 @@ function handleStateChange (payload: BrowserAppStatePayload): void {
 
 onMounted(() => {
   workspaceBrowserSurfaces.set(props.tab.id, {
+    kind: 'browser',
     url: initialUrl,
     title: initialTitle || initialUrl,
     handle: browserRef.value

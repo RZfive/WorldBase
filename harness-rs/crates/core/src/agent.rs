@@ -1246,6 +1246,12 @@ fn project_editing_prompt(tools: &PromptToolContext<'_>) -> Option<String> {
     if tools.has("open_workspace_tab") {
         lines.push("- Use `open_workspace_tab` to open a folder, document, or browser tab beside the chat when the user wants to follow along with code, a document, or a web page; the browser tab can then be operated with the current-page tools.".into());
     }
+    if tools.has("read_current_page") {
+        lines.push("- For a running web project, verify the UI visually with `read_current_page` mode \"screenshot\" and check runtime health with mode \"diagnostics\" (console/errors/network) in the built-in workspace browser before declaring success. Do not launch chrome/playwright MCP for screenshots, console, navigation, DOM inspection, or emulation.".into());
+    }
+    if tools.has("interact_current_page") {
+        lines.push("- For dark/light color-scheme, reduced-motion, print-media, or mobile-layout verification, use `interact_current_page` action \"emulate\" (color_scheme/reduced_motion/media/mobile/user_agent) before the screenshot/diagnostics pass, then reset with reset=true. Built-in emulation and screenshots do not need chrome/playwright MCP.".into());
+    }
     Some(lines.join("\n"))
 }
 
@@ -1359,10 +1365,13 @@ fn web_tools_prompt(tools: &PromptToolContext<'_>) -> Option<String> {
         }
     }
     if tools.has("read_current_page") {
-        lines.push("- For the active in-app browser page, start with `read_current_page`.".into());
+        lines.push("- For the active in-app browser/project page, start with `read_current_page`. Modes: interactive (DOM refs/selectors), article (readable text), search_results, screenshot (visual verification), diagnostics (console/errors/network).".into());
+        lines.push("- Built-in page tools replace browser MCP for navigation, screenshots (viewport/full page), console/network reads, viewport resizing/emulation, DOM inspection, and script evaluation. Use chrome/playwright MCP only for CDP-level interception, tracing, or CI browser matrices.".into());
+        lines.push("- When verifying a running project, capture mode \"screenshot\" for visual confirmation and mode \"diagnostics\" for console errors, failed requests, and viewport state before declaring success. Do not launch chrome/playwright MCP for this verification.".into());
     }
     if tools.has("interact_current_page") {
-        lines.push("- Use `interact_current_page` for supported click, input, select, scroll, wait, keyboard, or evaluation actions, matching its action schema exactly.".into());
+        lines.push("- Use `interact_current_page` for click, input, select, hover, focus, press_key, scroll, extract, evaluate (async supported), wait_for, find, batch, navigate, reload, back/forward, viewport resize, and emulate (media/color scheme/reduced motion/user agent/mobile viewport), matching its action schema exactly.".into());
+        lines.push("- For dark/light color-scheme, reduced-motion, print-media, or mobile-layout checks, use action \"emulate\" then capture screenshot/diagnostics; reset with reset=true. Do not launch chrome/playwright MCP for emulation or screenshots.".into());
     }
     if tools.has("fill_current_page_form") {
         lines.push("- Use `fill_current_page_form` for batch form entry; every field must contain the exact selector and text required by its schema.".into());

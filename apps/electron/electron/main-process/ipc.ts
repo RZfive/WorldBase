@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell, systemPreferences, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell, systemPreferences, webContents, type Debugger as ElectronDebugger, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { validateConversationMetadata, type ConversationMetadataPatch } from '../../src/shared/conversation-metadata.js'
 import { createComputerUsePermissionService } from './permissions/computer-use.js'
@@ -29,7 +29,7 @@ import type { UsageRecord, UsageSummary } from '../../src/main/settings/usage-st
 import type { LongTermGoalSaveInput, LongTermGoalStreamEvent } from '../../src/shared/long-term-goal-types.js'
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateWebsiteKind } from '../../src/shared/app-update-types.js'
-import type { ActivePageAutomationContext, PageAutomationResponseEnvelope } from '../../src/shared/page-automation-types.js'
+import type { ActivePageAutomationContext, BrowserPageScreenshotRequest, BrowserPageScreenshotResult, PageAutomationResponseEnvelope } from '../../src/shared/page-automation-types.js'
 import type { WorkspaceTabControlResponseEnvelope } from '../../src/shared/workspace-control-types.js'
 import type { ActiveTerminalContext } from '../../src/shared/terminal-types.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, ChannelEvent, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
@@ -39,7 +39,7 @@ import { assertFolderWorkspaceRoot, getFolderWorkspaceRootName, listFolderWorksp
 import { calculateDocumentSha256, exportDocumentCopy, readDocumentEditImage } from '../../src/main/document-edit/document-edit-service.js'
 import { LAN_SERVER_PORT } from '../../src/main/constants.js'
 import { mainState, activeChatSessions, pendingPageAutomationRequests, pendingWorkspaceTabControlRequests, projectWindows, type EnsureWindowWidthOptions } from './state.js'
-import { MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES, MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES, MAX_UPLOADED_OFFICE_CONTENT_LENGTH } from './constants.js'
+import { MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES, MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES, MAX_UPLOADED_OFFICE_CONTENT_LENGTH, PAGE_SCREENSHOT_MAX_DIMENSION } from './constants.js'
 import { readUploadedAttachmentFromBuffer, readUploadedAttachmentFromPath, type UploadedAttachmentBufferPayload } from './media/attachments.js'
 import { ensureDocumentRenderPreview } from './media/document-preview.js'
 import { DocumentFileWatcher } from './document-file-watcher.js'
@@ -133,6 +133,266 @@ async function resolveFolderWorkspaceRootForRequest (workspaceRoot?: string | nu
 
 function stringFromUnknown (value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
+}
+
+interface PageScreenshotLayoutMetrics {
+  cssLayoutViewport?: { clientWidth?: number; clientHeight?: number }
+  layoutViewport?: { clientWidth?: number; clientHeight?: number }
+  cssContentSize?: { width?: number; height?: number }
+  contentSize?: { width?: number; height?: number }
+}
+
+function positivePixelValue (value: unknown): number | null {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return null
+  return Math.max(1, Math.round(numeric))
+}
+
+function resolveDevicePixelRatio (value: unknown): number {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return 1
+  return Math.min(Math.max(numeric, 0.1), 8)
+}
+
+const PAGE_SCREENSHOT_MAX_PIXELS = 16_000_000
+
+function assertPageSurfaceOwnedBySender (target: WebContents, sender: WebContents): void {
+  try {
+    if (target !== sender && target.hostWebContents === sender) return
+  } catch {
+    // Fall through to the ownership error below.
+  }
+  throw new Error('The requested page surface is not owned by this window.')
+}
+
+interface BrowserPageEmulationViewport {
+  width: number
+  height: number
+  deviceScaleFactor: number
+  mobile: boolean
+}
+
+interface BrowserPageEmulationRequest {
+  webContentsId: number
+  media?: 'screen' | 'print'
+  colorScheme?: 'light' | 'dark' | 'no-preference'
+  reducedMotion?: 'reduce' | 'no-preference'
+  userAgent?: string
+  viewport?: {
+    width: number
+    height: number
+    deviceScaleFactor?: number
+    mobile?: boolean
+  }
+  reset?: boolean
+}
+
+interface BrowserPageEmulationResult {
+  ok: true
+  emulated: {
+    media?: string
+    colorScheme?: string
+    reducedMotion?: string
+    userAgent?: string | null
+    viewport?: BrowserPageEmulationViewport
+  }
+}
+
+interface PageEmulationState {
+  media?: 'screen' | 'print'
+  colorScheme?: 'light' | 'dark' | 'no-preference'
+  reducedMotion?: 'reduce' | 'no-preference'
+  userAgent?: string
+  viewport?: BrowserPageEmulationViewport
+}
+
+interface PageEmulationSession {
+  debugger: ElectronDebugger
+  refs: number
+  emulation: PageEmulationState | null
+  emulationActive: boolean
+  cleanup: () => void
+}
+
+// One ref for active emulation plus one per in-flight screenshot. The debugger
+// is detached only when the last ref is released.
+const pageEmulationSessions = new Map<number, PageEmulationSession>()
+
+function pageDebuggerIsAttached (session: PageEmulationSession): boolean {
+  try {
+    return session.debugger.isAttached()
+  } catch {
+    return false
+  }
+}
+
+function getPageEmulationSession (webContentsId: number): PageEmulationSession | null {
+  const session = pageEmulationSessions.get(webContentsId)
+  if (!session) return null
+  if (pageDebuggerIsAttached(session)) return session
+  pageEmulationSessions.delete(webContentsId)
+  session.cleanup()
+  return null
+}
+
+function acquirePageEmulationSession (target: WebContents): { session: PageEmulationSession; created: boolean } {
+  const webContentsId = target.id
+  const existing = getPageEmulationSession(webContentsId)
+  if (existing) return { session: existing, created: false }
+
+  const debuggerSession = target.debugger
+  let alreadyAttached = false
+  try {
+    alreadyAttached = debuggerSession.isAttached()
+  } catch {
+    alreadyAttached = false
+  }
+  if (alreadyAttached) {
+    throw new Error('The page debugger is already in use (DevTools may be attached).')
+  }
+  try {
+    debuggerSession.attach('1.3')
+  } catch (error) {
+    const detail = error instanceof Error && error.message ? `: ${error.message}` : ''
+    throw new Error(`The page debugger is unavailable (DevTools may already be attached)${detail}`)
+  }
+
+  const session: PageEmulationSession = {
+    debugger: debuggerSession,
+    refs: 0,
+    emulation: null,
+    emulationActive: false,
+    cleanup: () => {}
+  }
+
+  const forget = () => {
+    if (pageEmulationSessions.get(webContentsId) === session) {
+      pageEmulationSessions.delete(webContentsId)
+    }
+  }
+  const onDestroyed = () => {
+    forget()
+    debuggerSession.removeListener('detach', onDetached)
+    try {
+      if (debuggerSession.isAttached()) debuggerSession.detach()
+    } catch { /* best effort */ }
+  }
+  const onDetached = () => {
+    forget()
+    target.removeListener('destroyed', onDestroyed)
+  }
+  session.cleanup = () => {
+    target.removeListener('destroyed', onDestroyed)
+    debuggerSession.removeListener('detach', onDetached)
+    forget()
+  }
+  target.once('destroyed', onDestroyed)
+  debuggerSession.once('detach', onDetached)
+  pageEmulationSessions.set(webContentsId, session)
+  if (target.isDestroyed()) {
+    session.cleanup()
+    try {
+      if (debuggerSession.isAttached()) debuggerSession.detach()
+    } catch { /* best effort */ }
+    throw new Error('The requested page surface is not available.')
+  }
+  return { session, created: true }
+}
+
+function releasePageEmulationSessionRef (webContentsId: number, session: PageEmulationSession): void {
+  if (pageEmulationSessions.get(webContentsId) !== session) {
+    session.cleanup()
+    return
+  }
+  session.refs = Math.max(0, session.refs - 1)
+  if (session.refs > 0) return
+  pageEmulationSessions.delete(webContentsId)
+  session.cleanup()
+  try {
+    if (session.debugger.isAttached()) session.debugger.detach()
+  } catch { /* best effort */ }
+}
+
+interface PageDebuggerLease {
+  debugger: ElectronDebugger
+  release: () => void
+}
+
+function acquirePageDebuggerForScreenshot (target: WebContents): PageDebuggerLease {
+  const webContentsId = target.id
+  const emulationSession = getPageEmulationSession(webContentsId)
+  if (emulationSession) {
+    emulationSession.refs += 1
+    let released = false
+    return {
+      debugger: emulationSession.debugger,
+      release: () => {
+        if (released) return
+        released = true
+        releasePageEmulationSessionRef(webContentsId, emulationSession)
+      }
+    }
+  }
+
+  const debuggerSession = target.debugger
+  let attachedByScreenshot = false
+  try {
+    if (!debuggerSession.isAttached()) {
+      debuggerSession.attach('1.3')
+      attachedByScreenshot = true
+    }
+  } catch (error) {
+    const detail = error instanceof Error && error.message ? `: ${error.message}` : ''
+    throw new Error(`The page debugger is unavailable (DevTools may already be attached)${detail}`)
+  }
+
+  let released = false
+  return {
+    debugger: debuggerSession,
+    release: () => {
+      if (released) return
+      released = true
+      if (!attachedByScreenshot) return
+      try {
+        if (debuggerSession.isAttached()) debuggerSession.detach()
+      } catch { /* best effort */ }
+    }
+  }
+}
+
+async function applyPageEmulation (debuggerSession: ElectronDebugger, state: PageEmulationState): Promise<void> {
+  const features: Array<{ name: string; value: string }> = []
+  if (state.colorScheme) features.push({ name: 'prefers-color-scheme', value: state.colorScheme })
+  if (state.reducedMotion) features.push({ name: 'prefers-reduced-motion', value: state.reducedMotion })
+
+  await debuggerSession.sendCommand('Emulation.setEmulatedMedia', {
+    media: state.media ?? '',
+    features
+  })
+  await debuggerSession.sendCommand('Emulation.setUserAgentOverride', {
+    userAgent: state.userAgent ?? ''
+  })
+  if (state.viewport) {
+    await debuggerSession.sendCommand('Emulation.setDeviceMetricsOverride', {
+      width: state.viewport.width,
+      height: state.viewport.height,
+      deviceScaleFactor: state.viewport.deviceScaleFactor,
+      mobile: state.viewport.mobile
+    })
+  } else {
+    await debuggerSession.sendCommand('Emulation.clearDeviceMetricsOverride')
+  }
+}
+
+function toEmulatedResult (state: PageEmulationState | null): BrowserPageEmulationResult['emulated'] {
+  if (!state) return {}
+  return {
+    ...(state.media ? { media: state.media } : {}),
+    ...(state.colorScheme ? { colorScheme: state.colorScheme } : {}),
+    ...(state.reducedMotion ? { reducedMotion: state.reducedMotion } : {}),
+    userAgent: state.userAgent ?? null,
+    ...(state.viewport ? { viewport: { ...state.viewport } } : {})
+  }
 }
 
 /** `<base>.<ext>` deduplicated against names already used in one export batch. */
@@ -314,6 +574,246 @@ export function setupIPC (): void {
     await startSelectedRustHarness()
     return mainState.rustHarness!
   }
+  ipcMain.handle('pageAutomation:captureScreenshot', async (event: IpcMainInvokeEvent, rawRequest: unknown): Promise<BrowserPageScreenshotResult> => {
+    if (!rawRequest || typeof rawRequest !== 'object' || Array.isArray(rawRequest)) {
+      throw new Error('Invalid page screenshot request.')
+    }
+
+    const request = rawRequest as Partial<BrowserPageScreenshotRequest>
+    const webContentsId = request.webContentsId
+    if (typeof webContentsId !== 'number' || !Number.isInteger(webContentsId) || webContentsId <= 0) {
+      throw new Error('Invalid page surface id for screenshot capture.')
+    }
+    if (request.format !== undefined && request.format !== 'png' && request.format !== 'jpeg') {
+      throw new Error('Unsupported page screenshot format.')
+    }
+
+    const target = webContents.fromId(webContentsId)
+    if (!target || target.isDestroyed()) {
+      const stale = pageEmulationSessions.get(webContentsId)
+      if (stale) {
+        pageEmulationSessions.delete(webContentsId)
+        stale.cleanup()
+      }
+      throw new Error('The requested page surface is not available.')
+    }
+    assertPageSurfaceOwnedBySender(target, event.sender)
+
+    const format = request.format === 'jpeg' ? 'jpeg' : 'png'
+    const fullPage = request.fullPage === true
+    const quality = typeof request.quality === 'number' && Number.isFinite(request.quality)
+      ? Math.max(10, Math.min(Math.round(request.quality), 100))
+      : 80
+
+    const lease = acquirePageDebuggerForScreenshot(target)
+    const debuggerSession = lease.debugger
+    try {
+      const metrics = ((await debuggerSession.sendCommand('Page.getLayoutMetrics')) ?? {}) as PageScreenshotLayoutMetrics
+      const viewportWidth = positivePixelValue(metrics.cssLayoutViewport?.clientWidth)
+        ?? positivePixelValue(metrics.layoutViewport?.clientWidth)
+        ?? 1
+      const viewportHeight = positivePixelValue(metrics.cssLayoutViewport?.clientHeight)
+        ?? positivePixelValue(metrics.layoutViewport?.clientHeight)
+        ?? 1
+
+      let devicePixelRatio = 1
+      try {
+        const evaluated = await debuggerSession.sendCommand('Runtime.evaluate', {
+          expression: 'window.devicePixelRatio || 1',
+          returnByValue: true
+        }) as { result?: { value?: unknown } }
+        devicePixelRatio = resolveDevicePixelRatio(evaluated?.result?.value)
+      } catch {
+        // The execution context can be unavailable mid-navigation; CSS pixels
+        // are still a usable size fallback for the capture.
+      }
+
+      const params: Record<string, unknown> = {
+        format,
+        fromSurface: true,
+        captureBeyondViewport: false
+      }
+      if (format === 'jpeg') {
+        params.quality = quality
+      }
+
+      let width = Math.max(1, Math.round(viewportWidth * devicePixelRatio))
+      let height = Math.max(1, Math.round(viewportHeight * devicePixelRatio))
+
+      if (fullPage) {
+        const contentWidth = positivePixelValue(metrics.cssContentSize?.width)
+          ?? positivePixelValue(metrics.contentSize?.width)
+          ?? viewportWidth
+        const contentHeight = positivePixelValue(metrics.cssContentSize?.height)
+          ?? positivePixelValue(metrics.contentSize?.height)
+          ?? viewportHeight
+        const outputWidth = contentWidth * devicePixelRatio
+        const outputHeight = contentHeight * devicePixelRatio
+        const scale = Math.min(
+          1,
+          PAGE_SCREENSHOT_MAX_DIMENSION / Math.max(outputWidth, outputHeight),
+          Math.sqrt(PAGE_SCREENSHOT_MAX_PIXELS / (outputWidth * outputHeight))
+        )
+        params.captureBeyondViewport = true
+        params.clip = { x: 0, y: 0, width: contentWidth, height: contentHeight, scale }
+        width = Math.max(1, Math.round(outputWidth * scale))
+        height = Math.max(1, Math.round(outputHeight * scale))
+      }
+
+      const captured = await debuggerSession.sendCommand('Page.captureScreenshot', params) as { data?: string }
+      if (typeof captured?.data !== 'string' || captured.data.length === 0) {
+        throw new Error('The page produced an empty screenshot.')
+      }
+      return {
+        dataUrl: `data:image/${format};base64,${captured.data}`,
+        width,
+        height,
+        fullPage
+      }
+    } finally {
+      lease.release()
+    }
+  })
+
+  ipcMain.handle('pageAutomation:emulate', async (event: IpcMainInvokeEvent, rawRequest: unknown): Promise<BrowserPageEmulationResult> => {
+    if (!rawRequest || typeof rawRequest !== 'object' || Array.isArray(rawRequest)) {
+      throw new Error('Invalid page emulation request.')
+    }
+
+    const request = rawRequest as Partial<BrowserPageEmulationRequest>
+    const webContentsId = request.webContentsId
+    if (typeof webContentsId !== 'number' || !Number.isInteger(webContentsId) || webContentsId <= 0) {
+      throw new Error('Invalid page surface id for emulation.')
+    }
+
+    if (request.media !== undefined && request.media !== 'screen' && request.media !== 'print') {
+      throw new Error('Unsupported emulated media type.')
+    }
+    if (
+      request.colorScheme !== undefined &&
+      request.colorScheme !== 'light' &&
+      request.colorScheme !== 'dark' &&
+      request.colorScheme !== 'no-preference'
+    ) {
+      throw new Error('Unsupported emulated color scheme.')
+    }
+    if (
+      request.reducedMotion !== undefined &&
+      request.reducedMotion !== 'reduce' &&
+      request.reducedMotion !== 'no-preference'
+    ) {
+      throw new Error('Unsupported emulated reduced-motion value.')
+    }
+    if (request.reset !== undefined && typeof request.reset !== 'boolean') {
+      throw new Error('Invalid emulation reset flag.')
+    }
+
+    const userAgent = request.userAgent
+    if (userAgent !== undefined && (typeof userAgent !== 'string' || userAgent.trim().length === 0)) {
+      throw new Error('Invalid emulated user agent.')
+    }
+
+    let viewport: BrowserPageEmulationViewport | undefined
+    if (request.viewport !== undefined) {
+      const rawViewport = request.viewport
+      if (!rawViewport || typeof rawViewport !== 'object' || Array.isArray(rawViewport)) {
+        throw new Error('Invalid emulated viewport.')
+      }
+      const width = rawViewport.width
+      const height = rawViewport.height
+      if (typeof width !== 'number' || !Number.isInteger(width) || width < 320 || width > 4096) {
+        throw new Error('Emulated viewport width must be an integer between 320 and 4096.')
+      }
+      if (typeof height !== 'number' || !Number.isInteger(height) || height < 320 || height > 4096) {
+        throw new Error('Emulated viewport height must be an integer between 320 and 4096.')
+      }
+      const deviceScaleFactor = rawViewport.deviceScaleFactor
+      if (
+        deviceScaleFactor !== undefined &&
+        (typeof deviceScaleFactor !== 'number' ||
+          !Number.isFinite(deviceScaleFactor) ||
+          deviceScaleFactor < 0.5 ||
+          deviceScaleFactor > 4)
+      ) {
+        throw new Error('Emulated device scale factor must be between 0.5 and 4.')
+      }
+      const mobile = rawViewport.mobile
+      if (mobile !== undefined && typeof mobile !== 'boolean') {
+        throw new Error('Invalid emulated mobile flag.')
+      }
+      viewport = {
+        width,
+        height,
+        deviceScaleFactor: deviceScaleFactor ?? 1,
+        mobile: mobile ?? false
+      }
+    }
+
+    const target = webContents.fromId(webContentsId)
+    if (!target || target.isDestroyed()) {
+      const stale = pageEmulationSessions.get(webContentsId)
+      if (stale) {
+        pageEmulationSessions.delete(webContentsId)
+        stale.cleanup()
+      }
+      if (request.reset === true) return { ok: true, emulated: {} }
+      throw new Error('The requested page surface is not available.')
+    }
+    assertPageSurfaceOwnedBySender(target, event.sender)
+
+    if (request.reset === true) {
+      const session = getPageEmulationSession(webContentsId)
+      if (!session) return { ok: true, emulated: {} }
+      const wasActive = session.emulationActive
+      session.emulationActive = false
+      try {
+        await applyPageEmulation(session.debugger, {})
+      } finally {
+        if (!session.emulationActive) session.emulation = null
+        if (wasActive) releasePageEmulationSessionRef(webContentsId, session)
+      }
+      return { ok: true, emulated: {} }
+    }
+
+    const hasOverrides = request.media !== undefined ||
+      request.colorScheme !== undefined ||
+      request.reducedMotion !== undefined ||
+      userAgent !== undefined ||
+      viewport !== undefined
+    if (!hasOverrides) {
+      const session = getPageEmulationSession(webContentsId)
+      return { ok: true, emulated: toEmulatedResult(session?.emulationActive ? session.emulation : null) }
+    }
+
+    const { session, created } = acquirePageEmulationSession(target)
+    const addedEmulationRef = created || !session.emulationActive
+    if (addedEmulationRef) {
+      session.emulationActive = true
+      session.refs += 1
+    }
+    const previousState = session.emulation
+    const nextState: PageEmulationState = { ...(previousState ?? {}) }
+    if (request.media !== undefined) nextState.media = request.media
+    if (request.colorScheme !== undefined) nextState.colorScheme = request.colorScheme
+    if (request.reducedMotion !== undefined) nextState.reducedMotion = request.reducedMotion
+    if (userAgent !== undefined) nextState.userAgent = userAgent
+    if (viewport !== undefined) nextState.viewport = viewport
+
+    try {
+      await applyPageEmulation(session.debugger, nextState)
+      session.emulation = nextState
+      return { ok: true, emulated: toEmulatedResult(nextState) }
+    } catch (error) {
+      try { await applyPageEmulation(session.debugger, previousState ?? {}) } catch { /* best effort */ }
+      if (addedEmulationRef) {
+        session.emulationActive = false
+        session.emulation = null
+        releasePageEmulationSessionRef(webContentsId, session)
+      }
+      throw error instanceof Error ? error : new Error(String(error))
+    }
+  })
+
   ipcMain.on('pageAutomation:response', (_event, payload: PageAutomationResponseEnvelope) => {
     const pending = pendingPageAutomationRequests.get(payload.requestId)
     if (!pending) return
