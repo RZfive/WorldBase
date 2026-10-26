@@ -13,7 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const ASK_TIMEOUT: Duration = Duration::from_secs(300);
-const PAGE_TIMEOUT: Duration = Duration::from_secs(30);
+// The Electron renderer budgets the whole page request at 50s and the main
+// process round-trip at 60s; keep this above both so the host tool does not
+// abandon a legitimate startup/readiness/screenshot/wait first.
+const PAGE_TIMEOUT: Duration = Duration::from_secs(70);
 
 fn tools_host_bridge(services: &ToolServices) -> Arc<HostBridge> {
     services.host.clone()
@@ -704,8 +707,13 @@ impl Tool for WriteActiveTerminalTool {
         // output of an already-running command — the only way to wait on the
         // shared terminal without typing filler keys into it.
         let wait_only = text.is_empty();
-        let execute = input.get("execute").and_then(Value::as_bool).unwrap_or(true);
-        let wait_ms = optional_u64(&input, "wait_ms")?.unwrap_or(1_500).min(120_000);
+        let execute = input
+            .get("execute")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let wait_ms = optional_u64(&input, "wait_ms")?
+            .unwrap_or(1_500)
+            .min(120_000);
         let max_chars = optional_u64(&input, "max_chars")?;
         let stream = services.current_stream.lock().unwrap().clone();
         let mut payload = json!({

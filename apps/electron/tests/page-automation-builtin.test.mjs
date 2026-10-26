@@ -12,7 +12,12 @@ const REPO_ROOT = path.resolve(ELECTRON_ROOT, '../..')
 
 const CONTRACT_PATH = path.join(REPO_ROOT, 'harness-rs/crates/tools/electron-tool-contracts.json')
 const WINDOWS_PATH = path.join(ELECTRON_ROOT, 'electron/main-process/windows.ts')
+const IPC_PATH = path.join(ELECTRON_ROOT, 'electron/main-process/ipc.ts')
+const MAIN_CONSTANTS_PATH = path.join(ELECTRON_ROOT, 'electron/main-process/constants.ts')
+const APP_PATH = path.join(ELECTRON_ROOT, 'src/App.vue')
 const BROWSER_WEBVIEW_PATH = path.join(ELECTRON_ROOT, 'src/renderer/components/app/BrowserWebView.vue')
+const BROWSER_WORKSPACE_TAB_PATH = path.join(ELECTRON_ROOT, 'src/renderer/components/workspace/tabs/BrowserWorkspaceTab.vue')
+const PROJECT_APP_WORKSPACE_TAB_PATH = path.join(ELECTRON_ROOT, 'src/renderer/components/workspace/tabs/ProjectAppWorkspaceTab.vue')
 const PAGE_AUTOMATION_TYPES_PATH = path.join(ELECTRON_ROOT, 'src/shared/page-automation-types.ts')
 
 // The Electron host catalog is intentionally small: page automation, tab
@@ -175,4 +180,79 @@ test('page automation types include the new action and request-mode unions', asy
   assert.match(source, /PageAutomationSnapshotMode\s*=\s*[^\n]*'search_results'/)
   assert.match(source, /type:\s*'screenshot'/)
   assert.match(source, /type:\s*'diagnostics'/)
+})
+
+test('app view embeds project pages with the automation-capable BrowserWebView', async () => {
+  const source = await readText(APP_PATH)
+  const embeddedTemplate = sliceBetween(source, 'class="embedded-app"', 'class="chat-shell')
+
+  assert.match(embeddedTemplate, /<BrowserWebView/, 'embedded-app template must render BrowserWebView')
+  assert.match(
+    source,
+    /:hide-bar="appState\.kind === 'project'"/,
+    'project pages must pass the hidden browser bar flag'
+  )
+  assert.doesNotMatch(
+    source,
+    /embedded-app[\s\S]*?<iframe/,
+    'embedded-app must not fall back to an iframe project surface'
+  )
+  assert.match(source, /activeEmbeddedPageSurface/, 'embedded pages must expose an automation surface')
+})
+
+test('app view bounds page readiness and queue waits', async () => {
+  const source = await readText(APP_PATH)
+
+  assert.match(source, /PAGE_AUTOMATION_HANDLE_WAIT_MS/, 'must bound handle resolution')
+  assert.match(source, /PAGE_AUTOMATION_READY_WAIT_MS/, 'must bound readiness')
+  assert.match(source, /PAGE_AUTOMATION_QUEUE_TIMEOUT_MS/, 'must bound the automation queue')
+  assert.match(source, /handle\.waitForReady\s*\(/, 'must wait on the page handle')
+
+  const queueSection = sliceBetween(source, 'function enqueuePageAutomation', 'function comparablePageUrl')
+  assert.match(queueSection, /withTimeout\s*\(/, 'enqueuePageAutomation must wrap queued work in withTimeout')
+  assert.match(queueSection, /PAGE_AUTOMATION_QUEUE_TIMEOUT_MS/, 'queue work must use the queue timeout')
+})
+
+test('main-process page automation timeout exceeds the renderer queue budget', async () => {
+  const source = await readText(MAIN_CONSTANTS_PATH)
+  const match = source.match(/export const PAGE_AUTOMATION_REQUEST_TIMEOUT_MS\s*=\s*([0-9_]+)/)
+
+  assert.ok(match, 'expected PAGE_AUTOMATION_REQUEST_TIMEOUT_MS to be defined as a number')
+  const timeoutMs = Number(match[1].replaceAll('_', ''))
+  assert.ok(Number.isFinite(timeoutMs), 'expected the page automation timeout to be numeric')
+  assert.ok(timeoutMs >= 40000, `expected the main-process timeout to be at least 40000ms, got ${timeoutMs}`)
+})
+
+test('BrowserWebView keeps hidden chrome and bounded screenshot waits', async () => {
+  const source = await readText(BROWSER_WEBVIEW_PATH)
+
+  assert.match(source, /hideBar\?:\s*boolean/, 'BrowserWebView must accept the hideBar prop')
+  assert.match(source, /\bwithTimeout\b/, 'BrowserWebView must bound long page operations')
+  assert.match(source, /SCREENSHOT_FULL_PAGE_TIMEOUT_MS/, 'full-page screenshots must have a timeout')
+  assert.match(source, /SCREENSHOT_VIEWPORT_TIMEOUT_MS/, 'viewport screenshots must have a timeout')
+})
+
+test('workspace browser and project tabs register their automation surfaces', async () => {
+  for (const [label, filePath] of [
+    ['BrowserWorkspaceTab', BROWSER_WORKSPACE_TAB_PATH],
+    ['ProjectAppWorkspaceTab', PROJECT_APP_WORKSPACE_TAB_PATH]
+  ]) {
+    const source = await readText(filePath)
+
+    assert.match(source, /watch\(\s*browserRef/, `${label} must watch its BrowserWebView ref`)
+    assert.match(source, /\bnextTick\b/, `${label} must wait for mount before registering`)
+    assert.match(source, /\bregisterSurface\b/, `${label} must register a page automation surface`)
+  }
+})
+
+test('main-process screenshot capture is wrapped in a timeout', async () => {
+  const source = await readText(IPC_PATH)
+  const captureSection = sliceBetween(
+    source,
+    'const captured = await withTimeout(',
+    'Timed out capturing the page screenshot'
+  )
+
+  assert.match(captureSection, /Page\.captureScreenshot/, 'the capture command must be inside withTimeout')
+  assert.match(captureSection, /PAGE_SCREENSHOT_CAPTURE_TIMEOUT_MS/, 'the capture command must use the screenshot timeout')
 })

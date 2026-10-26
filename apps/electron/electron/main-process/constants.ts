@@ -32,9 +32,10 @@ export const ALLOWED_WEBVIEW_POPUP_PROTOCOLS = new Set(['http:', 'https:'])
 export const MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
 export const MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES = 100 * 1024 * 1024
 export const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
-// Renderer navigation defaults to a 15s load wait; keep this round-trip
-// timeout above it so the renderer can still report success or failure.
-export const PAGE_AUTOMATION_REQUEST_TIMEOUT_MS = 30000
+// The renderer bounds an entire page request (queue wait + handle resolution +
+// readiness + action) to 50s; keep this round-trip timeout above that budget so
+// the renderer can report success or failure first.
+export const PAGE_AUTOMATION_REQUEST_TIMEOUT_MS = 60000
 export const PAGE_SCREENSHOT_MAX_DIMENSION = 16000
 
 /** Tab control is a fast store round-trip; only panel open/close animates. */

@@ -88,6 +88,7 @@ const props = defineProps<{
   url: string;
   title: string;
   icon?: string;
+  hideBar?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -311,6 +312,36 @@ function selectAddressInputText() {
   hideAddressContextMenu();
 }
 
+interface PageExecutionError extends Error {
+  pageExecutionRawMessage?: string;
+}
+
+const PAGE_EXECUTION_ERROR_PREFIXES = [
+  /^Error invoking remote method '[^']*':\s*/,
+  /^Error invoking remote method "[^"]*":\s*/,
+  /^Error:\s*/,
+];
+
+function cleanPageExecutionMessage(error: unknown): string {
+  let message = error instanceof Error ? error.message : String(error ?? "");
+  let previous = "";
+  while (message !== previous) {
+    previous = message;
+    for (const prefix of PAGE_EXECUTION_ERROR_PREFIXES) {
+      message = message.replace(prefix, "");
+    }
+  }
+  return message.trim() || "Page execution failed.";
+}
+
+function pageExecutionRawMessage(error: unknown): string {
+  if (error instanceof Error) {
+    const raw = (error as PageExecutionError).pageExecutionRawMessage;
+    return typeof raw === "string" ? raw : error.message;
+  }
+  return String(error ?? "");
+}
+
 async function executeInPage<T>(runner: string, payload?: unknown): Promise<T> {
   const webview = webviewRef.value;
   if (!webview || typeof webview.executeJavaScript !== "function") {
@@ -321,14 +352,50 @@ async function executeInPage<T>(runner: string, payload?: unknown): Promise<T> {
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");
 
-  return await webview.executeJavaScript<T>(
-    `(async () => {
-      const payload = ${serializedPayload};
-      ${runner}
-    })()`,
-    true,
-  );
+  try {
+    return await webview.executeJavaScript<T>(
+      `(async () => {
+        const payload = ${serializedPayload};
+        ${runner}
+      })()`,
+      true,
+    );
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : String(error ?? "");
+    const cleaned: PageExecutionError = new Error(cleanPageExecutionMessage(rawMessage));
+    cleaned.pageExecutionRawMessage = rawMessage;
+    throw cleaned;
+  }
 }
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: number | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = window.setTimeout(() => {
+          const error = new Error(`${message} timed out after ${ms}ms.`);
+          error.name = "TimeoutError";
+          reject(error);
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer != null) window.clearTimeout(timer);
+  }
+}
+
+const PAGE_CAPTURE_TIMEOUT_MS = 12_000;
+const SCREENSHOT_FULL_PAGE_TIMEOUT_MS = 25_000;
+const SCREENSHOT_VIEWPORT_TIMEOUT_MS = 10_000;
+const SCREENSHOT_RENDER_TIMEOUT_MS = 8_000;
+const PAGE_ACTION_TIMEOUT_MS = 15_000;
+const DIAGNOSTICS_HOOK_TIMEOUT_MS = 5_000;
+const PAGE_WAIT_TIMEOUT_MAX_MS = 40_000;
+const PAGE_WAIT_RETRY_DELAY_MS = 120;
+const PAGE_WAIT_SUMMARY_TIMEOUT_MS = 1_000;
+const PAGE_WAIT_TEXT_PREVIEW_LIMIT = 240;
 
 const SNAPSHOT_TEXT_PREVIEW_LIMIT = 12000;
 const SNAPSHOT_INTERACTIVE_ELEMENT_LIMIT = 96;
@@ -382,6 +449,25 @@ const serializeResult = (value) => {
 /** In-page helpers shared by the snapshot and context-menu capture runners. */
 const PAGE_SCRIPT_HELPERS = `
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+
+    const describeWaitCondition = (value) => {
+      const parts = [];
+      if (value && value.selector) parts.push('selector="' + String(value.selector) + '"');
+      if (value && value.ref) parts.push('ref="' + String(value.ref) + '"');
+      if (value && value.text) parts.push('text="' + String(value.text) + '"');
+      if (value && value.url) parts.push('url contains "' + String(value.url) + '"');
+      if (value && value.state) parts.push('state="' + String(value.state) + '"');
+      return parts.length > 0 ? parts.join(' + ') : 'the page';
+    };
+
+    const waitTimeoutMessage = (value, timeoutMs) => {
+      const reportedTimeoutMs = Math.max(100, Number(value && value.reportTimeoutMs) || timeoutMs);
+      const pageText = normalizeText(document.body?.innerText || document.body?.textContent || '').slice(0, ${PAGE_WAIT_TEXT_PREVIEW_LIMIT});
+      return 'wait_for timed out after ' + reportedTimeoutMs + 'ms waiting for ' + describeWaitCondition(value)
+        + ' (url=' + location.href + ', title=' + (document.title || '')
+        + (pageText ? ', page text starts: "' + pageText + '"' : '')
+        + ')';
+    };
 
     const normalizeReadableText = (value) => String(value || '')
       .replace(/\\r\\n?/g, '\\n')
@@ -541,7 +627,7 @@ const PAGE_SCRIPT_HELPERS = `
   `;
 
 async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
-  return await executeInPage<BrowserAutomationSnapshot>(`
+  return await withTimeout(executeInPage<BrowserAutomationSnapshot>(`
     ${PAGE_SCRIPT_HELPERS}
 
     const findLabel = (element) => {
@@ -653,7 +739,7 @@ async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
       formFields,
       capturedAt: Date.now(),
     };
-  `);
+  `), PAGE_CAPTURE_TIMEOUT_MS, "Page snapshot");
 }
 
 const ARTICLE_TEXT_LIMIT = 24000;
@@ -667,7 +753,7 @@ const ARTICLE_SKIP_TAGS = 'nav, header, footer, aside, script, style, noscript, 
  * page chrome.
  */
 async function captureArticleSnapshot(): Promise<BrowserAutomationArticle> {
-  return await executeInPage<BrowserAutomationArticle>(`
+  return await withTimeout(executeInPage<BrowserAutomationArticle>(`
     const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
 
     const containerScore = (element) => {
@@ -820,14 +906,14 @@ async function captureArticleSnapshot(): Promise<BrowserAutomationArticle> {
       truncated,
       capturedAt: Date.now(),
     };
-  `);
+  `), PAGE_CAPTURE_TIMEOUT_MS, "Article extraction");
 }
 
 async function captureSearchResults(): Promise<BrowserAutomationSearchResults> {
   const webview = webviewRef.value;
   const pageUrl = (webview ? readWebviewUrl(webview) : undefined) || currentUrl.value;
   const preset = findSearchExtractPreset(pageUrl);
-  return await executeInPage<BrowserAutomationSearchResults>(`
+  return await withTimeout(executeInPage<BrowserAutomationSearchResults>(`
     ${PAGE_SCRIPT_HELPERS}
 
     const preset = payload.preset;
@@ -952,7 +1038,7 @@ async function captureSearchResults(): Promise<BrowserAutomationSearchResults> {
       results,
       capturedAt: Date.now(),
     };
-  `, { preset, limit: 30 });
+  `, { preset, limit: 30 }), PAGE_CAPTURE_TIMEOUT_MS, "Search results capture");
 }
 
 /**
@@ -1130,7 +1216,9 @@ async function captureDiagnostics(options: { clear?: boolean } = {}): Promise<Br
     throw new Error("Browser diagnostics are unavailable for this page surface.");
   }
 
-  await installDiagnosticsHooks();
+  try {
+    await withTimeout(installDiagnosticsHooks(), DIAGNOSTICS_HOOK_TIMEOUT_MS, "Page diagnostics hook install");
+  } catch {}
 
   let captured: {
     page: Omit<BrowserAutomationDiagnostics, "console" | "errors" | "network" | "canGoBack" | "canGoForward" | "capturedAt">;
@@ -1141,7 +1229,7 @@ async function captureDiagnostics(options: { clear?: boolean } = {}): Promise<Br
   let captureError: Error | null = null;
 
   try {
-    captured = await executeInPage<{
+    captured = await withTimeout(executeInPage<{
       page: Omit<BrowserAutomationDiagnostics, "console" | "errors" | "network" | "canGoBack" | "canGoForward" | "capturedAt">;
       errors: BrowserAutomationPageError[];
       network: BrowserAutomationNetworkEntry[];
@@ -1201,7 +1289,7 @@ async function captureDiagnostics(options: { clear?: boolean } = {}): Promise<Br
       }
 
       return result;
-    `, { clear: Boolean(options.clear) });
+    `, { clear: Boolean(options.clear) }), PAGE_CAPTURE_TIMEOUT_MS, "Page diagnostics");
   } catch (error) {
     captureError = error instanceof Error ? error : new Error(String(error));
   }
@@ -1331,7 +1419,7 @@ async function renderScreenshotDataUrl(
     const image = new Image();
     image.decoding = "async";
     image.src = dataUrl;
-    await image.decode();
+    await withTimeout(image.decode(), SCREENSHOT_RENDER_TIMEOUT_MS, "Screenshot image decode");
     const naturalWidth = image.naturalWidth || image.width;
     const naturalHeight = image.naturalHeight || image.height;
     if (!naturalWidth || !naturalHeight) return null;
@@ -1360,7 +1448,8 @@ async function renderScreenshotDataUrl(
       width,
       height,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") throw error;
     return null;
   }
 }
@@ -1389,12 +1478,12 @@ async function captureScreenshot(options: {
     const capture = window.electronAPI?.captureBrowserPageScreenshot;
     if (webContentsId && capture) {
       try {
-        const shot = await capture({
+        const shot = await withTimeout(capture({
           webContentsId,
           fullPage: true,
           format,
           quality,
-        });
+        }), SCREENSHOT_FULL_PAGE_TIMEOUT_MS, "Full-page screenshot");
         if (shot?.dataUrl) {
           let dataUrl = shot.dataUrl;
           let width = shot.width;
@@ -1434,7 +1523,7 @@ async function captureScreenshot(options: {
     throw new Error("This browser surface does not support screenshots.");
   }
 
-  let image = await webview.capturePage();
+  let image = await withTimeout(webview.capturePage(), SCREENSHOT_VIEWPORT_TIMEOUT_MS, "Page screenshot");
   let size = image.getSize();
   let dataUrl = image.toDataURL();
   const converted = screenshotExceedsCaps(size.width, size.height, maxWidth) || format === "jpeg"
@@ -1718,6 +1807,78 @@ function withNavigationOutcome(
 interface NavigationWaitTarget {
   state?: "load" | "domcontentloaded";
   url?: string;
+  selector?: string;
+  ref?: string;
+  text?: string;
+}
+
+const PAGE_WAIT_CONTEXT_ERROR_PATTERN = /context destroyed|Execution context was destroyed|Script failed to execute|GUEST_VIEW_MANAGER_CALL|Cannot find context|Cannot access contents/i;
+const PAGE_WAIT_CONDITION_TIMEOUT_PATTERN = /wait_for timed out after/i;
+
+function isWaitContextError(error: unknown): boolean {
+  const rawMessage = pageExecutionRawMessage(error);
+  if (PAGE_WAIT_CONDITION_TIMEOUT_PATTERN.test(rawMessage)) return false;
+  return PAGE_WAIT_CONTEXT_ERROR_PATTERN.test(rawMessage);
+}
+
+function describeWaitCondition(condition: NavigationWaitTarget): string {
+  const parts: string[] = [];
+  if (condition.selector) parts.push(`selector="${condition.selector}"`);
+  if (condition.ref) parts.push(`ref="${condition.ref}"`);
+  if (condition.text) parts.push(`text="${condition.text}"`);
+  if (condition.url) parts.push(`url contains "${condition.url}"`);
+  if (condition.state) parts.push(`state="${condition.state}"`);
+  return parts.length > 0 ? parts.join(" + ") : "the page";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function readWaitPageSummary(webview: WebviewLikeElement): Promise<{ url: string; title: string; text: string }> {
+  const fallbackUrl = readWebviewUrl(webview) || currentUrl.value;
+  try {
+    const summary = await withTimeout(executeInPage<{ url?: string; title?: string; text?: string }>(`
+      const pageText = String(document.body?.innerText || document.body?.textContent || '')
+        .replace(/\\s+/g, ' ')
+        .trim()
+        .slice(0, ${PAGE_WAIT_TEXT_PREVIEW_LIMIT});
+      return {
+        url: location.href,
+        title: document.title || '',
+        text: pageText,
+      };
+    `), PAGE_WAIT_SUMMARY_TIMEOUT_MS, "Page wait summary");
+    return {
+      url: summary?.url || fallbackUrl,
+      title: summary?.title || currentTitle.value,
+      text: String(summary?.text || "").slice(0, PAGE_WAIT_TEXT_PREVIEW_LIMIT),
+    };
+  } catch {
+    return { url: fallbackUrl, title: currentTitle.value, text: "" };
+  }
+}
+
+async function buildWaitTimeoutError(
+  webview: WebviewLikeElement,
+  condition: NavigationWaitTarget,
+  timeoutMs: number,
+): Promise<Error> {
+  const summary = await readWaitPageSummary(webview);
+  const title = summary.title.replace(/\s+/g, " ").trim();
+  const preview = summary.text ? `, page text starts: "${summary.text}"` : "";
+  return new Error(
+    `wait_for timed out after ${timeoutMs}ms waiting for ${describeWaitCondition(condition)} (url=${summary.url}, title=${title}${preview})`,
+  );
+}
+
+async function waitForWebviewIdle(webview: WebviewLikeElement, deadline: number): Promise<void> {
+  while (Date.now() < deadline) {
+    let loading = false;
+    try { loading = Boolean(webview.isLoading?.()); } catch { loading = false; }
+    if (!loading) return;
+    await sleep(Math.min(PAGE_WAIT_RETRY_DELAY_MS, Math.max(1, deadline - Date.now())));
+  }
 }
 
 async function waitForNavigationCondition(
@@ -1725,7 +1886,7 @@ async function waitForNavigationCondition(
   target: NavigationWaitTarget,
   timeoutMs: number,
 ): Promise<void> {
-  const effectiveTimeout = Math.max(100, Math.min(Number(timeoutMs) || 10000, 25000));
+  const effectiveTimeout = Math.max(100, Math.min(Number(timeoutMs) || 10000, PAGE_WAIT_TIMEOUT_MAX_MS));
   const check = () => {
     if (target.url) {
       const url = readWebviewUrl(webview);
@@ -1792,10 +1953,11 @@ async function waitForNavigationCondition(
     webview.addEventListener("did-fail-load", onFail as EventListener);
     pollTimer = window.setInterval(evaluate, 120);
     timeoutTimer = window.setTimeout(() => {
-      const parts: string[] = [];
-      if (target.url) parts.push(`URL containing "${target.url}"`);
-      if (target.state) parts.push(`document state "${target.state}"`);
-      finish(new Error(`wait_for timed out after ${effectiveTimeout}ms waiting for ${parts.join(" and ") || "the page"}.`));
+      cleanup();
+      void buildWaitTimeoutError(webview, target, effectiveTimeout).then(
+        (error) => finish(error),
+        () => finish(new Error(`wait_for timed out after ${effectiveTimeout}ms waiting for ${describeWaitCondition(target)}`)),
+      );
     }, effectiveTimeout);
     evaluate();
   });
@@ -1805,11 +1967,12 @@ async function waitForPageCondition(
   webview: WebviewLikeElement,
   action: Extract<BrowserAutomationAction, { type: "wait_for" }>,
   timeoutMs: number,
+  reportTimeoutMs = timeoutMs,
 ): Promise<BrowserAutomationActionResult> {
   return await executeInPage<BrowserAutomationActionResult>(`
     ${PAGE_SCRIPT_HELPERS}
     const startedAt = Date.now();
-    const timeoutMs = Math.max(100, Math.min(Number(payload.timeoutMs) || 10000, 25000));
+    const timeoutMs = Math.max(100, Math.min(Number(payload.timeoutMs) || 10000, ${PAGE_WAIT_TIMEOUT_MAX_MS}));
     const matches = () => {
       if (payload.ref) {
         if (!document.querySelector('[data-worldbase-ref="' + CSS.escape(String(payload.ref)) + '"]')) return false;
@@ -1824,12 +1987,12 @@ async function waitForPageCondition(
     };
     while (!matches()) {
       if (Date.now() - startedAt > timeoutMs) {
-        throw new Error('wait_for timed out after ' + timeoutMs + 'ms');
+        throw new Error(waitTimeoutMessage(payload, timeoutMs));
       }
       await new Promise((resolve) => setTimeout(resolve, 120));
     }
     return { ok: true, type: payload.type, timeoutMs: Date.now() - startedAt, url: location.href };
-  `, { ...action, timeoutMs });
+  `, { ...action, timeoutMs, reportTimeoutMs });
 }
 
 async function runWaitForAction(
@@ -1837,17 +2000,28 @@ async function runWaitForAction(
   action: Extract<BrowserAutomationAction, { type: "wait_for" }>,
 ): Promise<BrowserAutomationActionResult> {
   const startedAt = Date.now();
-  const timeoutMs = Math.max(100, Math.min(Number(action.timeoutMs) || 10000, 25000));
+  const timeoutMs = Math.max(100, Math.min(Number(action.timeoutMs) || 10000, PAGE_WAIT_TIMEOUT_MAX_MS));
   if (action.state || action.url) {
-    await waitForNavigationCondition(webview, { state: action.state, url: action.url }, timeoutMs);
+    await waitForNavigationCondition(webview, action, timeoutMs);
   }
   const elapsed = Date.now() - startedAt;
-  const remaining = Math.max(100, timeoutMs - elapsed);
   if (!action.selector && !action.ref && !action.text) {
     return { ok: true, type: "wait_for", timeoutMs: elapsed, url: readWebviewUrl(webview) };
   }
-  const result = await waitForPageCondition(webview, action, remaining);
-  return { ...result, timeoutMs: Date.now() - startedAt };
+  const deadline = startedAt + timeoutMs;
+  while (Date.now() < deadline) {
+    const remaining = Math.max(100, deadline - Date.now());
+    try {
+      const result = await waitForPageCondition(webview, action, remaining, timeoutMs);
+      return { ...result, timeoutMs: Date.now() - startedAt };
+    } catch (error) {
+      if (!isWaitContextError(error)) throw error;
+      if (Date.now() >= deadline) break;
+      await sleep(Math.min(PAGE_WAIT_RETRY_DELAY_MS, Math.max(0, deadline - Date.now())));
+      await waitForWebviewIdle(webview, deadline);
+    }
+  }
+  throw await buildWaitTimeoutError(webview, action, timeoutMs);
 }
 
 function nextAnimationFrame(): Promise<void> {
@@ -2058,7 +2232,7 @@ async function evaluateScriptInPage(
   const trimmed = script.trim();
   if (!trimmed) throw new Error("evaluate requires a non-empty script string.");
 
-  const effectiveTimeout = Math.max(1000, Math.min(Number(timeoutMs) || 10000, 25000));
+  const effectiveTimeout = Math.max(1000, Math.min(Number(timeoutMs) || 10000, PAGE_WAIT_TIMEOUT_MAX_MS));
   const looksLikeFunction = /^(async\s+)?function\b/.test(trimmed)
     || /^(async\s+)?\([\s\S]*\)\s*=>/.test(trimmed)
     || /^(async\s+)?[\w$]+\s*=>/.test(trimmed);
@@ -2398,7 +2572,7 @@ async function runAutomationActionInternal(
 
   if (action.type === "click" || action.type === "hover") {
     if (webview.sendInputEvent) {
-      const rect = await prepareRealTarget(action);
+      const rect = await withTimeout(prepareRealTarget(action), PAGE_ACTION_TIMEOUT_MS, `${action.type} action`);
       if (action.type === "hover") {
         return await dispatchRealPointerAction(webview, action, rect);
       }
@@ -2420,12 +2594,12 @@ async function runAutomationActionInternal(
     if (webview.sendInputEvent) {
       focusWebviewForInput(webview);
       if (action.selector || action.ref) {
-        await executeInPage(`
+        await withTimeout(executeInPage(`
           ${PAGE_SCRIPT_HELPERS}
           const element = resolveTarget(payload.target);
           element.focus({ preventScroll: true });
           return true;
-        `, { target: action });
+        `, { target: action }), PAGE_ACTION_TIMEOUT_MS, "press_key action");
       }
       const navigation = watchForNavigation(webview, 15000);
       try {
@@ -2448,7 +2622,7 @@ async function runAutomationActionInternal(
     : null;
   let result: BrowserAutomationActionResult;
   try {
-    result = await executeInPage<BrowserAutomationActionResult>(`
+    const pageAction = executeInPage<BrowserAutomationActionResult>(`
     ${PAGE_SCRIPT_HELPERS}
 
     const setNativeValue = (element, value) => {
@@ -2783,7 +2957,7 @@ async function runAutomationActionInternal(
       }
 
       case 'wait': {
-        const waitMs = Math.max(0, Math.min(Number(payload.timeoutMs) || 0, 25000));
+        const waitMs = Math.max(0, Math.min(Number(payload.timeoutMs) || 0, ${PAGE_WAIT_TIMEOUT_MAX_MS}));
         return new Promise((resolve) => {
           setTimeout(() => {
             resolve({ ok: true, type: payload.type, timeoutMs: waitMs });
@@ -2793,7 +2967,7 @@ async function runAutomationActionInternal(
 
       case 'wait_for': {
         const startedAt = Date.now();
-        const timeoutMs = Math.max(100, Math.min(Number(payload.timeoutMs) || 10000, 25000));
+        const timeoutMs = Math.max(100, Math.min(Number(payload.timeoutMs) || 10000, ${PAGE_WAIT_TIMEOUT_MAX_MS}));
         const matches = () => {
           if (payload.ref) {
             if (!document.querySelector('[data-worldbase-ref="' + CSS.escape(String(payload.ref)) + '"]')) return false;
@@ -2811,7 +2985,7 @@ async function runAutomationActionInternal(
         };
         while (!matches()) {
           if (Date.now() - startedAt > timeoutMs) {
-            throw new Error('wait_for timed out after ' + timeoutMs + 'ms');
+            throw new Error(waitTimeoutMessage(payload, timeoutMs));
           }
           await new Promise((resolve) => setTimeout(resolve, 120));
         }
@@ -2870,6 +3044,9 @@ async function runAutomationActionInternal(
         throw new Error('Unsupported browser automation action.');
     }
   `, action);
+    result = action.type === "wait"
+      ? await pageAction
+      : await withTimeout(pageAction, PAGE_ACTION_TIMEOUT_MS, `${action.type} action`);
   } catch (error) {
     navigation?.cancel();
     throw error;
@@ -3452,6 +3629,7 @@ onUnmounted(() => {
     @contextmenu.prevent="emitShellContextMenu($event)"
   >
     <div
+      v-if="!props.hideBar"
       class="browser-view-bar"
       @contextmenu.prevent="emitShellContextMenu($event)"
     >

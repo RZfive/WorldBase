@@ -155,6 +155,37 @@ function resolveDevicePixelRatio (value: unknown): number {
 }
 
 const PAGE_SCREENSHOT_MAX_PIXELS = 16_000_000
+const PAGE_DEBUGGER_ATTACH_TIMEOUT_MS = 5_000
+const PAGE_LAYOUT_METRICS_TIMEOUT_MS = 5_000
+const PAGE_DEVICE_PIXEL_RATIO_TIMEOUT_MS = 5_000
+const PAGE_SCREENSHOT_CAPTURE_TIMEOUT_MS = 15_000
+const PAGE_SCREENSHOT_OPERATION_TIMEOUT_MS = 24_000
+const PAGE_EMULATION_COMMAND_TIMEOUT_MS = 5_000
+
+function withTimeout<T> (promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new Error(message))
+    }, timeoutMs)
+    promise.then(
+      value => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      },
+      error => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
 
 function assertPageSurfaceOwnedBySender (target: WebContents, sender: WebContents): void {
   try {
@@ -318,7 +349,7 @@ interface PageDebuggerLease {
   release: () => void
 }
 
-function acquirePageDebuggerForScreenshot (target: WebContents): PageDebuggerLease {
+async function acquirePageDebuggerForScreenshot (target: WebContents): Promise<PageDebuggerLease> {
   const webContentsId = target.id
   const emulationSession = getPageEmulationSession(webContentsId)
   if (emulationSession) {
@@ -338,7 +369,11 @@ function acquirePageDebuggerForScreenshot (target: WebContents): PageDebuggerLea
   let attachedByScreenshot = false
   try {
     if (!debuggerSession.isAttached()) {
-      debuggerSession.attach('1.3')
+      await withTimeout(
+        Promise.resolve().then(() => { debuggerSession.attach('1.3') }),
+        PAGE_DEBUGGER_ATTACH_TIMEOUT_MS,
+        'Timed out attaching the page debugger.'
+      )
       attachedByScreenshot = true
     }
   } catch (error) {
@@ -361,26 +396,32 @@ function acquirePageDebuggerForScreenshot (target: WebContents): PageDebuggerLea
 }
 
 async function applyPageEmulation (debuggerSession: ElectronDebugger, state: PageEmulationState): Promise<void> {
+  const sendCommand = (method: string, params?: Record<string, unknown>): Promise<unknown> => withTimeout(
+    debuggerSession.sendCommand(method, params),
+    PAGE_EMULATION_COMMAND_TIMEOUT_MS,
+    `Timed out applying page emulation (${method}).`
+  )
+
   const features: Array<{ name: string; value: string }> = []
   if (state.colorScheme) features.push({ name: 'prefers-color-scheme', value: state.colorScheme })
   if (state.reducedMotion) features.push({ name: 'prefers-reduced-motion', value: state.reducedMotion })
 
-  await debuggerSession.sendCommand('Emulation.setEmulatedMedia', {
+  await sendCommand('Emulation.setEmulatedMedia', {
     media: state.media ?? '',
     features
   })
-  await debuggerSession.sendCommand('Emulation.setUserAgentOverride', {
+  await sendCommand('Emulation.setUserAgentOverride', {
     userAgent: state.userAgent ?? ''
   })
   if (state.viewport) {
-    await debuggerSession.sendCommand('Emulation.setDeviceMetricsOverride', {
+    await sendCommand('Emulation.setDeviceMetricsOverride', {
       width: state.viewport.width,
       height: state.viewport.height,
       deviceScaleFactor: state.viewport.deviceScaleFactor,
       mobile: state.viewport.mobile
     })
   } else {
-    await debuggerSession.sendCommand('Emulation.clearDeviceMetricsOverride')
+    await sendCommand('Emulation.clearDeviceMetricsOverride')
   }
 }
 
@@ -605,10 +646,22 @@ export function setupIPC (): void {
       ? Math.max(10, Math.min(Math.round(request.quality), 100))
       : 80
 
-    const lease = acquirePageDebuggerForScreenshot(target)
-    const debuggerSession = lease.debugger
-    try {
-      const metrics = ((await debuggerSession.sendCommand('Page.getLayoutMetrics')) ?? {}) as PageScreenshotLayoutMetrics
+    const leaseRef: { current: PageDebuggerLease | null } = { current: null }
+    let operationFinished = false
+    const capture = async (): Promise<BrowserPageScreenshotResult> => {
+      const acquiredLease = await acquirePageDebuggerForScreenshot(target)
+      if (operationFinished) {
+        acquiredLease.release()
+        throw new Error('Timed out capturing the page screenshot.')
+      }
+      leaseRef.current = acquiredLease
+      const debuggerSession = acquiredLease.debugger
+
+      const metrics = ((await withTimeout(
+        debuggerSession.sendCommand('Page.getLayoutMetrics'),
+        PAGE_LAYOUT_METRICS_TIMEOUT_MS,
+        'Timed out reading the page layout metrics.'
+      )) ?? {}) as PageScreenshotLayoutMetrics
       const viewportWidth = positivePixelValue(metrics.cssLayoutViewport?.clientWidth)
         ?? positivePixelValue(metrics.layoutViewport?.clientWidth)
         ?? 1
@@ -618,10 +671,14 @@ export function setupIPC (): void {
 
       let devicePixelRatio = 1
       try {
-        const evaluated = await debuggerSession.sendCommand('Runtime.evaluate', {
-          expression: 'window.devicePixelRatio || 1',
-          returnByValue: true
-        }) as { result?: { value?: unknown } }
+        const evaluated = await withTimeout(
+          debuggerSession.sendCommand('Runtime.evaluate', {
+            expression: 'window.devicePixelRatio || 1',
+            returnByValue: true
+          }),
+          PAGE_DEVICE_PIXEL_RATIO_TIMEOUT_MS,
+          'Timed out reading the page device pixel ratio.'
+        ) as { result?: { value?: unknown } }
         devicePixelRatio = resolveDevicePixelRatio(evaluated?.result?.value)
       } catch {
         // The execution context can be unavailable mid-navigation; CSS pixels
@@ -660,7 +717,11 @@ export function setupIPC (): void {
         height = Math.max(1, Math.round(outputHeight * scale))
       }
 
-      const captured = await debuggerSession.sendCommand('Page.captureScreenshot', params) as { data?: string }
+      const captured = await withTimeout(
+        debuggerSession.sendCommand('Page.captureScreenshot', params),
+        PAGE_SCREENSHOT_CAPTURE_TIMEOUT_MS,
+        'Timed out capturing the page screenshot.'
+      ) as { data?: string }
       if (typeof captured?.data !== 'string' || captured.data.length === 0) {
         throw new Error('The page produced an empty screenshot.')
       }
@@ -670,8 +731,16 @@ export function setupIPC (): void {
         height,
         fullPage
       }
+    }
+    try {
+      return await withTimeout(
+        capture(),
+        PAGE_SCREENSHOT_OPERATION_TIMEOUT_MS,
+        'Timed out capturing the page screenshot.'
+      )
     } finally {
-      lease.release()
+      operationFinished = true
+      leaseRef.current?.release()
     }
   })
 

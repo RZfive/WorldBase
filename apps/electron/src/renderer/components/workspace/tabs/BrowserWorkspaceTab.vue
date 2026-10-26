@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import BrowserWebView, { type BrowserContextAddPayload } from '../../app/BrowserWebView.vue'
 import { workspaceBrowserSurfaces } from '../workspace-store'
 import { addWebQuote } from '../../chat/panel/web-quote-state'
@@ -26,13 +26,25 @@ const initialUrl = (state?.url || 'about:blank').trim() || 'about:blank'
 const initialTitle = (state?.title || '').trim()
 
 const browserRef = ref<InstanceType<typeof BrowserWebView> | null>(null)
+let disposed = false
 
 const appId = computed(() => `wsb-${props.tab.id}`)
 const url = computed(() => initialUrl)
 const title = computed(() => initialTitle)
 
+function registerSurface (): void {
+  if (disposed) return
+  workspaceBrowserSurfaces.set(props.tab.id, {
+    kind: 'browser',
+    url: initialUrl,
+    title: initialTitle || initialUrl,
+    handle: browserRef.value
+  })
+}
+
 /** Keeps the tab strip label and the panel's active-page surface in sync. */
 function handleStateChange (payload: BrowserAppStatePayload): void {
+  if (disposed) return
   if (!props.tab.state) props.tab.state = {}
   props.tab.state.url = payload.url
   props.tab.title = payload.title || payload.url || props.tab.id
@@ -44,16 +56,18 @@ function handleStateChange (payload: BrowserAppStatePayload): void {
   })
 }
 
-onMounted(() => {
-  workspaceBrowserSurfaces.set(props.tab.id, {
-    kind: 'browser',
-    url: initialUrl,
-    title: initialTitle || initialUrl,
-    handle: browserRef.value
-  })
+onMounted(async () => {
+  await nextTick()
+  if (disposed) return
+  registerSurface()
+})
+
+watch(browserRef, (handle) => {
+  if (handle) registerSurface()
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   workspaceBrowserSurfaces.delete(props.tab.id)
 })
 

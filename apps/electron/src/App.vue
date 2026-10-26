@@ -88,7 +88,6 @@ interface EmbeddedAppState {
   url: string
   loading: boolean
   kind: 'project' | 'browser'
-  sandbox: string
   projectPort?: number
 }
 
@@ -122,9 +121,13 @@ const QR_CODE_WIDTH = 220
 const QR_CODE_MARGIN = 2
 /** Duration in ms for the "copied" feedback after copying a LAN URL. */
 const COPY_FEEDBACK_MS = 2000
-const PROJECT_IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals'
-const PROJECT_IFRAME_ALLOW = 'clipboard-read; clipboard-write; fullscreen'
-const BROWSER_IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-modals'
+/** Maximum time to wait for an embedded page surface to mount before giving up. */
+const PAGE_AUTOMATION_HANDLE_WAIT_MS = 20000
+/** Maximum time to wait for the mounted page to finish loading. */
+const PAGE_AUTOMATION_READY_WAIT_MS = 10000
+/** Whole-request budget: queue wait + handle resolution + readiness + action. */
+const PAGE_AUTOMATION_QUEUE_TIMEOUT_MS = 50000
+const PROJECT_SURFACE_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 
 function logWebAppsSnapshot (label: string, webApps: SavedWebApp[]) {
   console.info(`[web-apps] ${label}`, webApps.map(app => ({
@@ -167,6 +170,8 @@ const chatSurfaceStatus = ref<ChatSurfaceStatusSummary>({
   primaryTaskTitle: null
 })
 const browserAutomationHandles = new Map<string, BrowserAutomationViewHandle>()
+/** Bumped when embedded handles mount/unmount or report a navigation. */
+const embeddedAutomationRevision = ref(0)
 
 const runningApps = ref(new Map<string, RunningApp>())
 const browserApps = ref(new Map<string, RunningApp>())
@@ -228,6 +233,26 @@ function resolveUrlOrigin (value: string | null | undefined): string | null {
   }
 }
 
+/** Project pages may only be automated while they stay on a loopback app URL. */
+function isLoopbackProjectUrl (value: string | null | undefined): boolean {
+  if (!value) return false
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+    return PROJECT_SURFACE_HOSTS.has(parsed.hostname)
+  } catch {
+    return false
+  }
+}
+
+/** Live URL of an embedded page handle, or null before it attaches. */
+function readEmbeddedHandleUrl (appId: string): string | null {
+  // Track the revision so computed callers refresh after mount/navigation.
+  void embeddedAutomationRevision.value
+  const url = browserAutomationHandles.get(appId)?.getURL?.()
+  return url && url !== 'about:blank' ? url : null
+}
+
 const activePageSurface = computed<ActivePageSurfaceSummary | null>(() => {
   const appId = activeEmbeddedProjectId.value
   if (!appId) return null
@@ -250,7 +275,7 @@ const activePageSurface = computed<ActivePageSurfaceSummary | null>(() => {
   }
 
   const runningApp = runningApps.value.get(appId)
-  const url = appState.url || null
+  const url = readEmbeddedHandleUrl(appId) || appState.url || null
   return {
     appId,
     kind: 'project',
@@ -273,11 +298,12 @@ const showAppChatBubble = computed(() => (
   currentView.value === 'app'
   && !showLaunchpad.value
   && appChatPresentation.value === 'bubble'
-  && Boolean(activeBrowserPageSurface.value)
+  && Boolean(activeEmbeddedPageSurface.value)
 ))
 
-const activeBrowserPageSurface = computed(() => {
-  return activePageSurface.value?.kind === 'browser' ? activePageSurface.value : null
+/** The visible app-view page (project or browser), which both own page tools. */
+const activeEmbeddedPageSurface = computed(() => {
+  return activePageSurface.value
 })
 
 const shouldMountChatShell = computed(() => {
@@ -285,20 +311,22 @@ const shouldMountChatShell = computed(() => {
 })
 
 const activePageAutomationContext = computed<ActivePageAutomationContext | null>(() => {
-  // Mirrors getActiveBrowserAutomationHandle: the launchpad page is only the
-  // AI's page while explicitly requested (or with no workspace tab at all);
-  // otherwise the workspace browser tab is the pinned context.
-  if (currentView.value === 'app' && (launchpadPageChatActive.value || !workspacePageSurface.value)) {
-    const browserSurface = activeBrowserPageSurface.value
-    if (browserSurface) {
+  // Mirrors getActiveBrowserAutomationHandle: while the app view shows an
+  // embedded project or browser page, that page wins over any workspace tab.
+  if (currentView.value === 'app') {
+    const embeddedSurface = activeEmbeddedPageSurface.value
+    if (embeddedSurface) {
       return {
-        appId: browserSurface.appId,
-        kind: 'browser',
-        title: browserSurface.title,
-        url: browserSurface.url,
-        origin: browserSurface.origin || browserSurface.url || null
+        appId: embeddedSurface.appId,
+        kind: embeddedSurface.kind,
+        title: embeddedSurface.title,
+        url: embeddedSurface.url,
+        origin: embeddedSurface.origin || embeddedSurface.url || null
       }
     }
+    // The AI just opened an app but its surface is still mounting; do not
+    // report a background workspace tab as the active page meanwhile.
+    if (launchpadPageChatActive.value) return null
   }
   // No embedded app page: the active workspace browser tab becomes the page
   // the AI can read and operate, regardless of the current view.
@@ -396,17 +424,21 @@ function clearEmbeddedApp (appId?: string) {
 function setBrowserAutomationHandle (appId: string, instance: unknown) {
   const handle = instance as BrowserAutomationViewHandle | null
   if (handle) {
+    // Inline template refs re-fire on every parent patch; only bump the
+    // revision when the mount actually changes.
+    if (browserAutomationHandles.get(appId) === handle) return
     browserAutomationHandles.set(appId, handle)
-    return
+  } else {
+    if (!browserAutomationHandles.has(appId)) return
+    browserAutomationHandles.delete(appId)
   }
-  browserAutomationHandles.delete(appId)
+  embeddedAutomationRevision.value += 1
 }
 
 /**
- * Whether the docked (launchpad) page should own AI page automation. Only the
- * user's explicit "AI operate" request on that page sets this; otherwise the
- * workspace browser tab stays the pinned automation target so AI operations
- * never silently jump into the launchpad (docs/web-capability-router-design.md §3).
+ * Whether the AI should target the visible app page. Set by the explicit
+ * "AI operate" action and when a project is opened in the shell; the app view
+ * itself also owns automation whenever an embedded page is active.
  */
 const launchpadPageChatActive = ref(false)
 
@@ -419,17 +451,18 @@ watch(currentView, (view) => {
 function resolveEmbeddedBrowserHandle (): BrowserAutomationViewHandle | null {
   if (currentView.value !== 'app' || !activeEmbeddedProjectId.value) return null
   const appState = embeddedApps.value.get(activeEmbeddedProjectId.value)
-  if (!appState || appState.kind !== 'browser') return null
+  if (!appState) return null
   return browserAutomationHandles.get(activeEmbeddedProjectId.value) || null
 }
 
 function getActiveBrowserAutomationHandle (): BrowserAutomationViewHandle | null {
-  // The launchpad page only wins while the user explicitly asked the AI about
-  // it, or when there is no workspace browser tab at all. In every other state
-  // the workspace browser tab is the page the tools hit.
-  if (currentView.value === 'app' && (launchpadPageChatActive.value || !workspacePageSurface.value)) {
-    const embeddedHandle = resolveEmbeddedBrowserHandle()
-    if (embeddedHandle) return embeddedHandle
+  // The app view is a first-class automation surface: while an embedded
+  // project or browser page is active it owns the page tools, even if a
+  // workspace tab still reports itself as active in the background. Returning
+  // null while the embedded view mounts lets the caller wait for its handle
+  // instead of silently operating the workspace tab.
+  if (currentView.value === 'app' && (activePageSurface.value || launchpadPageChatActive.value)) {
+    return resolveEmbeddedBrowserHandle()
   }
 
   const workspaceHandle = workspacePageSurface.value?.handle
@@ -453,9 +486,53 @@ function resolveWorkspaceAutomationHandle (tabId: string): BrowserAutomationView
 /** Per-tab promise chains keep two AI runs from interleaving page actions. */
 const pageAutomationQueues = new Map<string, Promise<unknown>>()
 
-function enqueuePageAutomation<T> (key: string, task: () => Promise<T>): Promise<T> {
+function withTimeout<T> (promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
+
+interface PageAutomationQueueBudget {
+  deadline: number
+  remainingMs: () => number
+}
+
+function enqueuePageAutomation<T> (
+  key: string,
+  enqueuedAt: number,
+  task: (budget: PageAutomationQueueBudget) => Promise<T>
+): Promise<T> {
+  const deadline = enqueuedAt + PAGE_AUTOMATION_QUEUE_TIMEOUT_MS
+  const budget: PageAutomationQueueBudget = {
+    deadline,
+    remainingMs: () => Math.max(0, deadline - Date.now())
+  }
   const previous = pageAutomationQueues.get(key) ?? Promise.resolve()
-  const next = previous.catch(() => undefined).then(task)
+  const run = previous.catch(() => undefined).then(() => {
+    if (budget.remainingMs() <= 0) {
+      throw new Error(`Page automation request spent its ${PAGE_AUTOMATION_QUEUE_TIMEOUT_MS}ms budget waiting in the queue.`)
+    }
+    return task(budget)
+  })
+  // The timer starts at enqueue time, so queue wait, handle resolution,
+  // readiness, and the action all share one whole-request budget. The queue
+  // advances when this settles (including timeout), so a hung action cannot
+  // block every later page tool call.
+  const next = withTimeout(
+    run,
+    budget.remainingMs(),
+    `Page automation request timed out after ${PAGE_AUTOMATION_QUEUE_TIMEOUT_MS}ms.`
+  )
   pageAutomationQueues.set(key, next)
   const cleanup = () => {
     if (pageAutomationQueues.get(key) === next) pageAutomationQueues.delete(key)
@@ -485,8 +562,11 @@ async function waitForPageReady (
   readExpectedUrl: () => string | null,
   timeoutMs: number
 ): Promise<void> {
+  // One shared deadline bounds both the load wait and the URL-match wait.
   const deadline = Date.now() + timeoutMs
-  if (handle.waitForReady) await handle.waitForReady(timeoutMs)
+  if (handle.waitForReady) {
+    await handle.waitForReady(Math.max(100, deadline - Date.now()))
+  }
   if (!handle.getURL) return
 
   while (true) {
@@ -500,14 +580,22 @@ async function waitForPageReady (
   }
 }
 
-async function resolvePageAutomationHandle (tabId?: string): Promise<BrowserAutomationViewHandle | null> {
+async function resolvePageAutomationHandle (
+  tabId?: string,
+  maxWaitMs = PAGE_AUTOMATION_HANDLE_WAIT_MS
+): Promise<BrowserAutomationViewHandle | null> {
   // A tab open/activate request is asynchronous: the webview mounts after the
   // panel animation and state restoration. Wait instead of failing the first
   // page tool call and letting the model fall back to an external MCP.
-  // Explicit tab targets and recent open/activate requests also cover project
-  // startup (up to 15s), so use the longer bound there.
+  // Explicit tab targets, recent open/activate requests, and a visible app view
+  // all cover project startup (up to ~20s), so use the longer bound there.
   const recentlyRequested = Date.now() - lastWorkspaceTabRequestAt < 10000
-  const waitMs = tabId || recentlyRequested ? 15000 : 1500
+  const waitingForEmbeddedApp = currentView.value === 'app'
+    && (Boolean(activePageSurface.value) || launchpadPageChatActive.value)
+  const preferredWaitMs = tabId || recentlyRequested || waitingForEmbeddedApp
+    ? PAGE_AUTOMATION_HANDLE_WAIT_MS
+    : 1500
+  const waitMs = Math.max(0, Math.min(preferredWaitMs, maxWaitMs))
   const deadline = Date.now() + waitMs
   while (true) {
     const handle = tabId ? resolveWorkspaceAutomationHandle(tabId) : getActiveBrowserAutomationHandle()
@@ -520,6 +608,10 @@ async function resolvePageAutomationHandle (tabId?: string): Promise<BrowserAuto
 function describeAutomationTargets (): string {
   const entries = [...workspaceBrowserSurfaces]
     .map(([tabId, surface]) => `${surface.kind} tab_id=${tabId} "${surface.title || surface.url}"`)
+  const embeddedSurface = currentView.value === 'app' ? activePageSurface.value : null
+  if (embeddedSurface) {
+    entries.unshift(`${embeddedSurface.kind} app "${embeddedSurface.title || embeddedSurface.url || embeddedSurface.appId}"`)
+  }
   return entries.length > 0 ? entries.join('; ') : 'none'
 }
 
@@ -577,14 +669,19 @@ async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelo
   try {
     const requestedTabId = typeof payload.tabId === 'string' ? payload.tabId.trim() : ''
     // Capture the active workspace tab id at request time so an implicit
-    // request and an explicit request for the same tab share one queue.
-    const activeWorkspaceTabId = workspacePageSurface.value?.appId?.startsWith('wsb-')
+    // request and an explicit request for the same tab share one queue. While
+    // the app view shows an embedded page, that page wins over any workspace
+    // tab that still reports itself as active behind it.
+    const embeddedPageActive = currentView.value === 'app'
+      && (Boolean(activePageSurface.value) || launchpadPageChatActive.value)
+    const activeWorkspaceTabId = !embeddedPageActive && workspacePageSurface.value?.appId?.startsWith('wsb-')
       ? workspacePageSurface.value.appId.slice(4)
       : ''
     const targetTabId = requestedTabId || activeWorkspaceTabId
     const queueKey = targetTabId || 'active'
-    const result = await enqueuePageAutomation(queueKey, async () => {
-      const handle = await resolvePageAutomationHandle(targetTabId || undefined)
+    const enqueuedAt = Date.now()
+    const result = await enqueuePageAutomation(queueKey, enqueuedAt, async (budget) => {
+      const handle = await resolvePageAutomationHandle(targetTabId || undefined, budget.remainingMs())
       if (!handle) {
         throw new Error(`${t('appShell.pageAutomationNoActivePage')} Open page surfaces: ${describeAutomationTargets()}. Use open_workspace_tab or manage_workspace_tabs to activate one first.`)
       }
@@ -596,30 +693,47 @@ async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelo
         }
       }
 
+      const embeddedSurface = targetTabId || currentView.value !== 'app'
+        ? null
+        : activeEmbeddedPageSurface.value
       const targetSurface = targetTabId
         ? workspaceBrowserSurfaces.get(targetTabId)
-        : workspacePageSurface.value
+        : embeddedSurface || workspacePageSurface.value
       const isProject = targetSurface?.kind === 'project'
       const recentlyRequested = Date.now() - lastWorkspaceTabRequestAt < 10000
-      const readyTimeoutMs = isProject || recentlyRequested ? 15000 : 6000
-      const readExpectedUrl = () => targetTabId
-        ? workspaceBrowserSurfaces.get(targetTabId)?.url || null
-        : workspacePageSurface.value?.url || activePageAutomationContext.value?.url || null
+      const preferredReadyTimeoutMs = isProject || recentlyRequested ? PAGE_AUTOMATION_READY_WAIT_MS : 6000
+      const readyTimeoutMs = Math.min(preferredReadyTimeoutMs, budget.remainingMs())
+      const readSurfaceUrl = () => {
+        if (targetTabId) return workspaceBrowserSurfaces.get(targetTabId)?.url || null
+        const embeddedTarget = currentView.value === 'app' ? activeEmbeddedPageSurface.value : null
+        if (embeddedTarget) return embeddedTarget.url || null
+        return workspacePageSurface.value?.url || activePageAutomationContext.value?.url || null
+      }
+      const readExpectedUrl = () => {
+        // Project tabs may redirect to /login or an in-app route. Matching the
+        // pinned root URL would wait out the readiness budget even though the
+        // page is healthy; treat the live URL as ready and let the loopback
+        // guard below decide whether the final page is still safe.
+        if (!isProject) return readSurfaceUrl()
+        const liveUrl = handle.getURL?.()
+        return liveUrl && liveUrl !== 'about:blank' ? liveUrl : readSurfaceUrl()
+      }
 
       await waitForPageReady(handle, readExpectedUrl, readyTimeoutMs)
 
-      // A general browser tab may have reached a local/private page through a
-      // redirect, popup, or manual address-bar edit. Re-check the final URL
-      // after readiness; project tabs are intentionally allowed to run on
-      // 127.0.0.1 and keep using the same page tools.
+      // Re-check the final URL after readiness. General browser tabs must stay
+      // on public targets; project tabs may use loopback, but only while they
+      // still point at the project's local app.
       const targetKind = targetSurface?.kind || activePageAutomationContext.value?.kind
-      if (targetKind !== 'project') {
-        const currentUrl = handle.getURL?.() || readExpectedUrl() || null
-        if (currentUrl && currentUrl !== 'about:blank') {
-          const validation = validateAiBrowserTarget(currentUrl)
-          if (!validation.ok) {
-            throw new Error(`AI page tools cannot read or operate local/private or unsupported pages in a general browser tab (${validation.reason}) Use open_workspace_tab(kind="project") for local app pages.`)
-          }
+      const finalUrl = handle.getURL?.() || readExpectedUrl() || null
+      if (targetKind === 'project') {
+        if (!isLoopbackProjectUrl(finalUrl)) {
+          throw new Error(`AI page tools can only operate a project page while it stays on the project's loopback URL (http(s)://localhost, 127.0.0.1, or [::1]). The project page navigated to ${finalUrl || 'an unknown URL'}. Use a project surface for local apps and do not operate a project tab after it navigated elsewhere.`)
+        }
+      } else if (finalUrl && finalUrl !== 'about:blank') {
+        const validation = validateAiBrowserTarget(finalUrl)
+        if (!validation.ok) {
+          throw new Error(`AI page tools cannot read or operate local/private or unsupported pages in a general browser tab (${validation.reason}) Use open_workspace_tab(kind="project") for local app pages.`)
         }
       }
 
@@ -844,7 +958,7 @@ function optimizeProjectInChat (project: Record<string, unknown>) {
 }
 
 function openPageChatOverlay () {
-  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value || !activeBrowserPageSurface.value) return
+  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value || !activeEmbeddedPageSurface.value) return
   // Explicit user intent: AI requests should target this launchpad page.
   launchpadPageChatActive.value = true
   appChatPresentation.value = 'overlay'
@@ -852,7 +966,7 @@ function openPageChatOverlay () {
 }
 
 function collapsePageChatToBubble () {
-  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value || !activeBrowserPageSurface.value) return
+  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value || !activeEmbeddedPageSurface.value) return
   appChatPresentation.value = 'bubble'
 }
 
@@ -921,7 +1035,6 @@ async function openEmbeddedProject (projectId: string) {
       url: '',
       loading: true,
       kind: 'project',
-      sandbox: PROJECT_IFRAME_SANDBOX,
       projectPort: undefined
     })
   }
@@ -1000,8 +1113,7 @@ function openWebLinkInApp (rawUrl: string, options: BrowserAppOpenOptions = {}) 
   embeddedApps.value.set(appId, {
     url: normalizedUrl,
     loading: false,
-    kind: 'browser',
-    sandbox: BROWSER_IFRAME_SANDBOX
+    kind: 'browser'
   })
   activeEmbeddedProjectId.value = appId
   appChatPresentation.value = 'bubble'
@@ -1011,6 +1123,8 @@ function openWebLinkInApp (rawUrl: string, options: BrowserAppOpenOptions = {}) 
 }
 
 function handleBrowserAppStateChange (payload: { appId: string; url: string; title: string; icon?: string }) {
+  // Also fires for embedded project pages; refresh their live surface URL.
+  embeddedAutomationRevision.value += 1
   const existingApp = browserApps.value.get(payload.appId)
   if (!existingApp) return
 
@@ -1139,6 +1253,10 @@ async function openProjectInShell (projectId: string, mode: 'embed' | 'window' =
     return
   }
 
+  // This app page is now the AI's target: make an immediate read_current_page
+  // wait for the embedded surface to mount instead of hitting a workspace tab.
+  lastWorkspaceTabRequestAt = Date.now()
+  launchpadPageChatActive.value = true
   await openEmbeddedProject(projectId)
 }
 
@@ -1690,21 +1808,14 @@ onUnmounted(() => {
                   <span class="embedded-spinner">⏳</span>
                   <p>{{ $t('appShell.embeddedAppStarting') }}</p>
                 </div>
-                <iframe
-                  v-else-if="appState.kind === 'project' && appState.url"
-                  :src="appState.url"
-                  class="embedded-frame"
-                  :sandbox="appState.sandbox"
-                  :allow="PROJECT_IFRAME_ALLOW"
-                  allowfullscreen
-                ></iframe>
                 <BrowserWebView
                   :ref="(instance) => setBrowserAutomationHandle(appId, instance)"
-                  v-else-if="appState.kind === 'browser' && appState.url"
+                  v-else-if="appState.url"
                   :app-id="appId"
                   :url="appState.url"
-                  :title="browserApps.get(appId)?.name || appId"
-                  :icon="browserApps.get(appId)?.icon"
+                  :title="appState.kind === 'project' ? (runningApps.get(appId)?.name || appId) : (browserApps.get(appId)?.name || appId)"
+                  :icon="appState.kind === 'project' ? runningApps.get(appId)?.icon : browserApps.get(appId)?.icon"
+                  :hide-bar="appState.kind === 'project'"
                   class="embedded-browser-view"
                   @state-change="handleBrowserAppStateChange"
                   @context-menu="showBrowserAppCtx"
@@ -1722,11 +1833,11 @@ onUnmounted(() => {
 
           <div v-show="shouldMountChatShell" :class="['chat-shell', `chat-shell-${chatShellMode}`]">
             <div class="chat-shell-body">
-              <div v-if="chatShellMode === 'overlay' && activeBrowserPageSurface" class="chat-overlay-banner">
+              <div v-if="chatShellMode === 'overlay' && activeEmbeddedPageSurface" class="chat-overlay-banner">
                 <div class="chat-overlay-banner-copy">
                   <span class="chat-overlay-kicker">{{ $t('appShell.pageOperationChat') }}</span>
-                  <span class="chat-overlay-title">{{ activeBrowserPageSurface.title }}</span>
-                  <span class="chat-overlay-subtitle">{{ activeBrowserPageSurface.origin || activeBrowserPageSurface.url || $t('appShell.currentAppPage') }}</span>
+                  <span class="chat-overlay-title">{{ activeEmbeddedPageSurface.title }}</span>
+                  <span class="chat-overlay-subtitle">{{ activeEmbeddedPageSurface.origin || activeEmbeddedPageSurface.url || $t('appShell.currentAppPage') }}</span>
                 </div>
                 <button class="chat-overlay-collapse-btn" type="button" @click="collapsePageChatToBubble">{{ $t('appShell.collapseToBubble') }}</button>
               </div>
@@ -1755,8 +1866,8 @@ onUnmounted(() => {
           </div>
 
           <FloatingTaskBubble
-            v-if="showAppChatBubble && activeBrowserPageSurface"
-            :is-loading="chatSurfaceStatus.isLoading || activeBrowserPageSurface.loading"
+            v-if="showAppChatBubble && activeEmbeddedPageSurface"
+            :is-loading="chatSurfaceStatus.isLoading || activeEmbeddedPageSurface.loading"
             :pending-auth-count="chatSurfaceStatus.pendingAuthCount"
             :active-todo-count="chatSurfaceStatus.activeTodoCount"
             @open="openPageChatOverlay"
@@ -2064,13 +2175,6 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.embedded-frame {
-  width: 100%;
-  height: 100%;
-  border: none;
-  background: #fff;
 }
 
 .embedded-loading {
