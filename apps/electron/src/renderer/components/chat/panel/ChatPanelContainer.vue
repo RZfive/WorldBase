@@ -40,6 +40,7 @@ import {
   activateWorkspaceTab,
   applyWorkspaceControlToSnapshot,
   buildCurrentFolderWorkspaceState,
+  buildSnapshotTabSummary,
   buildWorkspaceTabSummaries,
   buildWorkspaceTabSummary,
   ensureWorkspaceTab,
@@ -1411,6 +1412,7 @@ watch(workspaceBrowserSurface, (surface) => {
   const tab = getActiveWorkspaceTab()
   if (surface && tab) {
     emit('pageSurfaceChange', {
+      conversationId: currentConversationId.value,
       appId: `wsb-${tab.id}`,
       kind: surface.kind,
       title: surface.title || surface.url,
@@ -1478,18 +1480,54 @@ function applyBackgroundWorkspaceChange (
   return normalized
 }
 
+/**
+ * Tells the app shell which page tab a background conversation just opened or
+ * activated, so it can attach (or recreate) that tab's hidden page host. Only
+ * browser/project tabs carry a page surface; other kinds are ignored.
+ */
+function emitBackgroundWorkspaceTabOpened (
+  conversationId: string,
+  state: ConversationWorkspaceState | undefined | null
+): void {
+  if (!state || !state.activeTabId) return
+  const entry = state.tabs?.find(tab => tab.id === state.activeTabId)
+  if (!entry) return
+  if (entry.kind !== 'browser' && entry.kind !== 'project') return
+  const summary = buildSnapshotTabSummary(entry, state.activeTabId)
+  emit('backgroundWorkspaceTabOpened', {
+    conversationId,
+    tabId: summary.id,
+    kind: summary.kind,
+    title: summary.title,
+    ...(summary.url ? { url: summary.url } : {}),
+    ...(summary.projectId ? { projectId: summary.projectId } : {})
+  })
+}
+
 function handleBackgroundWorkspaceTabRequest (conversationId: string, kind: string, payload?: Record<string, unknown>): void {
-  applyBackgroundWorkspaceChange(conversationId, state => {
+  const state = applyBackgroundWorkspaceChange(conversationId, state => {
     openWorkspaceTabInSnapshot(state, kind, payload)
     return state
   })
+  emitBackgroundWorkspaceTabOpened(conversationId, state)
 }
 
 function handleBackgroundWorkspaceControl (conversationId: string, request: WorkspaceTabControlRequest): WorkspaceTabControlResult {
   let result: WorkspaceTabControlResult | null = null
+  const closedTab: { value: { id: string; kind: string } | null } = { value: null }
   const outcome = applyBackgroundWorkspaceChange(conversationId, state => {
+    const beforeTabs = request.action === 'close' && Array.isArray(state.tabs)
+      ? state.tabs.map(tab => buildSnapshotTabSummary(tab, state.activeTabId))
+      : []
     const applied = applyWorkspaceControlToSnapshot(state, request)
     result = applied.result
+    if (request.action === 'close') {
+      // Closing the last tab clears result.tab; diff the strip so the closed
+      // tab is still reported to the app shell for host cleanup.
+      const remainingIds = new Set((applied.result.tabs || []).map(tab => tab.id))
+      const closed = applied.result.tab || beforeTabs.find(tab => !remainingIds.has(tab.id))
+      if (closed) closedTab.value = { id: closed.id, kind: closed.kind }
+    }
     return applied.state
   })
   if (!result) {
@@ -1498,6 +1536,15 @@ function handleBackgroundWorkspaceControl (conversationId: string, request: Work
         ? `This window no longer holds conversation ${conversationId}'s workspace, so the tab action cannot be applied.`
         : `Workspace tab action "${request.action}" produced no result.`
     )
+  }
+  if (request.action === 'activate') {
+    emitBackgroundWorkspaceTabOpened(conversationId, outcome)
+  } else if (request.action === 'close' && closedTab.value) {
+    emit('backgroundWorkspaceTabClosed', {
+      conversationId,
+      tabId: closedTab.value.id,
+      kind: closedTab.value.kind
+    })
   }
   return result
 }

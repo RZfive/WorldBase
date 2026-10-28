@@ -395,7 +395,7 @@ function ensureSnapshotTabIds (state: ConversationWorkspaceState): ConversationW
   return state.tabs
 }
 
-function buildSnapshotTabSummary (
+export function buildSnapshotTabSummary (
   entry: ConversationWorkspaceTabState,
   activeTabId?: string | null
 ): WorkspaceTabSummary {

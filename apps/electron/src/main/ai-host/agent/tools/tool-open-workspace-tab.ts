@@ -76,7 +76,7 @@ export function toolOpenWorkspaceTab (services: ToolServices): Tool {
         ? validateAiBrowserTarget(typeof url === 'string' ? url : '')
         : null
       if (browserTarget && !browserTarget.ok) {
-        throw new Error(`open_workspace_tab: browser URL rejected: ${browserTarget.reason}`)
+        throw new Error(`open_workspace_tab: browser URL rejected: ${browserTarget.reason} For a loopback/local project preview, use kind="project" with project_id or open_project_app; do not fall back to an external browser MCP.`)
       }
 
       const mainWindow = services.getMainWindow?.()

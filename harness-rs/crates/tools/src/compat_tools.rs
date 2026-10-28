@@ -1770,13 +1770,17 @@ const WORKSPACE_GLOB_IGNORED_DIRS: &[&str] = &[
     ".venv",
 ];
 
-/// Normalize a workspace-relative path exactly like the Electron host:
-/// trim, convert backslashes, and strip leading slashes.
+/// Normalize a workspace-relative path: trim, convert backslashes, drop
+/// leading/trailing slashes, and collapse `.`/empty segments. A root selector
+/// such as `.` or `./` must resolve to the workspace root, not to a literal
+/// child directory named `.` (which would list nothing).
 fn normalize_workspace_rel(rel: &str) -> String {
     rel.trim()
         .replace('\\', "/")
-        .trim_start_matches('/')
-        .to_string()
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn workspace_preview_extension_is_binary(path: &Path) -> bool {
@@ -8913,8 +8917,8 @@ fn _keep_types_linked(_: Option<Duration>) {}
 #[cfg(test)]
 mod workspace_native_parity_tests {
     use super::{
-        WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool, WorkspacePatchFileTool,
-        WorkspaceReadFileTool, WorkspaceWriteFileTool,
+        WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool, WorkspaceListFilesTool,
+        WorkspacePatchFileTool, WorkspaceReadFileTool, WorkspaceWriteFileTool,
     };
     use crate::{Tool, ToolServices};
     use serde_json::json;
@@ -8950,6 +8954,38 @@ mod workspace_native_parity_tests {
             group_collaboration: None,
             subagent_runtime: None,
         }
+    }
+
+    #[tokio::test]
+    async fn list_workspace_files_treats_dot_as_workspace_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        std::fs::create_dir_all(temp.path().join("ws/src")).unwrap();
+        std::fs::write(temp.path().join("ws/README.md"), "root file").unwrap();
+        std::fs::write(temp.path().join("ws/src/main.ts"), "export {}").unwrap();
+
+        for dir_path in [".", "./", "/"] {
+            let listed = WorkspaceListFilesTool
+                .execute(json!({ "dir_path": dir_path }), &service)
+                .await
+                .unwrap();
+            let entries = listed["entries"].as_array().unwrap();
+            assert!(
+                entries.iter().any(|entry| entry["name"] == "README.md"),
+                "dir_path {dir_path:?} did not list the workspace root"
+            );
+            assert!(
+                entries.iter().any(|entry| entry["name"] == "src"),
+                "dir_path {dir_path:?} did not list the workspace directory"
+            );
+            assert_eq!(listed["totalEntries"], 3);
+        }
+
+        let nested = WorkspaceListFilesTool
+            .execute(json!({ "dir_path": "./src/" }), &service)
+            .await
+            .unwrap();
+        assert_eq!(nested["entries"][0]["path"], "src/main.ts");
     }
 
     #[tokio::test]

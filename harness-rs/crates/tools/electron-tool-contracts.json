@@ -88,7 +88,7 @@
     },
     {
       "name": "interact_current_page",
-      "description": "Operate the active in-app browser/project page. Actions: click, input, select, batch_input, extract, evaluate, hover, focus, press_key (real keyboard), scroll, wait, wait_for, find (semantic element lookup), navigate, reload, back, forward, resize (viewport), emulate (print/screen media, prefers-color-scheme, prefers-reduced-motion, user agent, mobile viewport/device scale), batch (multiple actions in one round trip). For wait_for, selector/ref/text are evaluated in the current document, while state/url wait across navigations. Action \"emulate\" is the built-in replacement for chrome-devtools-mcp \"emulate\". These built-in page tools replace chrome/playwright browser MCP for navigation, screenshots, console/network reads, viewport resizing/emulation, DOM inspection, and script evaluation; use external browser MCP only for capabilities the built-in surface lacks (CDP-level network interception, performance tracing, or CI browser matrices). Use selectors or stable refs from read_current_page.",
+      "description": "Operate the active in-app browser/project page. Actions: click, input, select, batch_input, extract, evaluate, hover, focus, press_key (real keyboard), scroll, wait, wait_for, find (semantic element lookup), navigate, reload, back, forward, resize (viewport), emulate (print/screen media, prefers-color-scheme, prefers-reduced-motion, user agent, mobile viewport/device scale), batch (multiple actions in one round trip). For wait_for, selector/ref/text are evaluated in the current document, while state/url wait across navigations; text accepts a string or an array of strings and matches when ANY value is present. Set include_snapshot=false to skip the post-action interactive page snapshot and save tokens. Use timeout or timeout_ms to bound wait/wait_for/navigate/reload/back/forward/evaluate. Action \"emulate\" is the built-in replacement for chrome-devtools-mcp \"emulate\". These built-in page tools replace chrome/playwright browser MCP for navigation, screenshots, console/network reads, viewport resizing/emulation, DOM inspection, and script evaluation; use external browser MCP only for capabilities the built-in surface lacks (CDP-level network interception, performance tracing, or CI browser matrices). Use selectors or stable refs from read_current_page.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -122,6 +122,10 @@
             "type": "string",
             "description": "Optional workspace tab id from manage_workspace_tabs. Omit to use the active page tab."
           },
+          "include_snapshot": {
+            "type": "boolean",
+            "description": "Default true. Set false to skip the post-action interactive page snapshot and save tokens; action_result is still returned."
+          },
           "selector": {
             "type": "string",
             "description": "CSS selector of the target element. Selectors come from read_current_page or action \"find\"."
@@ -131,8 +135,18 @@
             "description": "Stable element ref from read_current_page/find (e1, e2, ...). Prefer it over fragile CSS selectors."
           },
           "text": {
-            "type": "string",
-            "description": "Required for input. Text to type into the target field."
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ],
+            "description": "For input: text to type into the target field (required, string). For wait_for: a string or an array of strings; the wait succeeds when ANY value is present."
           },
           "append": {
             "type": "boolean",
@@ -148,7 +162,11 @@
           },
           "timeout_ms": {
             "type": "integer",
-            "description": "For wait/wait_for/navigate/reload/back/forward/evaluate: timeout in milliseconds."
+            "description": "For wait/wait_for/navigate/reload/back/forward/evaluate: timeout in milliseconds. Alias: timeout."
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "Alias for timeout_ms on wait/wait_for/navigate/reload/back/forward/evaluate."
           },
           "value": {
             "type": "string",
@@ -422,7 +440,7 @@
     },
     {
       "name": "read_current_page",
-      "description": "Inspect the active in-app browser/project page. Modes: \"interactive\" (default) returns title, URL, readable text, interactive elements with stable refs/selectors, and form fields; \"article\" returns readability-style primary content as markdown; \"search_results\" extracts result titles/URLs/snippets from a search engine page; \"screenshot\" returns a current viewport (or full-page) image for visual verification; \"diagnostics\" returns console output, uncaught errors, recent fetch/XHR/resource activity, viewport and history state. These built-in page tools replace chrome/playwright browser MCP for navigation, screenshots, console/network reads, viewport changes, DOM inspection, and script evaluation; use external browser MCP only for capabilities the built-in surface lacks (CDP-level network interception, performance tracing, or CI browser matrices). When web_search/web_fetch reports access \"blocked\"/\"degraded\", open the page with open_workspace_tab(kind=\"browser\") and read it here with mode \"article\".",
+      "description": "Inspect the active in-app browser/project page. Modes: \"interactive\" (default) returns title, URL, readable text, interactive elements with stable refs/selectors, and form fields; \"article\" returns readability-style primary content as markdown; \"search_results\" extracts result titles/URLs/snippets from a search engine page; \"screenshot\" returns a current viewport (or full-page) image for visual verification and accepts timeout/timeout_ms for long captures; \"diagnostics\" returns console output, uncaught errors, recent fetch/XHR/resource activity, viewport and history state. These built-in page tools replace chrome/playwright browser MCP for navigation, screenshots, console/network reads, viewport changes, DOM inspection, and script evaluation; use external browser MCP only for capabilities the built-in surface lacks (CDP-level network interception, performance tracing, or CI browser matrices). When web_search/web_fetch reports access \"blocked\"/\"degraded\", open the page with open_workspace_tab(kind=\"browser\") and read it here with mode \"article\".",
       "parameters": {
         "type": "object",
         "properties": {
@@ -464,6 +482,14 @@
           "quality": {
             "type": "integer",
             "description": "screenshot only: JPEG quality 10-100 (default 80)."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "screenshot only: capture timeout in milliseconds. The page surface clamps it to its supported screenshot budget."
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "screenshot only: alias for timeout_ms."
           },
           "clear_diagnostics": {
             "type": "boolean",

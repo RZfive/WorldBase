@@ -12,6 +12,9 @@ type PageAutomationRequestEnvelope = import('./shared/page-automation-types.js')
 type PageAutomationResponseEnvelope = import('./shared/page-automation-types.js').PageAutomationResponseEnvelope
 type BrowserPageScreenshotRequest = import('./shared/page-automation-types.js').BrowserPageScreenshotRequest
 type BrowserPageScreenshotResult = import('./shared/page-automation-types.js').BrowserPageScreenshotResult
+type BrowserPageKeyDispatchRequest = import('./shared/page-automation-types.js').BrowserPageKeyDispatchRequest
+type BrowserPageKeyDispatchResult = import('./shared/page-automation-types.js').BrowserPageKeyDispatchResult
+type BrowserAutomationNetworkEntry = import('./shared/page-automation-types.js').BrowserAutomationNetworkEntry
 
 interface BrowserPageEmulationViewportRequest {
   width: number
@@ -28,7 +31,9 @@ interface BrowserPageEmulationRequest {
   userAgent?: string
   viewport?: BrowserPageEmulationViewportRequest
   reset?: boolean
+  timeoutMs?: number
 }
+
 
 interface BrowserPageEmulationResult {
   ok: true
@@ -1177,6 +1182,8 @@ interface ElectronAPI {
   onBrowserPageContextMenu: (callback: (payload: BrowserPageContextMenuPayload) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
   captureBrowserPageScreenshot: (request: BrowserPageScreenshotRequest) => Promise<BrowserPageScreenshotResult>
+  dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => Promise<BrowserPageKeyDispatchResult>
+  getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => Promise<BrowserAutomationNetworkEntry[]>
   emulateBrowserPage: (request: BrowserPageEmulationRequest) => Promise<BrowserPageEmulationResult>
   getAboutInfo: () => Promise<AppAboutInfo>
   getAppUpdateState: () => Promise<AppUpdateState>

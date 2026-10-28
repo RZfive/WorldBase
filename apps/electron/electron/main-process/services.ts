@@ -439,7 +439,13 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
     const mode = request.payload.mode === 'window' ? 'window' : 'embed'
     if (win.isMinimized()) win.restore()
     win.focus()
-    win.webContents.send('project:openInShell', { projectId, mode })
+    win.webContents.send('project:openInShell', {
+      projectId,
+      mode,
+      ...(typeof request.conversationId === 'string' && request.conversationId.trim()
+        ? { conversationId: request.conversationId.trim() }
+        : {})
+    })
     return { success: true, project_id: projectId, mode, opened_via: 'shell_ui' }
   }
 

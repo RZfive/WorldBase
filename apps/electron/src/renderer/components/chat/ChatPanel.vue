@@ -17,6 +17,8 @@ const emit = defineEmits<ChatPanelEmit>()
     @current-conversation-change="conversationId => emit('currentConversationChange', conversationId)"
     @workspace-tab-request-consumed="emit('workspaceTabRequestConsumed')"
     @workspace-tab-control-result="response => emit('workspaceTabControlResult', response)"
+    @background-workspace-tab-opened="payload => emit('backgroundWorkspaceTabOpened', payload)"
+    @background-workspace-tab-closed="payload => emit('backgroundWorkspaceTabClosed', payload)"
     @page-surface-change="surface => emit('pageSurfaceChange', surface)"
     @terminal-surface-change="surface => emit('terminalSurfaceChange', surface)"
     @open-web-link="(url) => emit('openWebLink', url)"

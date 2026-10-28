@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type {
   CodingDiffChange,
@@ -22,6 +22,40 @@ const diff = computed<CodingDiffState | null>(() => (
 const files = computed<CodingDiffFile[]>(() => diff.value?.files ?? [])
 const activeIndex = ref(0)
 const activeFile = computed<CodingDiffFile | null>(() => files.value[activeIndex.value] ?? null)
+
+const diffMainRef = ref<HTMLElement | null>(null)
+const fileListRef = ref<HTMLElement | null>(null)
+const fileListPopoverRef = ref<HTMLElement | null>(null)
+const fileListOpen = ref(false)
+
+function toggleFileList (): void {
+  fileListOpen.value = !fileListOpen.value
+}
+
+function handleGlobalPointerDown (event: PointerEvent): void {
+  if (!fileListOpen.value) return
+  const target = event.target
+  if (target instanceof Node && fileListRef.value?.contains(target)) return
+  fileListOpen.value = false
+}
+
+function handleGlobalKeydown (event: KeyboardEvent): void {
+  if (event.key === 'Escape') fileListOpen.value = false
+}
+
+watch(fileListOpen, async (open) => {
+  if (open) {
+    document.addEventListener('pointerdown', handleGlobalPointerDown, true)
+    document.addEventListener('keydown', handleGlobalKeydown, true)
+    await nextTick()
+    fileListPopoverRef.value
+      ?.querySelector<HTMLElement>('[aria-selected="true"]')
+      ?.scrollIntoView({ block: 'nearest' })
+  } else {
+    document.removeEventListener('pointerdown', handleGlobalPointerDown, true)
+    document.removeEventListener('keydown', handleGlobalKeydown, true)
+  }
+})
 
 const focusFilePath = computed(() => {
   const activeTab = workspaceStore.tabs.value.find(tab => tab.id === workspaceStore.activeTabId.value)
@@ -62,8 +96,12 @@ function applyFocusFilePath (): void {
 watch(
   () => files.value.length,
   (length) => {
-    if (length === 0) activeIndex.value = 0
-    else if (activeIndex.value >= length) activeIndex.value = length - 1
+    if (length === 0) {
+      activeIndex.value = 0
+      fileListOpen.value = false
+    } else if (activeIndex.value >= length) {
+      activeIndex.value = length - 1
+    }
     applyFocusFilePath()
   }
 )
@@ -71,6 +109,14 @@ watch(
 watch([focusFilePath, focusRequestId], () => {
   applyFocusFilePath()
 }, { immediate: true })
+
+function scrollDiffToTop (): void {
+  void nextTick(() => {
+    diffMainRef.value?.scrollTo({ top: 0 })
+  })
+}
+
+watch(activeIndex, scrollDiffToTop)
 
 function isAbsolutePath (filePath: string): boolean {
   return /^(?:[A-Za-z]:[\\/]|\/)/.test(filePath)
@@ -360,9 +406,16 @@ function copyActiveDiff (): void {
 
 onBeforeUnmount(() => {
   if (copiedTimer) clearTimeout(copiedTimer)
+  document.removeEventListener('pointerdown', handleGlobalPointerDown, true)
+  document.removeEventListener('keydown', handleGlobalKeydown, true)
 })
 
 function selectFile (index: number): void {
+  fileListOpen.value = false
+  if (index === activeIndex.value) {
+    scrollDiffToTop()
+    return
+  }
   activeIndex.value = index
 }
 </script>
@@ -374,28 +427,31 @@ function selectFile (index: number): void {
     </div>
 
     <div v-else class="diff-body">
-      <div class="file-tabs-row">
-        <nav class="file-tabs" :aria-label="t('chatUi.codingDiffTab')">
-          <button
-            v-for="(file, index) in files"
-            :key="file.filePath"
-            type="button"
-            class="file-tab"
-            :class="{ active: index === activeIndex }"
-            :title="file.filePath"
-            :aria-current="index === activeIndex ? 'page' : undefined"
-            @click="selectFile(index)"
-          >
-            <span class="file-path">{{ file.filePath }}</span>
-            <span class="file-operation-count">{{ file.operationCount }}</span>
-          </button>
-        </nav>
-        <span class="file-tabs-count">{{ t('chatUi.codingDiffFileCount', { count: files.length }) }}</span>
-      </div>
-
-      <main v-if="activeFile" class="diff-main">
-        <header class="active-file-header">
-          <h2>{{ activeFile.filePath }}</h2>
+      <main v-if="activeFile" ref="diffMainRef" class="diff-main">
+        <header ref="fileListRef" class="active-file-header">
+          <div class="file-title">
+            <h2 :title="activeFile.filePath">{{ activeFile.filePath }}</h2>
+            <button
+              type="button"
+              class="file-list-toggle"
+              :aria-expanded="fileListOpen"
+              :aria-label="t('chatUi.codingDiffFileCount', { count: files.length })"
+              :title="t('chatUi.codingDiffFileCount', { count: files.length })"
+              @click="toggleFileList"
+            >
+              <span class="file-list-count">{{ files.length }}</span>
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path
+                  d="M4 6l4 4 4-4"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
           <div class="active-file-actions">
             <span class="change-count">{{ activeFile.changes.length }}</span>
             <button
@@ -423,6 +479,28 @@ function selectFile (index: number): void {
               @click="copyActiveDiff"
             >
               {{ isCopied('diff') ? t('chatUi.codingCopied') : t('chatUi.codingCopyDiff') }}
+            </button>
+          </div>
+          <div
+            v-if="fileListOpen"
+            ref="fileListPopoverRef"
+            class="file-list-popover"
+            role="listbox"
+            :aria-label="t('chatUi.codingDiffFileCount', { count: files.length })"
+          >
+            <button
+              v-for="(file, index) in files"
+              :key="file.filePath"
+              type="button"
+              class="file-list-item"
+              :class="{ active: index === activeIndex }"
+              role="option"
+              :aria-selected="index === activeIndex"
+              :title="file.filePath"
+              @click="selectFile(index)"
+            >
+              <span class="file-path">{{ file.filePath }}</span>
+              <span class="file-operation-count">{{ file.operationCount }}</span>
             </button>
           </div>
         </header>
@@ -501,7 +579,7 @@ function selectFile (index: number): void {
 .diff-empty.inline {
   flex: 0 0 auto;
   justify-content: flex-start;
-  padding: 18px 0;
+  padding: 18px 16px;
 }
 
 .diff-body {
@@ -513,46 +591,82 @@ function selectFile (index: number): void {
   overflow: hidden;
 }
 
-/* File tabs stay on one line above the diff so the code column gets the full
-   panel width instead of losing ~200px to a vertical file rail. */
-.file-tabs-row {
+.file-title {
+  display: flex;
+  flex: 1 1 220px;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.file-list-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  background: var(--app-panel-muted);
+  color: var(--app-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.62rem;
+  cursor: pointer;
+}
+
+.file-list-toggle:hover,
+.file-list-toggle[aria-expanded='true'] {
+  border-color: var(--app-accent);
+  color: var(--app-text-strong);
+}
+
+.file-list-toggle:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
+}
+
+.file-list-toggle svg {
+  width: 10px;
+  height: 10px;
+  transition: transform 120ms ease;
+}
+
+.file-list-toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+.file-list-count {
+  line-height: 1;
+}
+
+.file-list-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 16px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  width: min(380px, calc(100% - 32px));
+  max-height: min(360px, 55vh);
+  padding: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-panel);
+  box-shadow: 0 12px 28px color-mix(in srgb, #000 28%, transparent);
+  scrollbar-width: thin;
+}
+
+.file-list-item {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  border-bottom: 1px solid var(--app-border);
-  background: var(--app-panel-muted);
-}
-
-.file-tabs {
-  display: flex;
-  flex: 1 1 auto;
-  gap: 4px;
-  min-width: 0;
-  padding: 6px 10px;
-  overflow-x: auto;
-  scrollbar-width: thin;
-}
-
-.file-tabs-count {
-  flex: 0 0 auto;
-  padding-right: 12px;
-  color: var(--app-text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.69rem;
-  white-space: nowrap;
-}
-
-.file-tab {
-  display: inline-flex;
-  flex: 0 1 auto;
-  max-width: min(300px, 46vw);
-  align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
-  border: 1px solid transparent;
-  border-radius: 5px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 4px;
   background: transparent;
   color: var(--app-text-muted);
   cursor: pointer;
@@ -560,19 +674,23 @@ function selectFile (index: number): void {
   white-space: nowrap;
 }
 
-.file-tab:hover {
-  background: color-mix(in srgb, var(--app-panel) 70%, transparent);
+.file-list-item:hover {
+  background: var(--app-panel-muted);
+  color: var(--app-text);
 }
 
-.file-tab.active {
-  border-color: var(--app-border);
-  background: var(--app-panel);
+.file-list-item.active {
+  background: var(--app-panel-muted);
   color: var(--app-text-strong);
 }
 
-.file-tab:focus-visible {
+.file-list-item:focus-visible {
   outline: 2px solid var(--app-accent);
   outline-offset: -1px;
+}
+
+.file-list-item .file-path {
+  flex: 1 1 auto;
 }
 
 .file-path {
@@ -597,22 +715,29 @@ function selectFile (index: number): void {
 }
 
 .diff-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
-  padding: 12px 16px 24px;
   overflow-x: hidden;
   overflow-y: auto;
 }
 
 .active-file-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px 12px;
   min-width: 0;
-  padding-bottom: 9px;
+  padding: 10px 16px 9px;
   border-bottom: 1px solid var(--app-border);
+  background: var(--app-panel);
 }
 
 .active-file-actions {
@@ -655,7 +780,7 @@ function selectFile (index: number): void {
 }
 
 .active-file-header h2 {
-  flex: 1 1 220px;
+  flex: 0 1 auto;
   min-width: 0;
   margin: 0;
   overflow: hidden;
@@ -675,12 +800,17 @@ function selectFile (index: number): void {
 }
 
 .change-block {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
   min-width: 0;
-  padding: 12px 0;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--app-border);
 }
 
 .change-block:last-child {
+  flex: 1 0 auto;
+  padding-bottom: 0;
   border-bottom: 0;
 }
 
@@ -732,8 +862,8 @@ function selectFile (index: number): void {
 }
 
 .change-diff {
+  flex: 1 0 auto;
   max-width: 100%;
-  max-height: 460px;
   overflow: auto;
   border: 1px solid var(--app-border);
   border-radius: 5px;

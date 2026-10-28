@@ -201,7 +201,9 @@ export interface BrowserAutomationEmulateAction {
   deviceScaleFactor?: number
   mobile?: boolean
   reset?: boolean
+  timeoutMs?: number
 }
+
 
 export type BrowserAutomationAction =
   | ({ type: 'click' } & BrowserAutomationTarget)
@@ -219,7 +221,7 @@ export type BrowserAutomationAction =
       type: 'wait_for'
       selector?: string
       ref?: string
-      text?: string
+      text?: string | string[]
       url?: string
       state?: 'load' | 'domcontentloaded'
       timeoutMs?: number
@@ -274,7 +276,7 @@ export type PageAutomationSnapshotMode = 'interactive' | 'article' | 'search_res
 export type PageAutomationRendererRequest =
   | { type: 'snapshot'; mode?: PageAutomationSnapshotMode }
   | { type: 'action'; action: BrowserAutomationAction }
-  | { type: 'screenshot'; fullPage?: boolean; maxWidth?: number; format?: 'png' | 'jpeg'; quality?: number }
+  | { type: 'screenshot'; fullPage?: boolean; maxWidth?: number; format?: 'png' | 'jpeg'; quality?: number; timeoutMs?: number }
   | { type: 'diagnostics'; clear?: boolean }
 
 export type PageAutomationRendererResult =
@@ -321,6 +323,7 @@ export interface BrowserPageScreenshotRequest {
   fullPage?: boolean
   format?: 'png' | 'jpeg'
   quality?: number
+  timeoutMs?: number
 }
 
 export interface BrowserPageScreenshotResult {
@@ -329,4 +332,14 @@ export interface BrowserPageScreenshotResult {
   height: number
   fullPage: boolean
   note?: string
+}
+
+export interface BrowserPageKeyDispatchRequest {
+  webContentsId: number
+  key: string
+  modifiers?: string[]
+}
+
+export interface BrowserPageKeyDispatchResult {
+  ok: boolean
 }

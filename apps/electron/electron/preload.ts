@@ -3,7 +3,7 @@ import type { ComputerUsePermissionTarget } from '../src/shared/computer-use-per
 import type { ConversationMetadataPatch } from '../src/shared/conversation-metadata.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
-import type { ActivePageAutomationContext, BrowserPageContextMenuPayload, BrowserPageScreenshotRequest, BrowserPageScreenshotResult, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
+import type { ActivePageAutomationContext, BrowserAutomationNetworkEntry, BrowserPageContextMenuPayload, BrowserPageKeyDispatchRequest, BrowserPageKeyDispatchResult, BrowserPageScreenshotRequest, BrowserPageScreenshotResult, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { WorkspaceTabControlRequestEnvelope, WorkspaceTabControlResponseEnvelope } from '../src/shared/workspace-control-types.js'
 import type {
   TerminalDataEvent,
@@ -36,7 +36,9 @@ interface BrowserPageEmulationRequest {
   userAgent?: string
   viewport?: BrowserPageEmulationViewportRequest
   reset?: boolean
+  timeoutMs?: number
 }
+
 
 interface BrowserPageEmulationResult {
   ok: true
@@ -568,6 +570,8 @@ export interface ElectronAPI {
   onBrowserPageContextMenu: (callback: (payload: BrowserPageContextMenuPayload) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
   captureBrowserPageScreenshot: (request: BrowserPageScreenshotRequest) => Promise<BrowserPageScreenshotResult>
+  dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => Promise<BrowserPageKeyDispatchResult>
+  getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => Promise<BrowserAutomationNetworkEntry[]>
   emulateBrowserPage: (request: BrowserPageEmulationRequest) => Promise<BrowserPageEmulationResult>
   onWorkspaceTabControl: (callback: (payload: WorkspaceTabControlRequestEnvelope) => void) => () => void
   resolveWorkspaceTabControl: (payload: WorkspaceTabControlResponseEnvelope) => void
@@ -891,6 +895,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.send('pageAutomation:response', payload)
   },
   captureBrowserPageScreenshot: (request: BrowserPageScreenshotRequest) => ipcRenderer.invoke('pageAutomation:captureScreenshot', request),
+  dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => ipcRenderer.invoke('pageAutomation:dispatchKey', request),
+  getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => ipcRenderer.invoke('pageAutomation:getNetworkLog', webContentsId, limit),
   emulateBrowserPage: (request: BrowserPageEmulationRequest) => ipcRenderer.invoke('pageAutomation:emulate', request),
   getAboutInfo: () => ipcRenderer.invoke('app:getAboutInfo'),
   getAppUpdateState: () => ipcRenderer.invoke('appUpdate:getState'),

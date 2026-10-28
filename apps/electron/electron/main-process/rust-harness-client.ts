@@ -925,6 +925,10 @@ export class RustHarnessClient {
     this.sessionAuthModes.set(sessionId, authMode)
   }
 
+  isSessionAutoApproved (sessionId: string): boolean {
+    return this.sessionAuthModes.get(sessionId) === 'auto'
+  }
+
   hasSession (sessionId: string): boolean {
     return this.sessionToStream.has(sessionId) || this.startingSessions.has(sessionId)
   }

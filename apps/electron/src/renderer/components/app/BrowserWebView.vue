@@ -78,18 +78,24 @@ interface WebviewLikeElement extends HTMLElement {
   isLoading?: () => boolean;
   getZoomFactor?: () => number;
   getWebContentsId?: () => number;
+  setAudioMuted?: (muted: boolean) => void;
   capturePage?: () => Promise<NativeImageLike>;
   sendInputEvent?: (event: Record<string, unknown>) => Promise<void> | void;
   executeJavaScript?: <T>(code: string, userGesture?: boolean) => Promise<T>;
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   appId: string;
   url: string;
   title: string;
   icon?: string;
   hideBar?: boolean;
-}>();
+  allowPopups?: boolean;
+  backgroundHost?: boolean;
+}>(), {
+  allowPopups: true,
+  backgroundHost: false,
+});
 
 const emit = defineEmits<{
   (e: "stateChange", payload: BrowserAppStatePayload): void;
@@ -100,6 +106,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const webviewRef = ref<WebviewLikeElement | null>(null);
+const webviewGeneration = ref(0);
 const addressInputRef = ref<HTMLInputElement | null>(null);
 const currentUrl = ref(props.url);
 const currentTitle = ref(props.title);
@@ -112,6 +119,7 @@ const MAX_DIAGNOSTICS_ENTRIES = 120;
 const consoleBuffer: BrowserAutomationConsoleEntry[] = [];
 const pageErrorBuffer: BrowserAutomationPageError[] = [];
 let diagnosticsNavigationId = 0;
+let diagnosticsNetworkClearedAt = 0;
 let diagnosticsHookInstall: { key: string; promise: Promise<void> } | null = null;
 const isAddressInputFocused = ref(false);
 const addressContextMenu = reactive({
@@ -387,8 +395,11 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, message: string):
 }
 
 const PAGE_CAPTURE_TIMEOUT_MS = 12_000;
-const SCREENSHOT_FULL_PAGE_TIMEOUT_MS = 25_000;
-const SCREENSHOT_VIEWPORT_TIMEOUT_MS = 10_000;
+const SCREENSHOT_DEFAULT_TIMEOUT_MS = 15_000;
+const SCREENSHOT_MIN_TIMEOUT_MS = 3_000;
+const SCREENSHOT_MAX_TIMEOUT_MS = 30_000;
+const SCREENSHOT_FULL_PAGE_TIMEOUT_MS = SCREENSHOT_DEFAULT_TIMEOUT_MS;
+const SCREENSHOT_VIEWPORT_TIMEOUT_MS = SCREENSHOT_DEFAULT_TIMEOUT_MS;
 const SCREENSHOT_RENDER_TIMEOUT_MS = 8_000;
 const PAGE_ACTION_TIMEOUT_MS = 15_000;
 const DIAGNOSTICS_HOOK_TIMEOUT_MS = 5_000;
@@ -450,11 +461,18 @@ const serializeResult = (value) => {
 const PAGE_SCRIPT_HELPERS = `
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
 
+    const waitTextValues = (value) => {
+      const values = Array.isArray(value) ? value : (value ? [value] : []);
+      return values.map((text) => String(text || '')).filter(Boolean);
+    };
+
     const describeWaitCondition = (value) => {
       const parts = [];
       if (value && value.selector) parts.push('selector="' + String(value.selector) + '"');
       if (value && value.ref) parts.push('ref="' + String(value.ref) + '"');
-      if (value && value.text) parts.push('text="' + String(value.text) + '"');
+      const texts = waitTextValues(value && value.text);
+      if (texts.length === 1) parts.push('text="' + texts[0] + '"');
+      else if (texts.length > 1) parts.push('text matches one of ["' + texts.join('", "') + '"]');
       if (value && value.url) parts.push('url contains "' + String(value.url) + '"');
       if (value && value.state) parts.push('state="' + String(value.state) + '"');
       return parts.length > 0 ? parts.join(' + ') : 'the page';
@@ -1239,14 +1257,18 @@ async function captureDiagnostics(options: { clear?: boolean } = {}): Promise<Br
 
       const diagnostics = window.__worldbaseDiagnostics || { errors: [], network: [], clearedAt: 0 };
       const clearedAt = Number(diagnostics.clearedAt) || 0;
-      const resources = (performance.getEntriesByType('resource') || [])
+      const resources = [
+        ...(performance.getEntriesByType('navigation') || []),
+        ...(performance.getEntriesByType('resource') || []),
+      ]
+        .sort((left, right) => left.startTime - right.startTime)
         .slice(-${MAX_DIAGNOSTICS_ENTRIES})
         .map((entry) => ({
           url: String(entry.name || ''),
           method: null,
           status: null,
           ok: null,
-          type: String(entry.initiatorType || 'resource'),
+          type: String(entry.initiatorType || entry.entryType || 'resource'),
           durationMs: Math.round(Number(entry.duration) || 0),
           transferSize: typeof entry.transferSize === 'number' ? entry.transferSize : null,
           error: null,
@@ -1294,6 +1316,18 @@ async function captureDiagnostics(options: { clear?: boolean } = {}): Promise<Br
     captureError = error instanceof Error ? error : new Error(String(error));
   }
 
+  let nativeNetwork: BrowserAutomationNetworkEntry[] = [];
+  const webContentsId = getWebContentsId();
+  const getNetworkLog = window.electronAPI?.getBrowserPageNetworkLog;
+  if (webContentsId && getNetworkLog) {
+    try {
+      nativeNetwork = await getNetworkLog(webContentsId, MAX_DIAGNOSTICS_ENTRIES) || [];
+    } catch {}
+  }
+  if (diagnosticsNetworkClearedAt > 0) {
+    nativeNetwork = nativeNetwork.filter(entry => entry.timestamp > diagnosticsNetworkClearedAt);
+  }
+
   const pageUrl = captured?.page.url || readWebviewUrl(webview) || currentUrl.value;
   let pageOrigin: string | null = null;
   try { pageOrigin = pageUrl ? new URL(pageUrl).origin : null; } catch { pageOrigin = null; }
@@ -1318,6 +1352,7 @@ async function captureDiagnostics(options: { clear?: boolean } = {}): Promise<Br
   })();
 
   const network = mergeDiagnosticsNetwork([
+    ...nativeNetwork,
     ...(captured?.network || []),
     ...(captured?.resources || []),
   ]);
@@ -1342,6 +1377,7 @@ async function captureDiagnostics(options: { clear?: boolean } = {}): Promise<Br
   };
 
   if (options.clear) {
+    diagnosticsNetworkClearedAt = Date.now();
     consoleBuffer.length = 0;
     pageErrorBuffer.length = 0;
   }
@@ -1366,7 +1402,7 @@ function mergeDiagnosticsNetwork (entries: BrowserAutomationNetworkEntry[]): Bro
   const kept: BrowserAutomationNetworkEntry[] = [];
 
   for (const entry of sorted) {
-    const duplicate = kept.some((candidate) => {
+    const duplicateIndex = kept.findIndex((candidate) => {
       if (candidate.url !== entry.url) return false;
       const sameRequest = candidate.method === entry.method
         && (candidate.status ?? null) === (entry.status ?? null)
@@ -1376,7 +1412,19 @@ function mergeDiagnosticsNetwork (entries: BrowserAutomationNetworkEntry[]): Bro
       if (!resourceOverlap) return false;
       return Math.abs(candidate.timestamp - entry.timestamp) < Math.max(2000, (candidate.durationMs || 0) + 1000);
     });
-    if (!duplicate) kept.push(entry);
+    if (duplicateIndex >= 0) {
+      const current = kept[duplicateIndex];
+      const preferred = isResourceLikeEntry(current) && !isResourceLikeEntry(entry) ? entry : current;
+      const fallback = preferred === current ? entry : current;
+      kept[duplicateIndex] = {
+        ...fallback,
+        ...preferred,
+        durationMs: preferred.durationMs ?? fallback.durationMs ?? null,
+        transferSize: preferred.transferSize ?? fallback.transferSize ?? null,
+      };
+      continue;
+    }
+    kept.push(entry);
   }
 
   return kept.slice(0, MAX_DIAGNOSTICS_ENTRIES);
@@ -1397,6 +1445,12 @@ function dedupeDiagnosticsErrors (entries: BrowserAutomationPageError[]): Browse
 
 function normalizeScreenshotQuality(value?: number): number {
   return Math.max(10, Math.min(Math.round(Number(value) || 80), 100));
+}
+
+function normalizeScreenshotTimeout(value?: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return SCREENSHOT_DEFAULT_TIMEOUT_MS;
+  return Math.max(SCREENSHOT_MIN_TIMEOUT_MS, Math.min(Math.round(numeric), SCREENSHOT_MAX_TIMEOUT_MS));
 }
 
 const SCREENSHOT_MAX_HEIGHT = 16000;
@@ -1454,11 +1508,76 @@ async function renderScreenshotDataUrl(
   }
 }
 
-async function captureScreenshot(options: {
+const SCREENSHOT_RECOVERY_BUDGET_MS = 20_000;
+const SCREENSHOT_RECOVERY_READY_TIMEOUT_MS = 8_000;
+let screenshotHostRecovery: Promise<void> | null = null;
+
+function isScreenshotTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "TimeoutError" || /timed?\s*out|timeout/i.test(error.message);
+}
+
+async function recoverPageHostAfterScreenshotTimeout(): Promise<void> {
+  if (screenshotHostRecovery) return await screenshotHostRecovery;
+  const previousWebview = webviewRef.value;
+  if (!previousWebview) throw new Error("Page screenshots are unavailable for this page surface.");
+
+  const recoveryUrl = readWebviewUrl(previousWebview) || currentUrl.value;
+  const recovery = (async () => {
+    currentUrl.value = recoveryUrl;
+    syncAddressInput(recoveryUrl);
+    detachListeners?.();
+    detachListeners = null;
+    diagnosticsHookInstall = null;
+    diagnosticsNavigationId += 1;
+    diagnosticsNetworkClearedAt = Date.now();
+    consoleBuffer.length = 0;
+    pageErrorBuffer.length = 0;
+    webviewGeneration.value += 1;
+    await nextTick();
+
+    const webview = webviewRef.value;
+    if (!webview || webview === previousWebview) {
+      throw new Error("The page surface could not be rebuilt after the screenshot timed out.");
+    }
+    detachListeners = attachWebviewListeners();
+    const deadline = Date.now() + SCREENSHOT_RECOVERY_READY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (webviewRef.value !== webview) {
+        throw new Error("The recovered page surface was replaced before it became ready.");
+      }
+      try {
+        const readyState = await withTimeout(
+          Promise.resolve(webview.executeJavaScript?.("document.readyState")),
+          1000,
+          "Recovered page readiness",
+        );
+        if (!webview.isLoading?.() && (readyState === "interactive" || readyState === "complete")) {
+          syncFromWebview();
+          emitStateChange();
+          return;
+        }
+      } catch {
+        // The replacement guest can reject or stall until it has attached.
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+    throw new Error("Timed out waiting for the rebuilt page surface to become ready.");
+  })();
+  screenshotHostRecovery = recovery;
+  try {
+    await recovery;
+  } finally {
+    if (screenshotHostRecovery === recovery) screenshotHostRecovery = null;
+  }
+}
+
+async function captureScreenshotAttempt(options: {
   fullPage?: boolean;
   maxWidth?: number;
   format?: "png" | "jpeg";
   quality?: number;
+  timeoutMs?: number;
 } = {}): Promise<BrowserAutomationScreenshot> {
   const webview = webviewRef.value;
   if (!webview) {
@@ -1471,59 +1590,60 @@ async function captureScreenshot(options: {
   const title = currentTitle.value;
   const url = readWebviewUrl(webview) || currentUrl.value;
   const fullPage = Boolean(options.fullPage);
+  const defaultTimeoutMs = fullPage ? SCREENSHOT_FULL_PAGE_TIMEOUT_MS : SCREENSHOT_VIEWPORT_TIMEOUT_MS;
+  const timeoutMs = normalizeScreenshotTimeout(options.timeoutMs ?? defaultTimeoutMs);
+  const webContentsId = getWebContentsId();
+  const captureBridge = window.electronAPI?.captureBrowserPageScreenshot;
   let note: string | undefined;
 
-  if (fullPage) {
-    const webContentsId = getWebContentsId();
-    const capture = window.electronAPI?.captureBrowserPageScreenshot;
-    if (webContentsId && capture) {
-      try {
-        const shot = await withTimeout(capture({
-          webContentsId,
-          fullPage: true,
-          format,
-          quality,
-        }), SCREENSHOT_FULL_PAGE_TIMEOUT_MS, "Full-page screenshot");
-        if (shot?.dataUrl) {
-          let dataUrl = shot.dataUrl;
-          let width = shot.width;
-          let height = shot.height;
-          const scaled = screenshotExceedsCaps(width, height, maxWidth)
-            ? await renderScreenshotDataUrl(dataUrl, maxWidth, format, quality, false)
-            : null;
-          if (scaled) {
-            dataUrl = scaled.dataUrl;
-            width = scaled.width;
-            height = scaled.height;
-          }
-          const scalingNote = screenshotExceedsCaps(width, height, maxWidth)
-            ? `Full-page screenshot is ${width}x${height}px; it exceeded the ${maxWidth}px width, ${SCREENSHOT_MAX_HEIGHT}px height, or ${SCREENSHOT_MAX_PIXELS}px pixel cap and could not be scaled further.`
-            : undefined;
-          return {
-            url,
-            title,
-            dataUrl,
-            width,
-            height,
-            fullPage: shot.fullPage !== false,
-            ...(shot.note || scalingNote ? { note: [shot.note, scalingNote].filter(Boolean).join(" ") } : {}),
-            capturedAt: Date.now(),
-          };
+  if (webContentsId && captureBridge) {
+    try {
+      const shot = await withTimeout(captureBridge({
+        webContentsId,
+        fullPage,
+        format,
+        quality,
+        timeoutMs,
+      }), Math.min(timeoutMs + 1000, SCREENSHOT_MAX_TIMEOUT_MS + 1000), fullPage ? "Full-page screenshot" : "Page screenshot");
+      if (shot?.dataUrl) {
+        let dataUrl = shot.dataUrl;
+        let width = shot.width;
+        let height = shot.height;
+        const scaled = screenshotExceedsCaps(width, height, maxWidth)
+          ? await renderScreenshotDataUrl(dataUrl, maxWidth, format, quality, false)
+          : null;
+        if (scaled) {
+          dataUrl = scaled.dataUrl;
+          width = scaled.width;
+          height = scaled.height;
         }
-        note = "Full-page capture returned no image; returned the visible viewport instead.";
-      } catch (error) {
-        note = `Full-page capture failed (${error instanceof Error ? error.message : String(error)}); returned the visible viewport instead.`;
+        const scalingNote = screenshotExceedsCaps(width, height, maxWidth)
+          ? `${shot.fullPage ? "Full-page" : "Viewport"} screenshot is ${width}x${height}px; it exceeded the ${maxWidth}px width, ${SCREENSHOT_MAX_HEIGHT}px height, or ${SCREENSHOT_MAX_PIXELS}px pixel cap and could not be scaled further.`
+          : undefined;
+        return {
+          url,
+          title,
+          dataUrl,
+          width,
+          height,
+          fullPage: shot.fullPage,
+          ...(shot.note || scalingNote ? { note: [shot.note, scalingNote].filter(Boolean).join(" ") } : {}),
+          capturedAt: Date.now(),
+        };
       }
-    } else {
-      note = "Full-page capture is unavailable for this page surface; returned the visible viewport instead.";
+      note = `${fullPage ? "Full-page" : "Viewport"} capture returned no image; used the browser view fallback.`;
+    } catch (error) {
+      note = `${fullPage ? "Full-page" : "Viewport"} capture failed (${error instanceof Error ? error.message : String(error)}); used the browser view fallback.`;
     }
+  } else if (fullPage) {
+    note = "Full-page capture is unavailable for this page surface; returned the visible viewport instead.";
   }
 
   if (!webview.capturePage) {
     throw new Error("This browser surface does not support screenshots.");
   }
 
-  let image = await withTimeout(webview.capturePage(), SCREENSHOT_VIEWPORT_TIMEOUT_MS, "Page screenshot");
+  let image = await withTimeout(webview.capturePage(), timeoutMs, "Page screenshot");
   let size = image.getSize();
   let dataUrl = image.toDataURL();
   const converted = screenshotExceedsCaps(size.width, size.height, maxWidth) || format === "jpeg"
@@ -1548,6 +1668,60 @@ async function captureScreenshot(options: {
     ...(note ? { note } : {}),
     capturedAt: Date.now(),
   };
+}
+
+async function captureScreenshot(options: {
+  fullPage?: boolean;
+  maxWidth?: number;
+  format?: "png" | "jpeg";
+  quality?: number;
+  timeoutMs?: number;
+} = {}): Promise<BrowserAutomationScreenshot> {
+  const defaultTimeoutMs = options.fullPage ? SCREENSHOT_FULL_PAGE_TIMEOUT_MS : SCREENSHOT_VIEWPORT_TIMEOUT_MS;
+  const timeoutMs = normalizeScreenshotTimeout(options.timeoutMs ?? defaultTimeoutMs);
+  const deadline = Date.now() + timeoutMs + SCREENSHOT_RECOVERY_BUDGET_MS;
+  const captureAttempt = async (attemptTimeoutMs: number) => await withTimeout(
+    captureScreenshotAttempt({ ...options, timeoutMs: attemptTimeoutMs }),
+    Math.min(attemptTimeoutMs + 1000, SCREENSHOT_MAX_TIMEOUT_MS + 1000),
+    options.fullPage ? "Full-page screenshot" : "Page screenshot",
+  );
+
+  try {
+    return await captureAttempt(timeoutMs);
+  } catch (error) {
+    if (!isScreenshotTimeoutError(error)) throw error;
+    console.warn("[browser-webview] screenshot timed out; rebuilding page host", { appId: props.appId });
+    const remainingMs = deadline - Date.now();
+    if (remainingMs < SCREENSHOT_MIN_TIMEOUT_MS + 2000) throw error;
+    try {
+      await withTimeout(
+        recoverPageHostAfterScreenshotTimeout(),
+        Math.min(SCREENSHOT_RECOVERY_READY_TIMEOUT_MS, remainingMs - SCREENSHOT_MIN_TIMEOUT_MS - 1000),
+        "Page host recovery",
+      );
+    } catch (recoveryError) {
+      const detail = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+      throw new Error(`Screenshot timed out and page-host recovery failed: ${detail}`);
+    }
+
+    const retryTimeoutMs = Math.min(timeoutMs, deadline - Date.now() - 1000);
+    if (retryTimeoutMs < SCREENSHOT_MIN_TIMEOUT_MS) {
+      throw new Error("Screenshot timed out; the rebuilt page host left too little time to retry the capture.");
+    }
+    try {
+      const screenshot = await captureAttempt(retryTimeoutMs);
+      return {
+        ...screenshot,
+        note: [
+          "The page host was rebuilt after the screenshot timed out; the page was reloaded and its emulation was reset.",
+          screenshot.note,
+        ].filter(Boolean).join(" "),
+      };
+    } catch (retryError) {
+      const detail = retryError instanceof Error ? retryError.message : String(retryError);
+      throw new Error(`Screenshot failed after rebuilding the page host: ${detail}`);
+    }
+  }
 }
 
 interface WebviewLoadWaiter {
@@ -1809,7 +1983,12 @@ interface NavigationWaitTarget {
   url?: string;
   selector?: string;
   ref?: string;
-  text?: string;
+  text?: string | string[];
+}
+
+function waitTextValues(value: string | string[] | undefined): string[] {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return values.map(text => String(text || "")).filter(Boolean);
 }
 
 const PAGE_WAIT_CONTEXT_ERROR_PATTERN = /context destroyed|Execution context was destroyed|Script failed to execute|GUEST_VIEW_MANAGER_CALL|Cannot find context|Cannot access contents/i;
@@ -1825,7 +2004,9 @@ function describeWaitCondition(condition: NavigationWaitTarget): string {
   const parts: string[] = [];
   if (condition.selector) parts.push(`selector="${condition.selector}"`);
   if (condition.ref) parts.push(`ref="${condition.ref}"`);
-  if (condition.text) parts.push(`text="${condition.text}"`);
+  const texts = waitTextValues(condition.text);
+  if (texts.length === 1) parts.push(`text="${texts[0]}"`);
+  else if (texts.length > 1) parts.push(`text matches one of ["${texts.join('", "')}"]`);
   if (condition.url) parts.push(`url contains "${condition.url}"`);
   if (condition.state) parts.push(`state="${condition.state}"`);
   return parts.length > 0 ? parts.join(" + ") : "the page";
@@ -1979,9 +2160,10 @@ async function waitForPageCondition(
       } else if (payload.selector) {
         if (!document.querySelector(payload.selector)) return false;
       }
-      if (payload.text) {
-        const haystack = document.body?.innerText || document.body?.textContent || '';
-        if (!String(haystack).includes(payload.text)) return false;
+      const texts = waitTextValues(payload.text);
+      if (texts.length > 0) {
+        const haystack = String(document.body?.innerText || document.body?.textContent || '');
+        if (!texts.some((text) => haystack.includes(text))) return false;
       }
       return true;
     };
@@ -2005,7 +2187,7 @@ async function runWaitForAction(
     await waitForNavigationCondition(webview, action, timeoutMs);
   }
   const elapsed = Date.now() - startedAt;
-  if (!action.selector && !action.ref && !action.text) {
+  if (!action.selector && !action.ref && waitTextValues(action.text).length === 0) {
     return { ok: true, type: "wait_for", timeoutMs: elapsed, url: readWebviewUrl(webview) };
   }
   const deadline = startedAt + timeoutMs;
@@ -2026,7 +2208,21 @@ async function runWaitForAction(
 
 function nextAnimationFrame(): Promise<void> {
   return new Promise((resolve) => {
-    window.requestAnimationFrame(() => resolve());
+    // Hidden or throttled host windows (e.g. background page hosts) never
+    // produce animation frames, which used to hang emulate/reset viewport
+    // settling and, through it, the per-tab automation queue. Race the frame
+    // callback with a short timer so the wait settles either way; the Vue
+    // nextTick flush before it already applied the layout changes.
+    let settled = false;
+    let fallbackTimer: number | null = null;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      if (fallbackTimer != null) window.clearTimeout(fallbackTimer);
+      resolve();
+    };
+    fallbackTimer = window.setTimeout(settle, 32);
+    window.requestAnimationFrame(settle);
   });
 }
 
@@ -2099,7 +2295,15 @@ function electronCharForKey(key: string, shift: boolean): string | null {
   return key;
 }
 
+function applyBackgroundHostMediaPolicy(webview: WebviewLikeElement): void {
+  if (!props.backgroundHost) return;
+  try {
+    webview.setAudioMuted?.(true);
+  } catch {}
+}
+
 function focusWebviewForInput(webview: WebviewLikeElement): void {
+  if (props.backgroundHost) return;
   try {
     webview.focus({ preventScroll: true });
   } catch {
@@ -2133,6 +2337,23 @@ async function sendRealKey(
     await webview.sendInputEvent({ type: "char", keyCode: char, modifiers: electronModifiers });
   }
   await webview.sendInputEvent({ type: "keyUp", keyCode, modifiers: electronModifiers });
+}
+
+type SelectNavigationKey = "ArrowUp" | "ArrowDown" | "Home" | "End";
+
+interface FocusedSelectState {
+  value: string;
+  selectedIndex: number;
+  optionCount: number;
+}
+
+function selectNavigationKeyFor(key: string): SelectNavigationKey | null {
+  const normalized = key.trim().toLowerCase();
+  if (normalized === "arrowup" || normalized === "up") return "ArrowUp";
+  if (normalized === "arrowdown" || normalized === "down") return "ArrowDown";
+  if (normalized === "home") return "Home";
+  if (normalized === "end") return "End";
+  return null;
 }
 
 async function prepareRealTarget(
@@ -2318,6 +2539,15 @@ function normalizeEmulationMobile(value: boolean | undefined, fallback: boolean)
 }
 
 async function runEmulationAction(action: BrowserAutomationEmulateAction): Promise<BrowserAutomationActionResult> {
+  // Honor the action-level timeout end to end: the main-process CDP commands
+  // are bounded per command, but renderer-side viewport settling and page
+  // measurement must share the same deadline instead of outliving the budget
+  // (which previously surfaced as the fixed 50s queue timeout).
+  const timeoutMs = Math.max(100, Math.min(Number(action.timeoutMs) || 10000, 60000));
+  return await withTimeout(runEmulationActionWithinBudget(action), timeoutMs, "Emulate action");
+}
+
+async function runEmulationActionWithinBudget(action: BrowserAutomationEmulateAction): Promise<BrowserAutomationActionResult> {
   const emulate = window.electronAPI?.emulateBrowserPage;
   if (!emulate) {
     throw new Error("Page emulation is unavailable: the emulateBrowserPage IPC bridge is missing.");
@@ -2328,7 +2558,7 @@ async function runEmulationAction(action: BrowserAutomationEmulateAction): Promi
   }
 
   if (action.reset === true) {
-    const result = await emulate({ webContentsId, reset: true });
+    const result = await emulate({ webContentsId, reset: true, timeoutMs: action.timeoutMs });
     const size = await applyAgentViewport(undefined, undefined, true);
     return {
       ok: true,
@@ -2338,6 +2568,7 @@ async function runEmulationAction(action: BrowserAutomationEmulateAction): Promi
       emulated: result.emulated,
     };
   }
+
 
   if (action.media !== undefined && action.media !== "screen" && action.media !== "print") {
     throw new Error(`Unsupported emulated media type: ${String(action.media)}.`);
@@ -2413,7 +2644,9 @@ async function runEmulationAction(action: BrowserAutomationEmulateAction): Promi
     ...(action.reducedMotion !== undefined ? { reducedMotion: action.reducedMotion } : {}),
     ...(action.userAgent !== undefined ? { userAgent: action.userAgent } : {}),
     ...(viewport ? { viewport } : {}),
+    ...(action.timeoutMs !== undefined ? { timeoutMs: action.timeoutMs } : {}),
   });
+
 
   const size = viewport
     ? await applyAgentViewport(viewport.width, viewport.height)
@@ -2591,6 +2824,106 @@ async function runAutomationActionInternal(
 
   if (action.type === "press_key") {
     if (!action.key) throw new Error("press_key requires a non-empty key.");
+    const webContentsId = getWebContentsId();
+    const dispatchKey = window.electronAPI?.dispatchBrowserPageKey;
+    if (webContentsId && dispatchKey) {
+      focusWebviewForInput(webview);
+      if (action.selector || action.ref) {
+        await withTimeout(executeInPage(`
+          ${PAGE_SCRIPT_HELPERS}
+          const element = resolveTarget(payload.target);
+          element.focus({ preventScroll: true });
+          return true;
+        `, { target: action }), PAGE_ACTION_TIMEOUT_MS, "press_key action");
+      }
+      const selectKey = selectNavigationKeyFor(action.key);
+      let selectState: FocusedSelectState | null = null;
+      if (selectKey) {
+        try {
+          selectState = await withTimeout(executeInPage<FocusedSelectState | null>(`
+            const select = document.activeElement;
+            if (!(select instanceof HTMLSelectElement)) {
+              try { delete window.__worldbaseSelectNavigationTarget; } catch {}
+              return null;
+            }
+            try { window.__worldbaseSelectNavigationTarget = select; } catch {}
+            return {
+              value: select.value,
+              selectedIndex: select.selectedIndex,
+              optionCount: select.options.length,
+            };
+          `), PAGE_ACTION_TIMEOUT_MS, "press_key select state");
+        } catch {}
+      }
+      const navigation = watchForNavigation(webview, 15000);
+      try {
+        let dispatchError: unknown = null;
+        try {
+          await dispatchKey({ webContentsId, key: action.key, modifiers: action.modifiers });
+        } catch (error) {
+          dispatchError = error;
+        }
+        let selectFallbackHandled = false;
+        if (selectKey && selectState) {
+          try {
+            const fallback = await withTimeout(executeInPage<{ handled: boolean; applied: boolean }>(`
+              const select = window.__worldbaseSelectNavigationTarget;
+              const before = payload.before;
+              const active = document.activeElement;
+              const clearTarget = () => {
+                try { delete window.__worldbaseSelectNavigationTarget; } catch {}
+              };
+              if (!select || active !== select || !select.isConnected) {
+                clearTarget();
+                return { handled: false, applied: false };
+              }
+              if (select.value !== before.value || select.selectedIndex !== before.selectedIndex) {
+                clearTarget();
+                return { handled: true, applied: false };
+              }
+              const optionCount = select.options.length;
+              if (optionCount === 0) {
+                clearTarget();
+                return { handled: true, applied: false };
+              }
+              let nextIndex = before.selectedIndex;
+              if (payload.key === 'Home') nextIndex = 0;
+              else if (payload.key === 'End') nextIndex = optionCount - 1;
+              else if (payload.key === 'ArrowUp') nextIndex = Math.max(0, before.selectedIndex - 1);
+              else if (payload.key === 'ArrowDown') nextIndex = Math.min(optionCount - 1, before.selectedIndex + 1);
+              if (nextIndex === select.selectedIndex) {
+                clearTarget();
+                return { handled: true, applied: false };
+              }
+              select.selectedIndex = nextIndex;
+              select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              select.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+              clearTarget();
+              return { handled: true, applied: true };
+            `, { key: selectKey, before: selectState }), PAGE_ACTION_TIMEOUT_MS, "press_key select fallback");
+            selectFallbackHandled = Boolean(fallback?.handled);
+          } catch {}
+        }
+        if (dispatchError && !selectFallbackHandled) throw dispatchError;
+        const outcome = await navigation.start();
+        return withNavigationOutcome(
+          {
+            ok: true,
+            type: action.type,
+            selector: action.selector,
+            ref: action.ref,
+            key: action.key,
+            ...(dispatchError && selectFallbackHandled
+              ? { note: `Native key dispatch failed; applied the focused select fallback (${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}).` }
+              : {}),
+          },
+          outcome,
+        );
+      } catch (error) {
+        navigation.cancel();
+        throw error;
+      }
+    }
     if (webview.sendInputEvent) {
       focusWebviewForInput(webview);
       if (action.selector || action.ref) {
@@ -2974,9 +3307,10 @@ async function runAutomationActionInternal(
           } else if (payload.selector) {
             if (!document.querySelector(payload.selector)) return false;
           }
-          if (payload.text) {
-            const haystack = document.body?.innerText || document.body?.textContent || '';
-            if (!String(haystack).includes(payload.text)) return false;
+          const texts = waitTextValues(payload.text);
+          if (texts.length > 0) {
+            const haystack = String(document.body?.innerText || document.body?.textContent || '');
+            if (!texts.some((text) => haystack.includes(text))) return false;
           }
           if (payload.url && !location.href.includes(payload.url)) return false;
           if (payload.state === 'load' && document.readyState !== 'complete') return false;
@@ -3383,6 +3717,7 @@ function syncFromWebview() {
 function attachWebviewListeners() {
   const webview = webviewRef.value;
   if (!webview) return () => {};
+  applyBackgroundHostMediaPolicy(webview);
 
   const handleTitleUpdated = (event: Event) => {
     const payload = event as Event & { title?: string };
@@ -3411,6 +3746,7 @@ function attachWebviewListeners() {
   };
 
   const handleDomReady = () => {
+    applyBackgroundHostMediaPolicy(webview);
     void installDiagnosticsHooks();
   };
 
@@ -3668,11 +4004,13 @@ onUnmounted(() => {
     <div class="browser-view-stage">
       <webview
         ref="webviewRef"
+        :key="webviewGeneration"
         class="browser-view-webview"
         :style="agentViewport ? { width: `${agentViewport.width}px`, height: `${agentViewport.height}px`, flex: '0 0 auto' } : undefined"
-        :src="props.url"
+        :src="currentUrl"
         partition="persist:the-world-browser"
-        allowpopups
+        :allowpopups="props.allowPopups === false ? undefined : ''"
+        webpreferences="backgroundThrottling=no"
         @contextmenu.stop
       ></webview>
     </div>

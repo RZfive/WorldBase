@@ -17,6 +17,8 @@ import type { ToolServices } from './index.js'
 
 type ReadPageMode = 'interactive' | 'article' | 'search_results' | 'screenshot' | 'diagnostics'
 type SnapshotMode = 'interactive' | 'article' | 'search_results'
+type WaitForActionWithTextList = Omit<Extract<BrowserAutomationAction, { type: 'wait_for' }>, 'text'> & { text?: string | string[] }
+type ScreenshotRequestWithTimeout = Extract<PageAutomationRendererRequest, { type: 'screenshot' }> & { timeoutMs?: number }
 
 interface ReadCurrentPageArgs {
   mode?: ReadPageMode
@@ -27,6 +29,7 @@ interface ReadCurrentPageArgs {
   format?: 'png' | 'jpeg'
   quality?: number
   clear_diagnostics?: boolean
+  timeout_ms?: number
 }
 
 interface InteractCurrentPageArgs {
@@ -93,6 +96,33 @@ function nonNegativeNumber (value: unknown): number | undefined {
   return number == null ? undefined : Math.max(0, number)
 }
 
+/** `timeout` is the documented alias for `timeout_ms`. */
+function actionTimeoutMs (args: Record<string, unknown>): number | undefined {
+  return nonNegativeNumber(args.timeout_ms) ?? nonNegativeNumber(args.timeout)
+}
+
+function normalizedTextList (value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+}
+
+function normalizeWaitForText (value: unknown): string | string[] | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const texts = normalizedTextList(JSON.parse(trimmed) as unknown)
+        if (texts.length > 0) return texts
+      } catch {
+        // Not a JSON array: treat the value as literal text below.
+      }
+    }
+    return value ? value : undefined
+  }
+  const texts = normalizedTextList(value)
+  return texts.length > 0 ? texts : undefined
+}
+
 function normalizeTabId (args: Record<string, unknown>): string | undefined {
   return typeof args.tab_id === 'string' && args.tab_id.trim() ? args.tab_id.trim() : undefined
 }
@@ -109,7 +139,8 @@ function normalizeReadArgs (args: Record<string, unknown>): ReadCurrentPageArgs 
     max_width: finiteNumber(args.max_width),
     format: args.format === 'jpeg' ? 'jpeg' : args.format === 'png' ? 'png' : undefined,
     quality: finiteNumber(args.quality),
-    clear_diagnostics: args.clear_diagnostics === true
+    clear_diagnostics: args.clear_diagnostics === true,
+    timeout_ms: actionTimeoutMs(args)
   }
 }
 
@@ -190,7 +221,7 @@ function normalizeInteractArgs (args: Record<string, unknown>): BrowserAutomatio
     return {
       type: 'evaluate',
       script,
-      timeoutMs: nonNegativeNumber(args.timeout_ms)
+      timeoutMs: actionTimeoutMs(args)
     }
   }
 
@@ -226,20 +257,22 @@ function normalizeInteractArgs (args: Record<string, unknown>): BrowserAutomatio
   if (action === 'wait') {
     return {
       type: 'wait',
-      timeoutMs: nonNegativeNumber(args.timeout_ms) ?? 0
+      timeoutMs: actionTimeoutMs(args) ?? 0
     }
   }
 
   if (action === 'wait_for') {
-    return {
+    const waitForText = normalizeWaitForText(args.text)
+    const waitForAction: WaitForActionWithTextList = {
       type: 'wait_for',
       selector: typeof args.selector === 'string' && args.selector.trim() ? args.selector.trim() : undefined,
       ref: typeof args.ref === 'string' && args.ref.trim() ? args.ref.trim() : undefined,
-      text: typeof args.text === 'string' && args.text ? args.text : undefined,
+      ...(waitForText !== undefined ? { text: waitForText } : {}),
       url: typeof args.url === 'string' && args.url ? args.url : undefined,
       state: args.state === 'load' || args.state === 'domcontentloaded' ? args.state : undefined,
-      timeoutMs: nonNegativeNumber(args.timeout_ms)
+      timeoutMs: actionTimeoutMs(args)
     }
+    return waitForAction as unknown as BrowserAutomationAction
   }
 
   if (action === 'find') {
@@ -259,7 +292,7 @@ function normalizeInteractArgs (args: Record<string, unknown>): BrowserAutomatio
     return {
       type: 'navigate',
       url,
-      timeoutMs: nonNegativeNumber(args.timeout_ms)
+      timeoutMs: actionTimeoutMs(args)
     }
   }
 
@@ -267,14 +300,14 @@ function normalizeInteractArgs (args: Record<string, unknown>): BrowserAutomatio
     return {
       type: 'reload',
       ignoreCache: args.ignore_cache === true,
-      timeoutMs: nonNegativeNumber(args.timeout_ms)
+      timeoutMs: actionTimeoutMs(args)
     }
   }
 
   if (action === 'back' || action === 'forward') {
     return {
       type: action,
-      timeoutMs: nonNegativeNumber(args.timeout_ms)
+      timeoutMs: actionTimeoutMs(args)
     }
   }
 
@@ -336,6 +369,7 @@ function normalizeInteractArgs (args: Record<string, unknown>): BrowserAutomatio
     if (!reset && !hasOverrides) {
       throw new Error('emulate requires at least one emulation option or reset=true.')
     }
+    const timeoutMs = actionTimeoutMs(args)
     return {
       type: 'emulate',
       ...(reset ? { reset: true } : {}),
@@ -346,7 +380,8 @@ function normalizeInteractArgs (args: Record<string, unknown>): BrowserAutomatio
       ...(width !== undefined ? { width } : {}),
       ...(height !== undefined ? { height } : {}),
       ...(deviceScaleFactor !== undefined ? { deviceScaleFactor } : {}),
-      ...(args.mobile !== undefined ? { mobile: args.mobile as boolean } : {})
+      ...(args.mobile !== undefined ? { mobile: args.mobile as boolean } : {}),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {})
     }
   }
 
@@ -511,7 +546,7 @@ export function toolReadCurrentPage (services: ToolServices): Tool {
   return {
     definition: {
       name: 'read_current_page',
-      description: 'Inspect the active in-app browser/project page. Modes: "interactive" (default) returns title, URL, readable text, interactive elements with stable refs/selectors, and form fields; "article" returns readability-style primary content as markdown; "search_results" extracts result titles/URLs/snippets from a search engine page; "screenshot" returns a current viewport (or full-page) image for visual verification; "diagnostics" returns console output, uncaught errors, recent fetch/XHR/resource activity, viewport and history state. These built-in page tools replace chrome/playwright browser MCP for navigation, screenshots, console/network reads, viewport changes, DOM inspection, and script evaluation; use external browser MCP only for capabilities the built-in surface lacks (CDP-level network interception, performance tracing, or CI browser matrices). When web_search/web_fetch reports access "blocked"/"degraded", open the page with open_workspace_tab(kind="browser") and read it here with mode "article".',
+      description: 'Inspect the active in-app browser/project page. Modes: "interactive" (default) returns title, URL, readable text, interactive elements with stable refs/selectors, and form fields; "article" returns readability-style primary content as markdown; "search_results" extracts result titles/URLs/snippets from a search engine page; "screenshot" returns a current viewport (or full-page) image for visual verification and accepts timeout/timeout_ms for long captures; "diagnostics" returns console output, uncaught errors, recent fetch/XHR/resource activity, viewport and history state. These built-in page tools replace chrome/playwright browser MCP for navigation, screenshots, console/network reads, viewport changes, DOM inspection, and script evaluation; use external browser MCP only for capabilities the built-in surface lacks (CDP-level network interception, performance tracing, or CI browser matrices). When web_search/web_fetch reports access "blocked"/"degraded", open the page with open_workspace_tab(kind="browser") and read it here with mode "article".',
       parameters: {
         type: 'object',
         properties: {
@@ -542,6 +577,14 @@ export function toolReadCurrentPage (services: ToolServices): Tool {
             type: 'integer',
             description: 'screenshot only: JPEG quality 10-100 (default 80).'
           },
+          timeout_ms: {
+            type: 'integer',
+            description: 'screenshot only: capture timeout in milliseconds. The page surface clamps it to its supported screenshot budget.'
+          },
+          timeout: {
+            type: 'integer',
+            description: 'screenshot only: alias for timeout_ms.'
+          },
           clear_diagnostics: {
             type: 'boolean',
             description: 'diagnostics only: clear the buffered console/error/network entries after returning the current snapshot.'
@@ -553,13 +596,15 @@ export function toolReadCurrentPage (services: ToolServices): Tool {
       const normalized = normalizeReadArgs(args)
       if (normalized.mode === 'screenshot') {
         onProgress?.('📸 Capturing current page', normalized.full_page ? 'full page' : 'visible viewport')
-        const result = await runRawPageRequest(services, {
+        const screenshotRequest: ScreenshotRequestWithTimeout = {
           type: 'screenshot',
           fullPage: normalized.full_page,
           maxWidth: normalized.max_width,
           format: normalized.format,
-          quality: normalized.quality
-        }, normalized.tab_id)
+          quality: normalized.quality,
+          ...(normalized.timeout_ms !== undefined ? { timeoutMs: normalized.timeout_ms } : {})
+        }
+        const result = await runRawPageRequest(services, screenshotRequest, normalized.tab_id)
         if (!isScreenshot(result)) throw new Error('The page surface did not return a screenshot.')
         onProgress?.('✅ Screenshot captured', `${result.width}x${result.height}`)
         return {
@@ -640,16 +685,23 @@ export function toolInteractCurrentPage (services: ToolServices): Tool {
   return {
     definition: {
       name: 'interact_current_page',
-      description: 'Operate the active in-app browser/project page. Actions: click, input, select, batch_input, extract, evaluate, hover, focus, press_key (real keyboard), scroll, wait, wait_for, find (semantic element lookup), navigate, reload, back, forward, resize (viewport), emulate (print/screen media, prefers-color-scheme, prefers-reduced-motion, user agent, mobile viewport/device scale), batch (multiple actions in one round trip). For wait_for, selector/ref/text are evaluated in the current document, while state/url wait across navigations. Action "emulate" is the built-in replacement for chrome-devtools-mcp "emulate". These built-in page tools replace chrome/playwright browser MCP for navigation, screenshots, console/network reads, viewport resizing/emulation, DOM inspection, and script evaluation; use external browser MCP only for capabilities the built-in surface lacks (CDP-level network interception, performance tracing, or CI browser matrices). Use selectors or stable refs from read_current_page.',
+      description: 'Operate the active in-app browser/project page. Actions: click, input, select, batch_input, extract, evaluate, hover, focus, press_key (real keyboard), scroll, wait, wait_for, find (semantic element lookup), navigate, reload, back, forward, resize (viewport), emulate (print/screen media, prefers-color-scheme, prefers-reduced-motion, user agent, mobile viewport/device scale), batch (multiple actions in one round trip). For wait_for, selector/ref/text are evaluated in the current document, while state/url wait across navigations; text accepts a string or an array of strings and matches when ANY value is present. Set include_snapshot=false to skip the post-action interactive page snapshot and save tokens. Use timeout or timeout_ms to bound wait/wait_for/navigate/reload/back/forward/evaluate. Action "emulate" is the built-in replacement for chrome-devtools-mcp "emulate". These built-in page tools replace chrome/playwright browser MCP for navigation, screenshots, console/network reads, viewport resizing/emulation, DOM inspection, and script evaluation; use external browser MCP only for capabilities the built-in surface lacks (CDP-level network interception, performance tracing, or CI browser matrices). Use selectors or stable refs from read_current_page.',
       parameters: {
         type: 'object',
         properties: {
           action: actionSchema(),
           tab_id: TAB_ID_PROPERTY,
+          include_snapshot: {
+            type: 'boolean',
+            description: 'Default true. Set false to skip the post-action interactive page snapshot and save tokens; action_result is still returned.'
+          },
           ...TARGET_PROPERTIES,
           text: {
-            type: 'string',
-            description: 'Required for input. Text to type into the target field.'
+            oneOf: [
+              { type: 'string' },
+              { type: 'array', items: { type: 'string' } }
+            ],
+            description: 'For input: text to type into the target field (required, string). For wait_for: a string or an array of strings; the wait succeeds when ANY value is present.'
           },
           append: {
             type: 'boolean',
@@ -665,7 +717,11 @@ export function toolInteractCurrentPage (services: ToolServices): Tool {
           },
           timeout_ms: {
             type: 'integer',
-            description: 'For wait/wait_for/navigate/reload/back/forward/evaluate: timeout in milliseconds.'
+            description: 'For wait/wait_for/navigate/reload/back/forward/evaluate: timeout in milliseconds. Alias: timeout.'
+          },
+          timeout: {
+            type: 'integer',
+            description: 'Alias for timeout_ms on wait/wait_for/navigate/reload/back/forward/evaluate.'
           },
           value: {
             type: 'string',
@@ -789,6 +845,7 @@ export function toolInteractCurrentPage (services: ToolServices): Tool {
     },
     handler: async (args, onProgress) => {
       const tabId = normalizeTabId(args)
+      const includeSnapshot = args.include_snapshot !== false
       const action = normalizeInteractArgs(args)
       onProgress?.('🖱️ Interacting with current page', `${action.type}${'selector' in action && action.selector ? `: ${action.selector}` : ''}`)
       const actionResult = await ensurePageActionResult(services, action, tabId)
@@ -800,7 +857,8 @@ export function toolInteractCurrentPage (services: ToolServices): Tool {
       const navigationAware = actionResult as NavigationAwareActionResult
       const navigated = navigationAware.navigated === true
       const navigationTimedOut = navigationAware.navigationTimedOut === true
-      const shouldAttachSnapshot = action.type !== 'evaluate' &&
+      const shouldAttachSnapshot = includeSnapshot &&
+        action.type !== 'evaluate' &&
         action.type !== 'find' &&
         action.type !== 'wait_for' &&
         action.type !== 'resize' &&
