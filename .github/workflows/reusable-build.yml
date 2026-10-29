@@ -1,7 +1,7 @@
 name: Reusable Build
 
-# 四端构建的公共步骤，供 build.yml（main 分支 CI）和 release.yml（tag 发布）复用。
-# Android build-number 沿用 GITHUB_RUN_NUMBER（随每次运行单调递增）。
+# 四端构建的公共步骤，仅由 release.yml（v* tag 发布）复用。
+# PR 合并和普通 push 不再打包；Android build-number 沿用 GITHUB_RUN_NUMBER。
 
 on:
   workflow_call: {}
@@ -38,7 +38,7 @@ jobs:
               }
             }
 
-  # main 推送时要求四处版本一致，tag 发布时要求四处等于 tag；用仓库统一脚本校验
+  # tag 发布时要求四处版本等于 tag；用仓库统一脚本校验
   version-check:
     runs-on: ubuntu-latest
     steps:
@@ -46,12 +46,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Verify versions
-        run: |
-          if [[ "$GITHUB_REF_NAME" == v* ]]; then
-            node scripts/bump-version.mjs --check "$GITHUB_REF_NAME"
-          else
-            node scripts/bump-version.mjs --check
-          fi
+        run: node scripts/bump-version.mjs --check "$GITHUB_REF_NAME"
 
   build-windows:
     needs: [cleanup, version-check]
@@ -311,8 +306,9 @@ jobs:
 
       - name: Install Android NDK
         run: |
+          bash scripts/install-android-ndk.sh
           sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          "$sdk_root/cmdline-tools/latest/bin/sdkmanager" "ndk;$ANDROID_NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$sdk_root/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
 
       - name: Build Rust mobile FFI
         run: |
