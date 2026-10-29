@@ -5,6 +5,7 @@ import { createComputerUsePermissionService } from './permissions/computer-use.j
 import type { ComputerUsePermissionTarget } from '../../src/shared/computer-use-permissions.js'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { USER_ABORT_MESSAGE } from '../../src/main/ai-harness/abort-utils.js'
 import type { MessageContent } from '../../src/main/ai-harness/contracts.js'
 import { PROJECT_PACKAGE_EXTENSION } from '../../src/main/project-fs/project-package-service.js'
@@ -61,6 +62,8 @@ import {
 } from './services.js'
 import { attachProjectRuntimeLogForwarding, broadcastToAppWindows, buildActiveCodeViewPromptSection, buildActivePagePromptSection, buildActiveTerminalPromptSection, buildRendererWindowUrl, buildWebCapabilityPolicySection, createProjectPackageDefaultName, ensureWindowHasMinimumWidth, getPreferredLanIpv4Addresses, getProjectsDir, getSenderWindow, guessImageExtension, resolveImageBuffer, runWithAiRequestWindow, setWindowMinimumWidth } from './windows.js'
 import { generateImGatewayReply } from './ai/im-replies.js'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 /** 打开中的文档页文件监听（引用计数共享；变化广播给所有应用窗口）。 */
 const documentFileWatcher = new DocumentFileWatcher()
