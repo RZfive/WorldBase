@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import BrowserWebView, { type BrowserContextAddPayload } from '../../app/BrowserWebView.vue'
 import { workspaceBrowserSurfaces } from '../workspace-store'
 import { addWebQuote } from '../../chat/panel/web-quote-state'
@@ -35,6 +35,7 @@ const resolvedPort = ref<number | null>(null)
 const errorMessage = ref('')
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let watchTimer: ReturnType<typeof setInterval> | null = null
+let disposed = false
 
 const appId = computed(() => `wsb-${props.tab.id}`)
 const appUrl = computed(() => (resolvedPort.value ? `http://127.0.0.1:${resolvedPort.value}` : ''))
@@ -53,21 +54,30 @@ async function fetchStatus (): Promise<ProjectRuntimeStatus | null> {
 async function resolveRuntime (allowStart: boolean): Promise<void> {
   if (!projectId) {
     phase.value = 'missing'
+    stopPolling()
+    workspaceBrowserSurfaces.delete(props.tab.id)
     return
   }
 
   phase.value = 'starting'
   errorMessage.value = ''
+  registerSurface()
 
   try {
     let status = await fetchStatus()
+    if (disposed) return
     if (allowStart && status?.status !== 'running' && window.electronAPI?.startProject) {
       await window.electronAPI.startProject(projectId)
+      if (disposed) return
       status = await fetchStatus()
+      if (disposed) return
     }
     if (status?.status === 'running' && status.port) {
       resolvedPort.value = status.port
       phase.value = 'running'
+      await nextTick()
+      if (disposed) return
+      registerSurface()
       return
     }
 
@@ -76,22 +86,30 @@ async function resolveRuntime (allowStart: boolean): Promise<void> {
     pollTimer = setInterval(() => {
       void (async () => {
         const latest = await fetchStatus()
+        if (disposed) return
         if (latest?.status === 'running' && latest.port) {
           stopPolling()
           resolvedPort.value = latest.port
           phase.value = 'running'
+          await nextTick()
+          if (disposed) return
+          registerSurface()
           return
         }
         if (Date.now() > deadline) {
           stopPolling()
           phase.value = 'error'
           errorMessage.value = latest?.status || 'timeout'
+          workspaceBrowserSurfaces.delete(props.tab.id)
         }
       })()
     }, 1_000)
   } catch (error) {
+    if (disposed) return
+    stopPolling()
     phase.value = 'error'
     errorMessage.value = error instanceof Error ? error.message : String(error)
+    workspaceBrowserSurfaces.delete(props.tab.id)
   }
 }
 
@@ -109,8 +127,12 @@ function startRuntimeWatch (): void {
     if (phase.value !== 'running') return
     void (async () => {
       const latest = await fetchStatus()
+      if (disposed) return
       if (latest?.status === 'running' && latest.port && latest.port !== resolvedPort.value) {
         resolvedPort.value = latest.port
+        await nextTick()
+        if (disposed) return
+        registerSurface()
       } else if (latest?.status && latest.status !== 'running' && latest.status !== 'starting') {
         phase.value = 'error'
         errorMessage.value = latest.status
@@ -121,27 +143,41 @@ function startRuntimeWatch (): void {
 }
 
 function registerSurface (): void {
-  if (phase.value !== 'running' || !appUrl.value) return
+  if (disposed || phase.value === 'error' || phase.value === 'missing') return
   workspaceBrowserSurfaces.set(props.tab.id, {
-    url: appUrl.value,
+    kind: 'project',
+    url: appUrl.value || '',
     title: projectName.value,
     handle: browserRef.value
   })
 }
 
 function handleStateChange (payload: BrowserAppStatePayload): void {
+  if (disposed || phase.value !== 'running') return
   if (!props.tab.state) props.tab.state = {}
   props.tab.state.port = resolvedPort.value
   workspaceBrowserSurfaces.set(props.tab.id, {
-    url: appUrl.value || payload.url,
+    kind: 'project',
+    url: payload.url || appUrl.value,
     title: projectName.value,
     handle: browserRef.value
   })
 }
 
-onMounted(() => {
+onMounted(async () => {
+  await nextTick()
+  if (disposed) return
+  registerSurface()
   void resolveRuntime(true)
   startRuntimeWatch()
+})
+
+watch(browserRef, (handle) => {
+  if (handle) registerSurface()
+})
+
+watch(appUrl, () => {
+  registerSurface()
 })
 
 onActivated(() => {
@@ -150,6 +186,7 @@ onActivated(() => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   stopPolling()
   if (watchTimer != null) {
     clearInterval(watchTimer)

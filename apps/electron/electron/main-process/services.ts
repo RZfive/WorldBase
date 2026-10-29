@@ -34,7 +34,8 @@ import { DailySuggestionStore } from '../../src/main/settings/daily-suggestion-s
 import { DailySuggestionService, type SuggestionProjectContext } from '../../src/main/suggestions/daily-suggestion-service.js'
 import { getMainLocale } from '../../src/main/i18n/main-i18n.js'
 import type { AppUpdateState } from '../../src/shared/app-update-types.js'
-import type { BrowserAutomationAction, BrowserAutomationArticle, BrowserAutomationActionResult, BrowserAutomationSnapshot } from '../../src/shared/page-automation-types.js'
+import type { BrowserAutomationAction, BrowserAutomationArticle, BrowserAutomationActionResult, BrowserAutomationSearchResults, BrowserAutomationSnapshot, PageAutomationRendererRequest, PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
+import { validateAiBrowserTarget } from '../../src/shared/web-target-validation.js'
 import type { WorkspaceTabControlRequest } from '../../src/shared/workspace-control-types.js'
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AgentDefinition, AgentGroupDefinition } from '../../src/shared/agent-workspace-types.js'
@@ -380,9 +381,10 @@ function saveRustNativeMcpServer (result: unknown): string | null {
 
 async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpcResult> {
   if (request.requestKind === 'page_automation') {
+    const conversationId = request.conversationId
     const action = request.payload.action
     if (action === 'read') {
-      return await requestPageAutomationFromRenderer<BrowserAutomationSnapshot>({ type: 'snapshot' }) as unknown as JsonRpcResult
+      return await requestPageAutomationFromRenderer<BrowserAutomationSnapshot>({ type: 'snapshot' }, undefined, conversationId) as unknown as JsonRpcResult
     }
     const actions = Array.isArray(request.payload.actions) ? request.payload.actions : []
     let result: BrowserAutomationActionResult = { ok: true, type: 'wait', timeoutMs: 0 }
@@ -390,7 +392,7 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
       result = await requestPageAutomationFromRenderer<BrowserAutomationActionResult>({
         type: 'action',
         action: action as BrowserAutomationAction
-      })
+      }, undefined, conversationId)
     }
     return result as unknown as JsonRpcResult
   }
@@ -437,7 +439,13 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
     const mode = request.payload.mode === 'window' ? 'window' : 'embed'
     if (win.isMinimized()) win.restore()
     win.focus()
-    win.webContents.send('project:openInShell', { projectId, mode })
+    win.webContents.send('project:openInShell', {
+      projectId,
+      mode,
+      ...(typeof request.conversationId === 'string' && request.conversationId.trim()
+        ? { conversationId: request.conversationId.trim() }
+        : {})
+    })
     return { success: true, project_id: projectId, mode, opened_via: 'shell_ui' }
   }
 
@@ -449,9 +457,24 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
       throw new Error('open_workspace_tab requires kind "folder", "document", "browser", "terminal" or "project"')
     }
     const payload: Record<string, unknown> = {}
+    const rawBrowserUrl = kind === 'browser' && typeof request.payload.url === 'string'
+      ? request.payload.url.trim()
+      : ''
+    if (rawBrowserUrl) {
+      const validation = validateAiBrowserTarget(rawBrowserUrl)
+      if (!validation.ok) {
+        return {
+          success: false,
+          kind,
+          code: 'unsafe_browser_target',
+          error: `open_workspace_tab rejected browser URL: ${validation.reason}`
+        }
+      }
+      payload.url = validation.url
+    }
     if (typeof request.payload.rootPath === 'string' && request.payload.rootPath.trim()) payload.rootPath = request.payload.rootPath
     if (typeof request.payload.filePath === 'string' && request.payload.filePath.trim()) payload.filePath = request.payload.filePath
-    if (typeof request.payload.url === 'string' && request.payload.url.trim()) payload.url = request.payload.url
+    if (!rawBrowserUrl && typeof request.payload.url === 'string' && request.payload.url.trim()) payload.url = request.payload.url
     if (typeof request.payload.activeFilePath === 'string' && request.payload.activeFilePath.trim()) payload.activeFilePath = request.payload.activeFilePath
     if (typeof request.payload.projectId === 'string' && request.payload.projectId.trim()) payload.projectId = request.payload.projectId
     if (win.isMinimized()) win.restore()
@@ -833,28 +856,49 @@ function scheduledTaskServiceRetireNodeLoop (): void {
 
 async function handleRustPermissionRequest (request: { requestId: string; toolName: string; argsSummary: string; sessionId: string }): Promise<boolean> {
   const win = getActiveAiRequestWindow()
-  if (!win || win.isDestroyed()) return false
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return false
   return await new Promise((resolve) => {
     let settled = false
     const finish = (approved: boolean) => {
       if (settled) return
       settled = true
       ipcMain.removeListener('auth:response', onResponse)
-      clearTimeout(timeout)
+      win.removeListener('closed', onWindowClosed)
+      clearInterval(authModePoll)
+      try {
+        if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+          win.webContents.send('auth:resolved', { requestId: request.requestId, approved })
+        }
+      } catch {
+        // The window disappeared while the request was settling.
+      }
       resolve(approved)
     }
     const onResponse = (_event: unknown, payload: { requestId?: string; approved?: boolean }) => {
       if (payload?.requestId !== request.requestId) return
       finish(payload.approved === true)
     }
-    const timeout = setTimeout(() => finish(false), 300_000)
+    // Closing the window is a cancellation, not a timeout: nobody can answer
+    // the dialog anymore, so release the waiting tool instead of blocking the
+    // run forever. A live window waits for the user indefinitely.
+    const onWindowClosed = () => finish(false)
+    // Switching the session to auto-approve while this dialog is already open
+    // must settle the pending request too, matching the legacy Node auth flow.
+    const authModePoll = setInterval(() => {
+      if (mainState.rustHarness?.isSessionAutoApproved(request.sessionId)) finish(true)
+    }, 200)
     ipcMain.on('auth:response', onResponse)
-    win.webContents.send('auth:request', {
-      requestId: request.requestId,
-      sessionId: request.sessionId,
-      title: 'Rust harness permission',
-      detail: `${request.toolName}: ${request.argsSummary}`
-    })
+    win.once('closed', onWindowClosed)
+    try {
+      win.webContents.send('auth:request', {
+        requestId: request.requestId,
+        sessionId: request.sessionId,
+        title: 'Rust harness permission',
+        detail: `${request.toolName}: ${request.argsSummary}`
+      })
+    } catch {
+      finish(false)
+    }
   })
 }
 
@@ -925,14 +969,20 @@ export async function initializeServices (): Promise<void> {
     imageLibraryStore: mainState.imageLibraryStore ?? undefined,
     usageStore: mainState.usageStore ?? undefined,
     getMainWindow: () => getActiveAiRequestWindow(),
-    readActivePage: async (mode?: 'interactive' | 'article') => {
+    readActivePage: async (mode?: 'interactive' | 'article' | 'search_results', tabId?: string, conversationId?: string) => {
       if (mode === 'article') {
-        return await requestPageAutomationFromRenderer<BrowserAutomationArticle>({ type: 'snapshot', mode: 'article' })
+        return await requestPageAutomationFromRenderer<BrowserAutomationArticle>({ type: 'snapshot', mode: 'article' }, tabId, conversationId)
       }
-      return await requestPageAutomationFromRenderer<BrowserAutomationSnapshot>({ type: 'snapshot' })
+      if (mode === 'search_results') {
+        return await requestPageAutomationFromRenderer<BrowserAutomationSearchResults>({ type: 'snapshot', mode: 'search_results' }, tabId, conversationId)
+      }
+      return await requestPageAutomationFromRenderer<BrowserAutomationSnapshot>({ type: 'snapshot' }, tabId, conversationId)
     },
-    interactWithActivePage: async (action: BrowserAutomationAction) => {
-      return await requestPageAutomationFromRenderer<BrowserAutomationActionResult>({ type: 'action', action })
+    interactWithActivePage: async (action: BrowserAutomationAction, tabId?: string, conversationId?: string) => {
+      return await requestPageAutomationFromRenderer<BrowserAutomationActionResult>({ type: 'action', action }, tabId, conversationId)
+    },
+    runPageAutomation: async (request, tabId?: string, conversationId?: string) => {
+      return await requestPageAutomationFromRenderer(request, tabId, conversationId)
     },
     requestWorkspaceTabControl: async (request) => {
       return await requestWorkspaceTabControlFromRenderer(request)

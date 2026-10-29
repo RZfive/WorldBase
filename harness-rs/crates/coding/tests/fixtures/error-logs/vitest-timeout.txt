@@ -1,0 +1,4 @@
+ FAIL  src/lib/math.test.ts > math > clamps values
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ src/lib/math.test.ts:22:3

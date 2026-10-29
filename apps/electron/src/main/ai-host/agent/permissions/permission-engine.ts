@@ -114,7 +114,8 @@ const HIGH_RISK_TOOLS = new Set([
   'local_file_read',
   'local_file_write',
   'local_run_command',
-  'interact_current_page'
+  'interact_current_page',
+  'fill_current_page_form'
 ])
 
 /**

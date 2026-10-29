@@ -3,19 +3,22 @@ import { hasRenderableContent } from './message-utils'
 
 /**
  * Codex-style work summary segmentation: consecutive thinking + tool + web
- * runs collapse into ONE collapsible group, narration content blocks
- * written between tool calls (typically describing the file writes/edits just
- * performed) fold into that same group instead of rendering as full paragraphs
- * between tool rows, and settled "已写入" file-preview rows fold in too — so a
- * long run of file writes stays one compact row.
+ * runs collapse into ONE collapsible group, and settled "已写入" file-preview
+ * rows fold in too — so a long run of tool calls stays one compact row.
  *
- * Two things always stay outside the group: the message's trailing content
- * (the actual answer, i.e. a content block with no work block after it) and
- * the file-preview row that is still being written (active) during streaming —
- * it drops into the group automatically once it settles. Message rows without
- * any work (plain user text) are never grouped. Purely a render-level
- * transform, so stored/legacy conversations group the same way as live ones.
+ * Assistant narration joins the group when more work follows it, so text
+ * emitted between tool calls does not break the trace apart. While a message
+ * is streaming, output also defaults into the summary: text that is still
+ * waiting for a possible tool call avoids rendering outside and then jumping
+ * into the group. Once the message settles, trailing text without later work
+ * renders as its own visible paragraph. Message rows without any work (plain
+ * user text) are never grouped. Purely a render-level transform, so
+ * stored/legacy conversations group the same way as live ones.
  */
+
+export interface BuildRenderSegmentsOptions {
+  streaming?: boolean
+}
 
 export type WorkBurstBlock = Extract<ChatMessageBlock, { kind: 'thinking' | 'tool' | 'web_search' | 'web_fetch' | 'file_preview' | 'content' }>
 
@@ -36,17 +39,21 @@ const GROUPABLE_KINDS = new Set<ChatMessageBlock['kind']>(['thinking', 'tool', '
 
 const WORK_KINDS = new Set<ChatMessageBlock['kind']>(['tool', 'web_search', 'web_fetch'])
 
-function joinsWorkGroup (block: ChatMessageBlock, blocks: ChatMessageBlock[], blockIndex: number): boolean {
+function joinsWorkGroup (
+  block: ChatMessageBlock,
+  hasWorkAfter: boolean,
+  options: BuildRenderSegmentsOptions
+): boolean {
   if (GROUPABLE_KINDS.has(block.kind)) return true
   // Settled written-file rows fold into the trace; the row still being
   // written stays visible while it streams.
   if (block.kind === 'file_preview') return !block.active
-  return block.kind === 'content' && hasWorkAfter(blocks, blockIndex)
-}
-
-function hasWorkAfter (blocks: ChatMessageBlock[], fromIndex: number): boolean {
-  for (let index = fromIndex + 1; index < blocks.length; index++) {
-    if (WORK_KINDS.has(blocks[index].kind)) return true
+  if (block.kind === 'content') {
+    // Live output defaults into the summary so it does not render outside and
+    // then jump into the group when the next tool call starts.
+    if (options.streaming) return true
+    // Settled narration between work steps belongs to the same group.
+    return hasWorkAfter
   }
   return false
 }
@@ -57,24 +64,47 @@ function hasRenderableBurstBlock (block: WorkBurstBlock): boolean {
   return true
 }
 
-export function buildRenderSegments (blocks: ChatMessageBlock[]): MessageRenderSegment[] {
+export function buildRenderSegments (
+  blocks: ChatMessageBlock[],
+  options: BuildRenderSegmentsOptions = {}
+): MessageRenderSegment[] {
   const segments: MessageRenderSegment[] = []
   let run: WorkBurstEntry[] = []
+
+  // Suffix scan keeps segmentation linear while long streams re-render on
+  // every token; slicing the tail per content block was quadratic.
+  const workAfter = new Array<boolean>(blocks.length).fill(false)
+  let seenWork = false
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    workAfter[index] = seenWork
+    if (WORK_KINDS.has(blocks[index].kind)) seenWork = true
+  }
 
   const flushRun = () => {
     if (run.length === 0) return
     const renderable = run.filter(entry => hasRenderableBurstBlock(entry.block))
     const hasWork = renderable.some(entry => WORK_KINDS.has(entry.block.kind))
-    if (hasWork) {
+    const hasStreamingContent = options.streaming && renderable.some(entry => entry.block.kind === 'content')
+    // A splitter (todo/error/auth/...) can end a narration-only run while more
+    // work still follows it; keep that narration folded instead of releasing
+    // it outside and snapping it back into the next group on settle.
+    const hasWorkAhead = renderable.some(entry => {
+      return entry.block.kind === 'content' && workAfter[entry.blockIndex]
+    })
+    if (hasWork || hasStreamingContent || hasWorkAhead) {
+      // Key from the first run member, not the first renderable one: a content
+      // block can start empty then become renderable on the first token, and
+      // the group must not remount when that happens.
+      const keyBlock = run[0].block
       segments.push({
         type: 'group',
-        key: `group-${renderable[0].block.id}`,
-        block: renderable[0].block,
-        blockIndex: renderable[0].blockIndex,
+        key: `group-${keyBlock.id}`,
+        block: keyBlock,
+        blockIndex: run[0].blockIndex,
         groupEntries: renderable
       })
     } else {
-      // Lone thinking pills / stray narration stay standalone rows.
+      // Lone thinking pills / stray file rows stay standalone rows.
       for (const entry of renderable) {
         segments.push({ type: 'single', key: entry.block.id, block: entry.block, blockIndex: entry.blockIndex, groupEntries: [] })
       }
@@ -83,7 +113,7 @@ export function buildRenderSegments (blocks: ChatMessageBlock[]): MessageRenderS
   }
 
   blocks.forEach((block, blockIndex) => {
-    if (joinsWorkGroup(block, blocks, blockIndex)) {
+    if (joinsWorkGroup(block, workAfter[blockIndex], options)) {
       run.push({ block: block as WorkBurstBlock, blockIndex })
       return
     }

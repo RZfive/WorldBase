@@ -57,7 +57,8 @@ export function createContentBlock (content: MessageContent = ''): ChatMessageBl
   return {
     id: createBlockId('content'),
     kind: 'content',
-    content
+    content,
+    startedAt: Date.now()
   }
 }
 
@@ -443,6 +444,24 @@ export function appendFinalContentBlock (message: ChatMessage, finalContent: Mes
         blocks.push(createContentBlock(finalContent))
       }
       return
+    }
+
+    // Providers can deliver answer text only in the final event. If the last
+    // content block sits before tool/web work, folding the answer into it
+    // would hide the answer inside the work summary — append a new trailing
+    // block so it is released outside after the turn settles.
+    const lastContentBlock = [...blocks].reverse().find((block): block is Extract<ChatMessageBlock, { kind: 'content' }> => block.kind === 'content')
+    if (lastContentBlock) {
+      const lastContentIndex = blocks.indexOf(lastContentBlock)
+      const hasWorkAfter = blocks.slice(lastContentIndex + 1).some(block => {
+        return block.kind === 'tool' || block.kind === 'web_search' || block.kind === 'web_fetch'
+      })
+      if (hasWorkAfter) {
+        if (finalContent.trim().length > 0) {
+          blocks.push(createContentBlock(finalContent))
+        }
+        return
+      }
     }
 
     if (textBlocks.length === 1) {

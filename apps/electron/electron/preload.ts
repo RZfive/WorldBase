@@ -3,7 +3,7 @@ import type { ComputerUsePermissionTarget } from '../src/shared/computer-use-per
 import type { ConversationMetadataPatch } from '../src/shared/conversation-metadata.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
-import type { ActivePageAutomationContext, BrowserPageContextMenuPayload, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
+import type { ActivePageAutomationContext, BrowserAutomationNetworkEntry, BrowserPageContextMenuPayload, BrowserPageKeyDispatchRequest, BrowserPageKeyDispatchResult, BrowserPageScreenshotRequest, BrowserPageScreenshotResult, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { WorkspaceTabControlRequestEnvelope, WorkspaceTabControlResponseEnvelope } from '../src/shared/workspace-control-types.js'
 import type {
   TerminalDataEvent,
@@ -21,6 +21,41 @@ import type { LongTermGoalChangeSet, LongTermGoalDefinition, LongTermGoalInterve
 import type { DocumentEditExportRequest, DocumentEditExportResult, DocumentEditImagePickResult, DocumentEditSourceState } from '../src/shared/document-edit-types.js'
 import type { DailySuggestionPreferences, DailySuggestionSnapshot } from '../src/shared/daily-suggestion-types.js'
 
+interface BrowserPageEmulationViewportRequest {
+  width: number
+  height: number
+  deviceScaleFactor?: number
+  mobile?: boolean
+}
+
+interface BrowserPageEmulationRequest {
+  webContentsId: number
+  media?: 'screen' | 'print'
+  colorScheme?: 'light' | 'dark' | 'no-preference'
+  reducedMotion?: 'reduce' | 'no-preference'
+  userAgent?: string
+  viewport?: BrowserPageEmulationViewportRequest
+  reset?: boolean
+  timeoutMs?: number
+}
+
+
+interface BrowserPageEmulationResult {
+  ok: true
+  emulated: {
+    media?: string
+    colorScheme?: string
+    reducedMotion?: string
+    userAgent?: string | null
+    viewport?: {
+      width: number
+      height: number
+      deviceScaleFactor: number
+      mobile: boolean
+    }
+  }
+}
+
 interface ChatMessage {
   role: string
   content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
@@ -34,12 +69,14 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_session_state' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'group_board' | 'group_direct_reply' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_session_state' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'group_board' | 'group_direct_reply' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'coding_status' | 'coding_diff' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   message?: ChatMessage
   thinking?: string
   error?: string
+  codingStatus?: import('../src/shared/coding-status-types.js').CodingStatus
+  codingDiff?: import('../src/shared/coding-status-types.js').CodingDiffState
   stage?: string
   detail?: string
   items?: TodoItem[]
@@ -524,7 +561,7 @@ interface SystemStatusSnapshot {
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext) => Promise<{ ok: boolean }>
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext, codingWorkspaceRoot?: string) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
@@ -532,6 +569,10 @@ export interface ElectronAPI {
   onPageAutomationRequest: (callback: (payload: PageAutomationRequestEnvelope) => void) => () => void
   onBrowserPageContextMenu: (callback: (payload: BrowserPageContextMenuPayload) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
+  captureBrowserPageScreenshot: (request: BrowserPageScreenshotRequest) => Promise<BrowserPageScreenshotResult>
+  dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => Promise<BrowserPageKeyDispatchResult>
+  getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => Promise<BrowserAutomationNetworkEntry[]>
+  emulateBrowserPage: (request: BrowserPageEmulationRequest) => Promise<BrowserPageEmulationResult>
   onWorkspaceTabControl: (callback: (payload: WorkspaceTabControlRequestEnvelope) => void) => () => void
   resolveWorkspaceTabControl: (payload: WorkspaceTabControlResponseEnvelope) => void
   getAboutInfo: () => Promise<AppAboutInfo>
@@ -829,7 +870,7 @@ export interface ElectronAPI {
 contextBridge.exposeInMainWorld('electronAPI', {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chat', messages, providerId, modelId, reasoningStrength, agentId, groupId, channelBindingId, targetProjectId, activePageContext, folderWorkspaceRoot),
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot, computerUseEnabled, activeTerminalContext, activeCodeContext),
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext, codingWorkspaceRoot?: string) => ipcRenderer.invoke('ai:chatStream', messages, sessionId, conversationId, providerId, modelId, targetProjectId, authMode, reasoningStrength, agentId, groupId, channelBindingId, activePageContext, temperature, folderWorkspaceRoot, computerUseEnabled, activeTerminalContext, activeCodeContext, codingWorkspaceRoot),
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => ipcRenderer.invoke('ai:updateSessionAuthMode', sessionId, authMode),
   stopChatStream: (sessionId: string) => ipcRenderer.invoke('ai:stopStream', sessionId),
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => ipcRenderer.invoke('ai:groupInject', sessionId, groupId, content, targetAgentIds),
@@ -853,6 +894,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => {
     ipcRenderer.send('pageAutomation:response', payload)
   },
+  captureBrowserPageScreenshot: (request: BrowserPageScreenshotRequest) => ipcRenderer.invoke('pageAutomation:captureScreenshot', request),
+  dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => ipcRenderer.invoke('pageAutomation:dispatchKey', request),
+  getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => ipcRenderer.invoke('pageAutomation:getNetworkLog', webContentsId, limit),
+  emulateBrowserPage: (request: BrowserPageEmulationRequest) => ipcRenderer.invoke('pageAutomation:emulate', request),
   getAboutInfo: () => ipcRenderer.invoke('app:getAboutInfo'),
   getAppUpdateState: () => ipcRenderer.invoke('appUpdate:getState'),
   getAppUpdateConfig: () => ipcRenderer.invoke('appUpdate:getConfig'),

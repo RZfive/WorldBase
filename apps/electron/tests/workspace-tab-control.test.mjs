@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   applyWorkspaceControlToSnapshot,
@@ -9,7 +10,10 @@ import {
   openWorkspaceTabInSnapshot,
   workspaceStore
 } from '../src/renderer/components/workspace/workspace-store.ts'
-import { registerWorkspaceTab } from '../src/renderer/components/workspace/tab-registry.ts'
+import {
+  listUserAddableWorkspaceTabDefinitions,
+  registerWorkspaceTab
+} from '../src/renderer/components/workspace/tab-registry.ts'
 
 // Minimal stand-ins for the built-in multi-instance kinds: the production
 // matchers (tab-registry-entries) pull in .vue components, so the tests
@@ -74,6 +78,51 @@ registerWorkspaceTab({
     String(tab.state?.filePath || '').trim().replace(/\//g, '\\').toLowerCase()
       === String(payload.filePath || '').trim().replace(/\//g, '\\').toLowerCase()
 })
+
+registerWorkspaceTab({
+  kind: 'project',
+  titleKey: 'test.project',
+  icon: 'project',
+  singleton: false,
+  minWidth: 0,
+  maxWidth: 0,
+  defaultWidth: 0,
+  component: null
+})
+
+registerWorkspaceTab({
+  kind: 'coding',
+  titleKey: 'test.coding',
+  icon: 'coding',
+  singleton: false,
+  userAddable: false,
+  minWidth: 0,
+  maxWidth: 0,
+  defaultWidth: 0,
+  component: null
+})
+
+registerWorkspaceTab({
+  kind: 'coding-diff',
+  titleKey: 'test.codingDiff',
+  icon: 'diff',
+  singleton: false,
+  userAddable: false,
+  minWidth: 0,
+  maxWidth: 0,
+  defaultWidth: 0,
+  component: null
+})
+
+const builtinDefinitionsSource = readFileSync(
+  new URL('../src/renderer/components/workspace/tab-registry-entries.ts', import.meta.url),
+  'utf8'
+)
+
+function builtinDefinitionBlock (kind) {
+  const escaped = kind.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`kind: '${escaped}'([\\s\\S]*?)\\n  \\}\\)`).exec(builtinDefinitionsSource)?.[1] ?? ''
+}
 
 /** Restores the module-singleton store between tests. */
 function resetStore (tabs) {
@@ -234,4 +283,28 @@ test('hydrateWorkspaceSnapshot seeds from legacy mirrors and leaves live tabs al
     { folderWorkspace: { rootPath: '/stale', rootName: 'stale' } }
   )
   assert.deepEqual(untouched.tabs.map(tab => tab.id), ['browser-a'])
+})
+
+test('system-managed coding tabs are excluded from the add-tab menu', () => {
+  const addableKinds = listUserAddableWorkspaceTabDefinitions().map(definition => definition.kind)
+
+  for (const kind of ['folder', 'document', 'browser', 'terminal', 'project']) {
+    assert.ok(addableKinds.includes(kind), `${kind} should remain user-addable`)
+  }
+  for (const kind of ['coding', 'coding-diff']) {
+    assert.ok(!addableKinds.includes(kind), `${kind} should not be user-addable`)
+  }
+})
+
+test('built-in coding tab registrations opt out of the add-tab menu', () => {
+  for (const kind of ['coding', 'coding-diff']) {
+    const block = builtinDefinitionBlock(kind)
+    assert.ok(block, `missing built-in ${kind} registration`)
+    assert.match(block, /userAddable:\s*false/)
+  }
+  for (const kind of ['folder', 'document', 'browser', 'terminal', 'project']) {
+    const block = builtinDefinitionBlock(kind)
+    assert.ok(block, `missing built-in ${kind} registration`)
+    assert.doesNotMatch(block, /userAddable:\s*false/)
+  }
 })

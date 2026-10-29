@@ -14,7 +14,11 @@ import type {
 } from '../../../../shared/workspace-control-types.js'
 import type {
   BrowserAutomationAction,
+  BrowserAutomationArticle,
   BrowserAutomationActionResult,
+  BrowserAutomationDiagnostics,
+  BrowserAutomationScreenshot,
+  BrowserAutomationSearchResults,
   BrowserAutomationSnapshot
 } from '../../../../shared/page-automation-types.js'
 import type {
@@ -107,6 +111,10 @@ export interface ChatPanelEmit {
   (e: 'workspaceTabRequestConsumed'): void
   (e: 'workspaceTabControlResult', response: WorkspaceTabControlResponseEnvelope): void
   (e: 'workspaceDraftRequestConsumed'): void
+  /** A background conversation opened/activated a browser or project tab. */
+  (e: 'backgroundWorkspaceTabOpened', payload: BackgroundWorkspaceTabOpenedPayload): void
+  /** A background conversation closed a workspace tab. */
+  (e: 'backgroundWorkspaceTabClosed', payload: BackgroundWorkspaceTabClosedPayload): void
   /** Tracks the displayed conversation so the shell can scope AI workspace requests. */
   (e: 'currentConversationChange', conversationId: string | null): void
   (e: 'pageSurfaceChange', surface: WorkspacePageSurfaceSummary | null): void
@@ -117,17 +125,48 @@ export interface ChatPanelEmit {
 }
 
 /**
+ * A workspace page tab opened or activated by a background conversation.
+ * The app shell uses it to attach (or recreate) a hidden page host for that
+ * tab without the conversation being displayed.
+ */
+export interface BackgroundWorkspaceTabOpenedPayload {
+  conversationId: string
+  tabId: string
+  kind: string
+  title?: string
+  url?: string
+  projectId?: string
+}
+
+/** A workspace tab closed by a background conversation's AI run. */
+export interface BackgroundWorkspaceTabClosedPayload {
+  conversationId: string
+  tabId: string
+  kind: string
+}
+
+/**
  * Live page state of the active workspace browser tab, forwarded to the app
  * shell so page automation tools can target it when no embedded app page is
  * active.
  */
 export interface WorkspacePageSurfaceSummary {
+  /** Conversation whose live workspace produced this surface. */
+  conversationId: string | null
   appId: string
+  kind: 'browser' | 'project'
   title: string
   url: string
   handle: {
     captureAutomationSnapshot: () => Promise<BrowserAutomationSnapshot>
+    captureArticleSnapshot?: () => Promise<BrowserAutomationArticle>
+    captureSearchResults?: () => Promise<BrowserAutomationSearchResults>
+    captureScreenshot?: (options?: { fullPage?: boolean; maxWidth?: number; format?: 'png' | 'jpeg'; quality?: number }) => Promise<BrowserAutomationScreenshot>
+    captureDiagnostics?: (options?: { clear?: boolean }) => Promise<BrowserAutomationDiagnostics>
     runAutomationAction: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
+    getURL?: () => string | null
+    isLoading?: () => boolean
+    waitForReady?: (timeoutMs?: number) => Promise<void>
   } | null
 }
 

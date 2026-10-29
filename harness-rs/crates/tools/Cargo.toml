@@ -34,6 +34,7 @@ worldbase-mcp-client = { path = "../mcp-client" }
 worldbase-search = { path = "../search" }
 worldbase-docs = { path = "../docs" }
 worldbase-exec = { path = "../exec" }
+worldbase-coding = { path = "../coding" }
 worldbase-project-runtime = { path = "../project-runtime" }
 worldbase-providers = { path = "../providers" }
 rusqlite = { workspace = true }

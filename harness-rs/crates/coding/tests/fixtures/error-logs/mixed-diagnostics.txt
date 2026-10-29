@@ -1,0 +1,4 @@
+src/app/App.tsx(10,15): error TS2304: Cannot find name 'missingState'.
+src/app/App.tsx(14,7): error TS2339: Property 'user' does not exist on type 'AppState'.
+src/lib/format.ts:12:3  error  'legacy' is defined but never used  no-unused-vars
+src/lib/format.ts:14:3  warning  React Hook useEffect has a missing dependency: 'value'  react-hooks/exhaustive-deps

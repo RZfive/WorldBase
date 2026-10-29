@@ -18,6 +18,7 @@ import {
   type ElectronToolRegistryServices,
   type ElectronToolRunContext
 } from './electron-tool-registry.js'
+import { codingStatusForCancelledRun, type CodingDiffState, type CodingStatus } from '../../shared/coding-status-types.js'
 import type {
   AIConfigInput,
   AIHarness,
@@ -188,6 +189,8 @@ export class RustHarnessEngine implements AIHarness {
     )
     const history = priorMessages
       .filter(message => message.role !== 'system' && message.role !== 'developer') as RustSyncMessage[]
+    let codingModeEnabled = options?.codingMode ??
+      Boolean(options?.targetProjectId || this.defaultTargetProjectId || options?.workspaceRoot)
     const queue: StreamEvent[] = []
     let terminal = false
     let wake: (() => void) | null = null
@@ -205,6 +208,8 @@ export class RustHarnessEngine implements AIHarness {
     // tool_call frame supplies the args (e.g. project_id) needed to resolve
     // it to an absolute path for the clickable written-file card.
     const pendingToolArgs = new Map<string, Record<string, unknown>>()
+    let codingStatus: CodingStatus | null = null
+    let codingDiff: CodingDiffState | null = null
     const providerCallId = options?.aiLogger?.logProviderCallStart({
       stream: true,
       model: effectiveConfig.model || 'default',
@@ -243,6 +248,29 @@ export class RustHarnessEngine implements AIHarness {
           pendingToolArgs.set(frame.call_id, args as Record<string, unknown>)
         }
       }
+      if (frame.kind === 'tool_call') {
+        const toolName = stringValue(frame.name)
+        if (!codingModeEnabled && shouldActivateCodingMode(toolName, frame.args)) {
+          codingModeEnabled = true
+          // A coding tool already emits its own phase below; only explicit
+          // mode selection and implicit non-coding actions need a separate
+          // activation status.
+          if (!isCodingToolName(toolName)) {
+            codingStatus = codingStatusForModeActivation(codingStatus)
+            emit({ type: 'coding_status', status: codingStatus })
+            // Clear a previous run's diff so a newly selected coding mode does
+            // not show stale files before the first real edit arrives.
+            if (!codingDiff?.files.length) {
+              codingDiff = { files: [], updatedAt: Date.now() }
+              emit({ type: 'coding_diff', diff: codingDiff })
+            }
+          }
+        }
+        if (isCodingToolName(toolName)) {
+          codingStatus = codingStatusForToolStart(codingStatus, toolName)
+          emit({ type: 'coding_status', status: codingStatus })
+        }
+      }
       if (frame.kind === 'tool_result' && this.isNativeToolResult(frame, customTools)) {
         nativeSideEffects = nativeSideEffects
           .then(async () => await this.handleNativeToolResult(frame, runOptions))
@@ -260,6 +288,38 @@ export class RustHarnessEngine implements AIHarness {
         // stream events the renderer renders as WebSearch/WebFetch cards.
         for (const event of webToolResultEvents(stringValue(frame.name), frame.content)) {
           emit(event)
+        }
+        if (frame.isError !== true) {
+          const codingEvents = codingEventsForToolResult(
+            stringValue(frame.name),
+            frame.content,
+            codingStatus,
+            codingDiff
+          )
+          if (codingEvents.status) {
+            codingStatus = codingEvents.status
+            emit({ type: 'coding_status', status: codingStatus })
+          }
+          if (codingEvents.diff) {
+            codingDiff = codingEvents.diff
+            emit({ type: 'coding_diff', diff: codingDiff })
+          }
+          if (codingModeEnabled) {
+            const genericEvents = codingEventsForGenericFileResult(
+              stringValue(frame.name),
+              frame.content,
+              codingStatus,
+              codingDiff
+            )
+            if (genericEvents.status) {
+              codingStatus = genericEvents.status
+              emit({ type: 'coding_status', status: codingStatus })
+            }
+            if (genericEvents.diff) {
+              codingDiff = genericEvents.diff
+              emit({ type: 'coding_diff', diff: codingDiff })
+            }
+          }
         }
         // Successful write-style results surface as the same file_preview
         // events the renderer renders as a clickable written-file card. They
@@ -292,6 +352,11 @@ export class RustHarnessEngine implements AIHarness {
         // The IPC boundary already owns terminal rendering. Do not yield a
         // completed event and then throw an abort, or a failure event twice.
         if (streamWasAborted) {
+          const cancelledStatus = codingStatusForCancelledRun(codingStatus)
+          if (cancelledStatus && cancelledStatus !== codingStatus) {
+            codingStatus = cancelledStatus
+            emit({ type: 'coding_status', status: cancelledStatus })
+          }
           wake?.()
           wake = null
           return
@@ -320,6 +385,7 @@ export class RustHarnessEngine implements AIHarness {
         customTools,
         workspaceRoot: options?.workspaceRoot,
         targetProjectId: options?.targetProjectId ?? this.defaultTargetProjectId,
+        codingMode: codingModeEnabled,
         memoryScopes: options?.memoryScopes,
         memoryQuery: textFromContent(pending.content),
         memoryEmbedding: options?.memoryEmbedding,
@@ -589,6 +655,350 @@ function parseToolResult (content: unknown): unknown {
   }
 }
 
+/**
+ * The model owns the final work-mode decision. `select_work_mode` is the
+ * explicit signal; creating a project or calling a coding tool is the implicit
+ * fallback for models that skip the mode call. Generic file writes stay in the
+ * normal flow so a simple text edit cannot accidentally arm the coding gate.
+ */
+export function shouldActivateCodingMode (name: string, args: unknown): boolean {
+  if (!name) return false
+  if (name === 'select_work_mode') {
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return false
+    const mode = (args as Record<string, unknown>).mode
+    return typeof mode === 'string' && mode.trim().toLowerCase() === 'coding'
+  }
+  return name === 'create_project' ||
+    name === 'create_lightweight_app' ||
+    name.startsWith('coding_')
+}
+
+function codingStatusForModeActivation (previous: CodingStatus | null): CodingStatus {
+  const base = previous ?? emptyCodingStatus()
+  return {
+    ...base,
+    phase: 'plan',
+    updatedAt: Date.now()
+  }
+}
+
+const CODING_TOOL_NAMES = new Set([
+  'coding_edit',
+  'coding_apply',
+  'coding_verify',
+  'coding_diagnose'
+])
+
+function isCodingToolName (name: string): boolean {
+  return CODING_TOOL_NAMES.has(name)
+}
+
+function codingPhaseForTool (name: string): CodingStatus['phase'] {
+  if (name === 'coding_verify') return 'verify'
+  if (name === 'coding_diagnose') return 'diagnose'
+  if (name === 'coding_edit' || name === 'coding_apply') return 'edit'
+  return 'idle'
+}
+
+function emptyCodingStatus (): CodingStatus {
+  return {
+    phase: 'idle',
+    repairRound: 0,
+    verificationAttempts: 0,
+    changedFiles: [],
+    commands: [],
+    diagnostics: [],
+    dependencyIssues: [],
+    repairInstructions: [],
+    updatedAt: Date.now()
+  }
+}
+
+function codingStatusForToolStart (previous: CodingStatus | null, name: string): CodingStatus {
+  const base = previous ?? emptyCodingStatus()
+  return {
+    ...base,
+    phase: codingPhaseForTool(name),
+    updatedAt: Date.now()
+  }
+}
+
+interface CodingToolResultEvents {
+  status: CodingStatus | null
+  diff: CodingDiffState | null
+}
+
+export function codingEventsForToolResult (
+  name: string,
+  content: unknown,
+  previousStatus: CodingStatus | null,
+  previousDiff: CodingDiffState | null
+): CodingToolResultEvents {
+  if (!isCodingToolName(name)) return { status: null, diff: null }
+  const parsed = asRecord(parseToolResult(content))
+  if (!parsed) return { status: null, diff: null }
+  const base = previousStatus ?? emptyCodingStatus()
+
+  if (name === 'coding_edit' || name === 'coding_apply') {
+    const changedFiles = codingChangedFiles(parsed)
+    return {
+      status: {
+        ...base,
+        phase: 'edit',
+        changedFiles: uniqueStrings([...base.changedFiles, ...changedFiles]),
+        updatedAt: Date.now()
+      },
+      diff: codingDiffFromResult(name, parsed, previousDiff)
+    }
+  }
+
+  if (name === 'coding_verify') {
+    const passed = parsed.passed === true
+    const diagnostics = normalizeCodingDiagnostics(parsed.diagnostics)
+    const commands = normalizeCodingCommands(parsed.outcomes)
+    return {
+      status: {
+        ...base,
+        phase: passed ? 'complete' : 'diagnose',
+        verificationAttempts: base.verificationAttempts + 1,
+        commands,
+        diagnostics,
+        stopReason: passed ? 'verificationPassed' : 'verificationFailed',
+        updatedAt: Date.now()
+      },
+      diff: null
+    }
+  }
+
+  const diagnosis = asRecord(parsed.diagnosis)
+  const dependency = asRecord(parsed.dependency)
+  const repair = asRecord(parsed.repair)
+  const diagnostics = normalizeDiagnosisMatches(diagnosis)
+  const dependencyIssues = normalizeDependencyIssues(dependency)
+  const repairInstructions = uniqueStrings([
+    ...stringArray(repair?.instructions),
+    ...stringArray(diagnosis?.repairInstructions)
+  ])
+  const stopReason = stringValue(repair?.stopReason) || undefined
+  const shouldRetry = repair?.shouldRetry === true
+  return {
+    status: {
+      ...base,
+      phase: shouldRetry ? 'repair' : (stopReason ? 'blocked' : 'diagnose'),
+      diagnostics: diagnostics.length > 0 ? diagnostics : base.diagnostics,
+      dependencyIssues,
+      repairInstructions,
+      stopReason,
+      summary: stringValue(diagnosis?.summary) || base.summary,
+      updatedAt: Date.now()
+    },
+    diff: null
+  }
+}
+
+const GENERIC_FILE_WRITE_OPERATIONS = new Map<string, string>([
+  ['write_workspace_file', 'write'],
+  ['edit_workspace_file', 'edit'],
+  ['patch_workspace_file', 'patch'],
+  ['write_project_file', 'write'],
+  ['edit_project_file', 'edit'],
+  ['patch_project_file', 'patch']
+])
+
+export function codingEventsForGenericFileResult (
+  name: string,
+  content: unknown,
+  previousStatus: CodingStatus | null,
+  previousDiff: CodingDiffState | null
+): CodingToolResultEvents {
+  const operation = GENERIC_FILE_WRITE_OPERATIONS.get(name)
+  if (!operation) return { status: null, diff: null }
+  const parsed = asRecord(parseToolResult(content))
+  if (!parsed) return { status: null, diff: null }
+  const filePath = stringValue(parsed.file_path)
+  if (!filePath) return { status: null, diff: null }
+  const base = previousStatus ?? emptyCodingStatus()
+  const status: CodingStatus = {
+    ...base,
+    phase: 'edit',
+    changedFiles: uniqueStrings([...base.changedFiles, filePath]),
+    updatedAt: Date.now()
+  }
+  const before = typeof parsed.before_content === 'string' ? parsed.before_content : null
+  const after = typeof parsed.after_content === 'string' ? parsed.after_content : null
+  if (parsed.content_truncated === true || before === null || after === null) {
+    return { status, diff: null }
+  }
+  const next: CodingDiffState = previousDiff
+    ? { files: previousDiff.files.map(file => ({ ...file, changes: [...file.changes] })), updatedAt: Date.now() }
+    : { files: [], updatedAt: Date.now() }
+  const file = { filePath, operationCount: 1, changes: [{ operation, before, after }] }
+  const index = next.files.findIndex(entry => entry.filePath === filePath)
+  if (index >= 0) next.files[index] = file
+  else next.files.push(file)
+  return { status, diff: next }
+}
+
+function codingChangedFiles (parsed: Record<string, unknown>): string[] {
+  const direct = stringValue(parsed.filePath)
+  if (direct) return [direct]
+  const results = Array.isArray(parsed.results) ? parsed.results : []
+  return uniqueStrings(
+    results
+      .map(entry => stringValue(asRecord(entry)?.filePath))
+      .filter(Boolean)
+  )
+}
+
+function codingDiffFromResult (
+  name: string,
+  parsed: Record<string, unknown>,
+  previous: CodingDiffState | null
+): CodingDiffState {
+  const next: CodingDiffState = previous
+    ? { files: previous.files.map(file => ({ ...file, changes: [...file.changes] })), updatedAt: Date.now() }
+    : { files: [], updatedAt: Date.now() }
+
+  const upsert = (filePath: string, operationCount: number, changes: CodingDiffState['files'][number]['changes']): void => {
+    if (!filePath) return
+    const index = next.files.findIndex(file => file.filePath === filePath)
+    const file = { filePath, operationCount, changes }
+    if (index >= 0) next.files[index] = file
+    else next.files.push(file)
+  }
+
+  if (name === 'coding_edit') {
+    const filePath = stringValue(parsed.filePath)
+    const before = typeof parsed.before === 'string' ? parsed.before : ''
+    const after = typeof parsed.after === 'string' ? parsed.after : ''
+    const range = asRecord(parsed.byteRange)
+    upsert(filePath, 1, [{
+      operation: stringValue(parsed.operation) || 'replace',
+      before,
+      after,
+      ...(typeof range?.start === 'number' ? { startByte: range.start } : {}),
+      ...(typeof range?.end === 'number' ? { endByte: range.end } : {})
+    }])
+    return next
+  }
+
+  const results = Array.isArray(parsed.results) ? parsed.results : []
+  for (const entry of results) {
+    const result = asRecord(entry)
+    if (!result) continue
+    const filePath = stringValue(result.filePath)
+    const changes = Array.isArray(result.changes)
+      ? result.changes
+          .map(change => asRecord(change))
+          .filter((change): change is Record<string, unknown> => Boolean(change))
+          .map(change => ({
+            operation: stringValue(change.operation) || 'replace',
+            before: typeof change.before === 'string' ? change.before : '',
+            after: typeof change.after === 'string' ? change.after : '',
+            ...(typeof change.startByte === 'number' ? { startByte: change.startByte } : {}),
+            ...(typeof change.endByte === 'number' ? { endByte: change.endByte } : {})
+          }))
+      : []
+    upsert(filePath, Number(result.operationCount) || changes.length, changes)
+  }
+  return next
+}
+
+function normalizeCodingDiagnostics (value: unknown): CodingStatus['diagnostics'] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(entry => asRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    .map(entry => ({
+      severity: codingSeverity(entry.severity),
+      message: stringValue(entry.message),
+      ...(stringValue(entry.code) ? { code: stringValue(entry.code) } : {}),
+      ...(stringValue(entry.file) ? { file: stringValue(entry.file) } : {}),
+      ...(typeof entry.line === 'number' ? { line: entry.line } : {}),
+      ...(typeof entry.column === 'number' ? { column: entry.column } : {}),
+      ...(typeof entry.confidence === 'number' ? { confidence: entry.confidence } : {}),
+      ...(typeof entry.raw === 'string' ? { raw: entry.raw } : {})
+    }))
+    .filter(diagnostic => diagnostic.message.length > 0)
+}
+
+function normalizeDiagnosisMatches (diagnosis: Record<string, unknown> | null): CodingStatus['diagnostics'] {
+  const matches = Array.isArray(diagnosis?.matches) ? diagnosis.matches : []
+  return matches
+    .map(entry => asRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    .map(entry => {
+      const files = stringArray(entry.files)
+      const patternId = stringValue(entry.patternId)
+      const hint = stringValue(entry.fixHint)
+      return {
+        severity: 'error' as const,
+        message: hint || patternId || 'Verification failure',
+        ...(patternId ? { code: patternId } : {}),
+        ...(files[0] ? { file: files[0] } : {}),
+        ...(typeof entry.confidence === 'number' ? { confidence: entry.confidence } : {})
+      }
+    })
+}
+
+function normalizeDependencyIssues (dependency: Record<string, unknown> | null): CodingStatus['dependencyIssues'] {
+  const issues = Array.isArray(dependency?.issues) ? dependency.issues : []
+  return issues
+    .map(entry => asRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    .map(entry => {
+      const fix = asRecord(entry.suggestedFix)
+      return {
+        kind: stringValue(entry.kind) || 'unknown',
+        ...(stringValue(entry.package) ? { package: stringValue(entry.package) } : {}),
+        message: stringValue(entry.message),
+        ...(stringValue(fix?.command) ? { command: stringValue(fix?.command) } : {})
+      }
+    })
+    .filter(issue => issue.message.length > 0)
+}
+
+function normalizeCodingCommands (value: unknown): CodingStatus['commands'] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(entry => asRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    .map(entry => ({
+      kind: stringValue(entry.kind) || 'custom',
+      program: stringValue(entry.program) || '',
+      args: stringArray(entry.args),
+      ...(typeof entry.exitCode === 'number' ? { exitCode: entry.exitCode } : {}),
+      timedOut: entry.timedOut === true,
+      cancelled: entry.cancelled === true,
+      durationMs: typeof entry.durationMs === 'number' ? entry.durationMs : 0,
+      ...(typeof entry.stdout === 'string' ? { stdout: entry.stdout } : {}),
+      ...(typeof entry.stderr === 'string' ? { stderr: entry.stderr } : {})
+    }))
+}
+
+function codingSeverity (value: unknown): CodingStatus['diagnostics'][number]['severity'] {
+  const severity = stringValue(value).toLowerCase()
+  if (severity === 'error') return 'error'
+  if (severity === 'info') return 'info'
+  return 'warning'
+}
+
+function asRecord (value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function stringArray (value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : []
+}
+
+function uniqueStrings (values: string[]): string[] {
+  return Array.from(new Set(values.filter(value => value.length > 0)))
+}
+
 const WEB_SEARCH_CARD_RESULT_LIMIT = 10
 
 /**
@@ -701,7 +1111,7 @@ function resolveWrittenFilePath (rawPath: string, candidateRoots: string[]): str
   if (path.isAbsolute(rawPath)) return path.normalize(rawPath)
   let fallback = ''
   for (const root of candidateRoots) {
-    const trimmedRoot = root.trim()
+    const trimmedRoot = typeof root === 'string' ? root.trim() : ''
     if (!trimmedRoot) continue
     const joined = path.join(trimmedRoot, rawPath)
     if (!fallback) fallback = joined

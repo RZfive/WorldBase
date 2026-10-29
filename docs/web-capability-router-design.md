@@ -1,6 +1,6 @@
 # 网页能力路由设计：内置优先、外部 MCP 兜底（Web Capability Router）
 
-> 状态：P0 已实现（拦截信号 / 策略段 / 阅读模式 / 富卡片接通）；P1、P2 待实施
+> 状态：P0 与 P1 主体已实现（拦截信号 / 策略段 / 阅读模式 / 富卡片；稳定 ref、batch/find/wait_for、视口/整页 screenshot、diagnostics（console/错误/fetch/XHR/resource）、真实键盘/鼠标输入、navigate/reload/back/forward、viewport resize、emulate（media / color scheme / reduced motion / user agent / mobile viewport）、search_results 预设、`tab_id` 定向路由、`manage_workspace_tabs`、内置优先策略；`aiDriving` 操作角标除外）。运行时硬化（加载就绪、点击后导航等待、诊断跨导航隔离、调试器并发）仍在进行中，不计入已完成。P2（工具内自动降级、MCP 面板浏览器预设、evaluate 域白名单、`project_smoke_check`）待实施。仍必须交给 Chrome/Playwright MCP 的缺口：CDP 网络拦截、性能 trace、CI/多浏览器矩阵。
 > 范围：harness-rs（web 工具与策略）、apps/electron（工作区浏览器、宿主工具、UI）
 > 关联文档：`docs/rust-harness-architecture.md`、`HARNESS.md`、`docs/ai-agent-tools.md`
 
@@ -83,6 +83,23 @@
 3. L1 尝试后仍不足，或需要 L1 不具备的能力（多标签编排、网络层拦截、trace、CI/e2e）→ L2（仅当用户已配置外部浏览器 MCP）；调用天然经过 permission=ask；
 4. 全链路对用户透明：富结果卡片 + 浏览器 tab"AI 正在操作"角标。
 
+### 内置浏览器 vs Chrome/Playwright MCP 决策表
+
+| 场景 | 首选 | 说明 |
+| --- | --- | --- |
+| 公共网页静态抓取 | `web_search` / `web_fetch`（L0） | 快、静默、无 UI；不执行 JS、无登录态 |
+| 被 403/429/验证码/JS 壳页拦截，或需要用户登录态 | 工作区浏览器 + `read_current_page(mode=article)`（L1） | 复用 `persist:the-world-browser` 会话，用户可见 |
+| 页面导航、重载、前进/后退 | `interact_current_page` 的 navigate/reload/back/forward（L1） | 不再启动外部浏览器 |
+| DOM 检查、点击/键盘、表单、异步脚本 | `read_current_page(mode=interactive)` + `interact_current_page` / `fill_current_page_form`（L1） | 稳定 `e1/e2/...` ref；`evaluate` 支持 async |
+| 批量动作、等待条件、语义查找 | `interact_current_page` 的 batch/wait_for/find（L1） | 单次 IPC 往返，减少轮次 |
+| 截图、视觉验收 | `read_current_page(mode=screenshot)`（L1） | 支持视口/整页、png/jpeg |
+| console、运行时错误、网络、viewport | `read_current_page(mode=diagnostics)`（L1） | 项目页测试走查同样适用 |
+| 页面仿真（深色/浅色、reduced motion、print media、移动端 viewport） | `interact_current_page(action="emulate")` + `read_current_page` screenshot/diagnostics（L1） | 支持 media/color_scheme/reduced_motion/user_agent/mobile/device_scale_factor；`reset=true` 还原 |
+| 新建页面 / 多 tab 并存 | `open_workspace_tab(kind="browser")` 新建；`manage_workspace_tabs(action="list")` + `tab_id` 定位（L1） | 同一 URL 会复用已有 tab；页面工具按 `tab_id` 精确路由 |
+| CDP 网络拦截、性能 trace、CI/多浏览器矩阵 | chrome-devtools-mcp / playwright-mcp（L2） | 仅在内置能力确实缺失且已配置时使用；permission=ask |
+
+**截图与页面仿真（emulate）均由内置工具完成，不需要外部浏览器 MCP。** 外部 MCP 仅用于 CDP 网络拦截、性能 trace、CI/多浏览器矩阵等内置确实缺失的能力。
+
 **一次典型降级检索的数据流：**
 
 ```
@@ -137,21 +154,21 @@ P0 阶段不改控制流（失败仍是 `ok:false`），只补信号与 hint，�
    - `batch { actions[] }`：单次 IPC 往返顺序执行，遇错即停，返回已完成部分 + 首个错误位；
    - `find { role|name|text }`：语义定位，内部映射到元素后再执行目标动作（减少 AI 数元素负担）；
    - `wait_for { text|selector, timeout }`；
+   - `emulate { media | colorScheme | reducedMotion | userAgent | width/height/mobile/deviceScaleFactor | reset }`：内置页面仿真，覆盖 print/screen media、prefers-color-scheme、prefers-reduced-motion、user agent 与移动端 viewport，是 chrome-devtools-mcp `emulate` 的本地替代；
    - `screenshot {}`：`webview.capturePage()`，返回本地图片路径/缩略图（给 AI 视觉反馈 + 展示）。
-4. **诊断环形缓冲**（为内部应用测试）：监听 webview `console-message` / `did-fail-load` / `render-process-gone`，保留最近 50 条；snapshot 响应附带 `diagnostics` 字段。
+4. **诊断环形缓冲**（为内部应用测试）：监听 webview `console-message` / `did-fail-load` / `render-process-gone`，并在页内捕获 error/unhandledrejection、fetch/XHR 与 resource timing，保留最近 120 条；`read_current_page(mode=diagnostics)` 返回 console/errors/network/viewport/history。
 5. **AI 操作状态**：surface 增加 `aiDriving` 标志（`pageAutomation:request` 到达置位，response/timeout 复位），存入 `workspaceBrowserSurfaces`（`workspace-store.ts`）。
 
 ### 4.4 AI 工具面（`tool-active-page.ts` + 新增）
 
 **增强现有四个工具：**
 
-- `read_current_page`：新增 `mode: "interactive" | "article" | "search_results"`（默认 interactive，兼容现状）与可选 `tab_id`；`search_results` 使用预设选择器提取 `{title,url,snippet}[]`（预设表放 `src/shared/search-extract-presets.ts`：bing `#b_results li`、ddg `.result`、google `div[g]` 等）；
-- `interact_current_page` / `fill_current_page_form` / `save_current_page_as_document`：动作集同 §4.3，支持 `tab_id`。
+- `read_current_page`：新增 `mode: "interactive" | "article" | "search_results" | "screenshot" | "diagnostics"`（默认 interactive，兼容现状）与可选 `tab_id`；`search_results` 使用预设选择器提取 `{title,url,snippet}[]`（预设表放 `src/shared/search-extract-presets.ts`：bing `#b_results li`、ddg `.result`、google `div[g]` 等）；`screenshot` 返回视口/整页截图，`diagnostics` 返回 console/错误/网络/视口快照；
+- `interact_current_page`：动作集同 §4.3（含 `navigate`/`reload`/`back`/`forward`/`resize`/`emulate`），支持 `tab_id`；`fill_current_page_form` / `save_current_page_as_document` 保持各自专用参数。
 
 **新增工具（P1）：**
 
-- `list_page_tabs`：从 `workspaceBrowserSurfaces` + project surfaces 注册表返回 `[{tab_id, kind: browser|project, url, title, active}]`，让 AI 可见的多页面编排；
-- `focus_page_tab { tab_id }`：切换自动化路由目标。
+- `manage_workspace_tabs`：`action: list | activate | close`，从工作区 tab 注册表返回 `[{tab_id, kind, title, active}]`；AI 用 `action="list"` 发现 `tab_id`，再传给页面工具定向操作（取代原计划的 `list_page_tabs` / `focus_page_tab`）。
 
 **路由修正：** `App.vue handlePageAutomationRequest()` 的 `getActiveBrowserAutomationHandle()` 增加按 payload 中 `tab_id` 精确路由；无 `tab_id` 时维持"活跃页"语义（向后兼容）。
 
@@ -190,9 +207,9 @@ P0/P1 的"模型显式降级"稳定后，再考虑让 `web_fetch` 内部经 host
 
 | 工具 / 动作 | 档位 | 说明 |
 | --- | --- | --- |
-| `web_search` / `web_fetch` / `read_current_page`（interactive/article/search_results） | safe | 沿用 `ALWAYS_SAFE_TOOLS`（`permission-engine.ts`），只读 |
+| `web_search` / `web_fetch` / `read_current_page`（interactive/article/search_results/screenshot/diagnostics） | safe | 沿用 `ALWAYS_SAFE_TOOLS`（`permission-engine.ts`），只读 |
 | `open_workspace_tab`（browser/project） | safe | 打开用户可见页面本身无害；页面内动作另计 |
-| `list_page_tabs` / `focus_page_tab` / `screenshot` 动作 | safe | 本地只读/展示 |
+| `manage_workspace_tabs`（list/activate/close）/ `screenshot` 动作 | safe | 本地只读/展示 |
 | `interact_current_page` / `fill_current_page_form` | **ask** | 可按域记忆 allow（P2 优化：只读型动作 click/hover/scroll safe 化） |
 | `evaluate` 动作 | **ask** | 每次；域白名单机制放 P2 |
 | `mcp__*`（外部浏览器 MCP） | ask | 现状不变 |
@@ -216,18 +233,19 @@ P0/P1 的"模型显式降级"稳定后，再考虑让 `web_fetch` 内部经 host
 
 ### P1 —— 工具面增强
 
-6. 稳定 ref + `batch` / `find` / `wait_for` / `screenshot` 动作；
-7. `tab_id` 定向路由 + `list_page_tabs` / `focus_page_tab`；
+6. 稳定 ref + `batch` / `find` / `wait_for`、视口/整页 `screenshot`、真实键盘/鼠标输入、`navigate` / `reload` / `back` / `forward`、`resize` 动作；
+7. `tab_id` 定向路由 + `manage_workspace_tabs`（list/activate/close）；
 8. `search_results` 预设提取（bing/ddg/google）；
 9. 内部应用测试：snapshot `diagnostics`（console/加载失败）+ 测试流程策略段；
-10. `aiDriving` 操作角标 UI。
+10. `aiDriving` 操作角标 UI；
+11. `emulate` 动作：media / prefers-color-scheme / prefers-reduced-motion / user agent / 移动端 viewport / device scale / reset。
 
 ### P2 —— 收口与进阶
 
-11. `web_fetch` 工具内自动浏览器降级（`webview.fetch_rendered`，含设置开关）；
-12. MCP 面板浏览器预设 + L2 动态指导；
-13. evaluate 域白名单、只读型页面动作 safe 化；
-14. `project_smoke_check` 一键走查工具。
+12. `web_fetch` 工具内自动浏览器降级（`webview.fetch_rendered`，含设置开关）；
+13. MCP 面板浏览器预设 + L2 动态指导；
+14. evaluate 域白名单、只读型页面动作 safe 化；
+15. `project_smoke_check` 一键走查工具。
 
 ## 7. 开放决策点
 
@@ -254,7 +272,7 @@ P0/P1 的"模型显式降级"稳定后，再考虑让 `web_fetch` 内部经 host
 - `src/renderer/components/workspace/tabs/BrowserWorkspaceTab.vue`：操作角标
 - `src/renderer/components/workspace/workspace-store.ts`：surface `aiDriving` 状态
 - `src/App.vue`：`tab_id` 路由
-- `src/main/ai-host/agent/tools/tool-active-page.ts`（mode/tab_id）、`tool-open-workspace-tab.ts`（localhost 校验）、新增 `tool-page-tabs.ts`
+- `src/main/ai-host/agent/tools/tool-active-page.ts`（mode/tab_id）、`tool-open-workspace-tab.ts`（localhost 校验）、`tool-manage-workspace-tabs.ts`（tab 编排）
 - `src/main/ai-host/agent/tools/index.ts`、`electron-tool-registry.ts`：注册
 - `src/main/ai-host/agent/permissions/permission-engine.ts`：safe 清单核对
 - `src/main/ai-harness/types.ts`：`policy_sections` 通道与 web 事件 payload 类型

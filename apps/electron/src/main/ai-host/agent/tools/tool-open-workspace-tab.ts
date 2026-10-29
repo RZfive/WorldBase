@@ -1,5 +1,6 @@
 import type { BrowserWindow } from 'electron'
 import type { ToolDefinition } from '../../../ai-harness/contracts.js'
+import { validateAiBrowserTarget } from '../../../../shared/web-target-validation.js'
 
 interface ToolServices {
   getMainWindow?: () => BrowserWindow | null
@@ -25,7 +26,7 @@ export function toolOpenWorkspaceTab (services: ToolServices): Tool {
   return {
     definition: {
       name: 'open_workspace_tab',
-      description: 'Open a tab in the user\'s right-side workspace panel next to the chat. Use kind "folder" with root_path to bind a code directory; kind "document" with file_path to open one document (PDF/Excel/Word/...); kind "browser" with url to open a web page the user can watch and you can operate with the page tools (read_current_page / interact_current_page); kind "terminal" to open a shell terminal you can operate with read_active_terminal / write_active_terminal; kind "project" with project_id to open one of the user\'s developed apps (you can operate its UI with the page tools). The panel stays visible after the reply finishes.',
+      description: 'Open a tab in the user\'s right-side workspace panel next to the chat. Use kind "folder" with root_path to bind a code directory; kind "document" with file_path to open one document (PDF/Excel/Word/...); kind "browser" with url to open a web page the user can watch and you can operate with the page tools (read_current_page / interact_current_page, including screenshots, diagnostics, navigation and viewport resize); kind "terminal" to open a shell terminal you can operate with read_active_terminal / write_active_terminal; kind "project" with project_id to open one of the user\'s developed apps (you can operate its UI with the page tools). The panel stays visible after the reply finishes.',
       parameters: {
         type: 'object',
         properties: {
@@ -71,6 +72,13 @@ export function toolOpenWorkspaceTab (services: ToolServices): Tool {
         throw new Error('open_workspace_tab: kind must be "folder", "document", "browser", "terminal" or "project"')
       }
 
+      const browserTarget = kind === 'browser'
+        ? validateAiBrowserTarget(typeof url === 'string' ? url : '')
+        : null
+      if (browserTarget && !browserTarget.ok) {
+        throw new Error(`open_workspace_tab: browser URL rejected: ${browserTarget.reason} For a loopback/local project preview, use kind="project" with project_id or open_project_app; do not fall back to an external browser MCP.`)
+      }
+
       const mainWindow = services.getMainWindow?.()
       if (!mainWindow || mainWindow.isDestroyed()) {
         throw new Error('The main shell window is not available, so the workspace panel cannot be opened right now.')
@@ -85,7 +93,8 @@ export function toolOpenWorkspaceTab (services: ToolServices): Tool {
       const payload: Record<string, unknown> = {}
       if (typeof rootPath === 'string' && rootPath.trim()) payload.rootPath = rootPath.trim()
       if (typeof filePath === 'string' && filePath.trim()) payload.filePath = filePath.trim()
-      if (typeof url === 'string' && url.trim()) payload.url = url.trim()
+      if (browserTarget?.ok) payload.url = browserTarget.url
+      else if (typeof url === 'string' && url.trim()) payload.url = url.trim()
       if (typeof activeFilePath === 'string' && activeFilePath.trim()) payload.activeFilePath = activeFilePath.trim()
       if (typeof projectId === 'string' && projectId.trim()) payload.projectId = projectId.trim()
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { buildMessageBlocks, deriveWorkGroupStatus } from '../src/renderer/components/chat/message-utils.ts'
+import { appendFinalContentBlock } from '../src/renderer/components/chat/panel/message-blocks.ts'
 
 const idlePreview = { active: false, filePath: '', lineCount: 0, added: 0, removed: 0 }
 
@@ -109,6 +110,61 @@ test('assistant blocks are never rewritten', () => {
   }
 
   assert.equal(build(message), message.blocks)
+})
+
+test('final answer after pre-tool narration gets its own trailing block', () => {
+  const message = {
+    role: 'assistant',
+    id: 'final-after-work',
+    content: '最终回答',
+    blocks: [
+      { id: 'n1', kind: 'content', content: '我先检查一下。' },
+      { id: 't1', kind: 'tool', toolRun: { id: 't1', name: 'read_file', status: 'completed', progress: [] } }
+    ]
+  }
+
+  appendFinalContentBlock(message, '最终回答')
+
+  assert.equal(message.blocks.length, 3)
+  assert.equal(message.blocks[0].content, '我先检查一下。')
+  assert.equal(message.blocks[2].kind, 'content')
+  assert.equal(message.blocks[2].content, '最终回答')
+})
+
+test('final answer merges into a trailing content block when no work follows it', () => {
+  const message = {
+    role: 'assistant',
+    id: 'final-trailing',
+    content: '最终回答',
+    blocks: [{ id: 'c1', kind: 'content', content: '正在输出' }]
+  }
+
+  appendFinalContentBlock(message, '最终回答')
+
+  assert.equal(message.blocks.length, 1)
+  assert.equal(message.blocks[0].content, '最终回答')
+})
+
+test('final answer after several pre-tool narration blocks stays outside the summary', () => {
+  const message = {
+    role: 'assistant',
+    id: 'final-multi-narration',
+    content: '最终回答',
+    blocks: [
+      { id: 'n1', kind: 'content', content: '第一段说明。' },
+      { id: 't1', kind: 'tool', toolRun: { id: 't1', name: 'read_file', status: 'completed', progress: [] } },
+      { id: 'n2', kind: 'content', content: '第二段说明。' },
+      { id: 't2', kind: 'tool', toolRun: { id: 't2', name: 'write_file', status: 'completed', progress: [] } }
+    ]
+  }
+
+  appendFinalContentBlock(message, '最终回答')
+
+  assert.equal(message.blocks.length, 5)
+  assert.equal(message.blocks[0].content, '第一段说明。')
+  assert.equal(message.blocks[2].content, '第二段说明。')
+  assert.equal(message.blocks[4].kind, 'content')
+  assert.equal(message.blocks[4].content, '最终回答')
 })
 
 test('work group status follows the tool mix rather than any single failure', () => {

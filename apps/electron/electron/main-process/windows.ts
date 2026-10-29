@@ -411,7 +411,7 @@ export function runWithAiRequestWindow<T> (win: BrowserWindow | null, task: () =
   return aiRequestWindowStorage.run(win, task)
 }
 
-export async function requestPageAutomationFromRenderer<T extends PageAutomationRendererResult> (request: PageAutomationRendererRequest): Promise<T> {
+export async function requestPageAutomationFromRenderer<T extends PageAutomationRendererResult> (request: PageAutomationRendererRequest, tabId?: string, conversationId?: string): Promise<T> {
   const targetWindow = getActiveAiRequestWindow()
   if (!targetWindow || targetWindow.isDestroyed() || targetWindow.webContents.isDestroyed()) {
     throw new Error(t('mainDialog.pageAutomationNoWindow'))
@@ -432,6 +432,8 @@ export async function requestPageAutomationFromRenderer<T extends PageAutomation
 
     targetWindow.webContents.send('pageAutomation:request', {
       requestId,
+      ...(tabId ? { tabId } : {}),
+      ...(conversationId ? { conversationId } : {}),
       request
     })
   })
@@ -470,17 +472,23 @@ export async function requestWorkspaceTabControlFromRenderer (request: Workspace
 }
 
 export function buildActivePagePromptSection (activePageContext?: ActivePageAutomationContext | null): string | null {
-  if (!activePageContext || activePageContext.kind !== 'browser') return null
+  if (!activePageContext) return null
 
+  const kindLabel = activePageContext.kind === 'project' ? 'project app page' : 'browser page'
+  const tabId = activePageContext.appId.startsWith('wsb-') ? activePageContext.appId.slice(4) : null
   const lines = [
-    '## Active in-app browser page',
-    '- The user currently has a live browser page open inside the app shell.',
+    `## Active in-app ${kindLabel}`,
+    `- The user currently has a live ${kindLabel} open inside the app shell.`,
     `- Active page title: ${activePageContext.title || '(untitled page)'}`,
     `- Active page URL: ${activePageContext.url || '(unknown URL)'}`,
     `- Active page origin: ${activePageContext.origin || '(unknown origin)'}`,
-    '- If the user asks what is on this page or asks you to operate it, call read_current_page first to inspect the live DOM, then use interact_current_page for click, input, select, scroll, wait, extract, evaluate, hover, focus, or press_key actions.',
-    '- For filling multiple form fields at once, use fill_current_page_form with the selectors returned by read_current_page.',
+    ...(tabId ? [`- Active workspace tab id: ${tabId} (pass it as tab_id when several page tabs are open).`] : []),
+    '- Inspect it with read_current_page: mode "interactive" for DOM/refs/selectors, "article" for readable text, "search_results" for search pages, "screenshot" for visual verification, "diagnostics" for console/errors/network/viewport.',
+    '- Operate it with interact_current_page: click/input/select/hover/focus/press_key/scroll, extract, evaluate (async supported), wait_for, find, batch, navigate, reload, back/forward, resize viewport, emulate (media/color scheme/reduced motion/user agent/mobile viewport).',
+    '- For dark/light color scheme, reduced motion, print media, or mobile-layout checks, use interact_current_page action="emulate" (color_scheme/reduced_motion/media/mobile/user_agent), then read_current_page screenshot/diagnostics to verify; call emulate with reset=true afterward. Built-in screenshots and emulation do not need chrome/playwright MCP.',
+    '- For filling multiple form fields at once, use fill_current_page_form with selectors or refs from read_current_page.',
     '- For long pages, either paginate with interact_current_page action="extract" plus offset/max_chars, or call save_current_page_as_document to persist the page as a chunked document and read it with read_document.',
+    '- These built-in page tools are the primary way to inspect or drive the page. Do NOT use chrome/playwright browser MCP for navigation, screenshots, console/network reads, viewport resizing, emulation, DOM inspection, or script evaluation here. External browser MCP is only for capabilities the built-in surface genuinely lacks (CDP network interception, performance tracing, CI browser matrices).',
     '- Do not use fetch_webpage for this active in-app page. fetch_webpage is only for public external references, not the live embedded browser surface.'
   ]
 
@@ -496,13 +504,19 @@ export function buildActivePagePromptSection (activePageContext?: ActivePageAuto
 export function buildWebCapabilityPolicySection (): string {
   return [
     '## Web access policy (built-in first)',
-    '- For public web content, start with web_search / web_fetch. They are fast and silent, but they do not run JavaScript and have no login session.',
-    '- When a web_search / web_fetch result reports `access: "blocked"` or `"degraded"` (HTTP 401/403/429/503, an anti-bot challenge, a thin JS-only shell page, or all search sources failed), do NOT retry the same static request. Switch to the built-in workspace browser:',
+    '- Follow this capability ladder: L0 static web_search / web_fetch -> L1 built-in workspace browser -> L2 external browser MCP (chrome/playwright). Always use the lowest level that can complete the job.',
+    '- For public web content, start with L0 web_search / web_fetch. They are fast and silent, but they do not run JavaScript and have no login session.',
+    '- When a web_search / web_fetch result reports `access: "blocked"` or `"degraded"` (HTTP 401/403/429/503, an anti-bot challenge, a thin JS-only shell page, or all search sources failed), do NOT retry the same static request. Switch to L1, the built-in workspace browser:',
     '  1. open_workspace_tab with kind "browser" and the target URL — it opens visibly so the user can follow along;',
     '  2. read_current_page with mode "article" to extract the readable page content;',
     '  3. interact_current_page only when the information requires an action (site search box, pagination, cookie banner).',
     '- The built-in browser reuses the app\'s persistent session, so pages behind the user\'s existing logins usually work there. Prefer it over external browser automation.',
-    '- Only use browser-class mcp__ tools (chrome/playwright MCP) when the built-in browser genuinely cannot do the job (multi-tab orchestration, network-level capture) AND such an MCP server is configured; those calls require user approval.',
+    '- The built-in browser now covers navigation, reload/history, clicks/keyboard, async script evaluation, forms, stable refs, batch/wait/find, viewport resizing/emulation, screenshots (viewport/full page), and console/network diagnostics. Use the built-in page tools directly; do NOT reach for chrome/playwright MCP for these jobs.',
+    '- Use interact_current_page action="emulate" to verify prefers-color-scheme (light/dark), prefers-reduced-motion, print media, mobile viewport/device scale, or a custom user agent; combine it with read_current_page screenshot/diagnostics and reset with reset=true. Screenshots and emulation are built in and are not reasons to use external browser MCP.',
+    '- Only use L2 browser-class mcp__ tools (chrome/playwright MCP) for capabilities the built-in surface genuinely lacks: CDP network interception, performance tracing, CI browser matrices, and similar CDP-level work. Require a configured browser MCP server; those calls need user approval.',
+    '- Background conversations can operate their own page through a hidden background host after open_workspace_tab (kind "browser" or "project") or open_project_app; the page does not need to be foregrounded. If a page request returns `page_tools_background_host_missing`, open the page or tab in that conversation first and retry. If a page request returns `page_tools_foreground_required`, bring that conversation to the foreground and retry. Either way this is a host/focus issue, not a missing browser capability: never use chrome/playwright MCP as a workaround.',
+    '- A loopback project preview must use open_workspace_tab(kind="project") with project_id or open_project_app. A localhost rejection from open_workspace_tab(kind="browser") is not a capability gap and is not a reason to use external browser MCP.',
+    '- Use open_workspace_tab(kind="browser") to open a new page; use manage_workspace_tabs(action="list") to discover page tab ids, then pass tab_id to read_current_page/interact_current_page when multiple pages are open.',
     '- Never call web_search/web_fetch for a page that is already open in the embedded browser; read_current_page is the source of truth for it.'
   ].join('\n')
 }

@@ -4,7 +4,19 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import './register-ts-hooks.mjs'
-import { RustHarnessEngine, planModeExitedAfterNativeResult, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
+import { RustHarnessEngine, codingEventsForGenericFileResult, codingEventsForToolResult, planModeExitedAfterNativeResult, shouldActivateCodingMode, webToolResultEvents, fileWritePreviewEvents } from '../src/main/ai-harness/rust-harness-engine.ts'
+import { toRendererStreamEvent } from '../electron/main-process/ai/stream-event-contract.ts'
+import { codingStatusForCancelledRun } from '../src/shared/coding-status-types.ts'
+import {
+  CODING_STATE_STORAGE_PREFIX,
+  MAX_CODING_DIFF_BYTES,
+  clearCodingState,
+  codingStateStorageKey,
+  decodeCodingState,
+  encodeCodingState,
+  loadCodingState,
+  saveCodingStateNow
+} from '../src/renderer/components/chat/panel/coding-status-storage.ts'
 import { ElectronToolRegistry } from '../src/main/ai-harness/electron-tool-registry.ts'
 import { MCPService } from '../src/main/mcp/mcp-service.ts'
 import { RustHarnessClient } from '../electron/main-process/rust-harness-client.ts'
@@ -1279,6 +1291,62 @@ test('Rust chat preserves provider thinking defaults and omits reasoning only wh
   assert.equal(captured[2].reasoningEffort, 'high')
 })
 
+test('Rust chat forwards the coding mode gate to chat.send', async () => {
+  const captured = []
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir: path.join(os.tmpdir(), 'worldbase-rust-coding-mode-test'),
+    onEvent: () => {}
+  })
+  client.start = async () => {}
+  client.syncSettings = async () => {}
+  client.ensureConversation = async () => {}
+  client.request = async (method, params) => {
+    assert.equal(method, 'chat.send')
+    captured.push(params)
+    return { streamId: `coding-stream-${captured.length}` }
+  }
+
+  await client.chatStream('session-coding', 'conversation-coding', 'edit the app', {
+    codingMode: true,
+    targetProjectId: 'project-1'
+  })
+  await client.chatStream('session-coding-off', 'conversation-coding-off', 'answer a question', {
+    codingMode: false,
+    targetProjectId: 'project-1'
+  })
+
+  assert.equal(captured[0].codingMode, true)
+  assert.equal(captured[1].codingMode, false)
+})
+
+test('Rust facade enables coding mode by default for project runs and supports opt-out', async () => {
+  const captured = []
+  const client = {
+    ...createNativeToolClient(),
+    async start () {},
+    async chatStream (_sessionId, _conversationId, _text, options, onFrame) {
+      captured.push(options)
+      onFrame({ kind: 'assistant_message', content: 'ok' })
+      onFrame({ kind: 'done' })
+      return { streamId: `coding-engine-${captured.length}` }
+    }
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  engine.setTargetProjectId('project-1')
+
+  for await (const _event of engine.chatStream([
+    { role: 'user', content: 'edit the app' }
+  ], undefined, {})) {}
+  for await (const _event of engine.chatStream([
+    { role: 'user', content: 'just answer' }
+  ], undefined, { codingMode: false })) {}
+
+  assert.equal(captured[0].codingMode, true)
+  assert.equal(captured[0].targetProjectId, 'project-1')
+  assert.equal(captured[1].codingMode, false)
+})
+
 test('Rust facade forwards scoped semantic-memory settings to chat.send', async () => {
   const captured = []
   const client = {
@@ -1732,5 +1800,416 @@ test('write tool results re-emit as file_preview events with absolute paths', as
   } finally {
     await fs.rm(root, { recursive: true, force: true })
     await fs.rm(harnessWorkspace, { recursive: true, force: true })
+  }
+})
+
+test('coding tool results map into status and diff stream events', () => {
+  const failedVerify = codingEventsForToolResult(
+    'coding_verify',
+    JSON.stringify({
+      passed: false,
+      outcomes: [{
+        kind: 'typecheck',
+        program: 'pnpm',
+        args: ['run', 'typecheck'],
+        exitCode: 2,
+        timedOut: false,
+        cancelled: false,
+        durationMs: 1200,
+        stderr: 'src/main.ts(12,7): error TS2304: Cannot find name x.'
+      }],
+      diagnostics: [{
+        severity: 'error',
+        message: "Cannot find name 'x'.",
+        code: 'TS2304',
+        file: 'src/main.ts',
+        line: 12,
+        column: 7,
+        confidence: 0.95
+      }]
+    }),
+    null,
+    null
+  )
+  assert.equal(failedVerify.status.phase, 'diagnose')
+  assert.equal(failedVerify.status.verificationAttempts, 1)
+  assert.equal(failedVerify.status.diagnostics[0].code, 'TS2304')
+  assert.equal(failedVerify.status.commands[0].exitCode, 2)
+  assert.equal(failedVerify.status.stopReason, 'verificationFailed')
+
+  const diagnose = codingEventsForToolResult(
+    'coding_diagnose',
+    JSON.stringify({
+      diagnosis: {
+        summary: '1 error(s), 0 warning(s)',
+        matches: [{ patternId: 'ts-2304', fixHint: 'Declare the identifier.', files: ['src/main.ts'], confidence: 0.95 }],
+        repairInstructions: ['Declare the identifier.']
+      },
+      dependency: {
+        issues: [{ kind: 'missingPackage', package: 'zod', message: "Cannot find module 'zod'.", suggestedFix: { command: 'pnpm add zod' } }]
+      },
+      repair: { shouldRetry: true, instructions: ['Declare the identifier.'] }
+    }),
+    failedVerify.status,
+    null
+  )
+  assert.equal(diagnose.status.phase, 'repair')
+  assert.equal(diagnose.status.dependencyIssues[0].command, 'pnpm add zod')
+  assert.deepEqual(diagnose.status.repairInstructions, ['Declare the identifier.'])
+
+  const edit = codingEventsForToolResult(
+    'coding_edit',
+    JSON.stringify({
+      changed: true,
+      operation: 'replace',
+      filePath: 'src/main.ts',
+      byteRange: { start: 10, end: 20 },
+      before: 'const x = 1;',
+      after: 'const x = 2;'
+    }),
+    diagnose.status,
+    null
+  )
+  assert.equal(edit.status.phase, 'edit')
+  assert.deepEqual(edit.status.changedFiles, ['src/main.ts'])
+  assert.equal(edit.diff.files[0].changes[0].before, 'const x = 1;')
+  assert.equal(edit.diff.files[0].changes[0].after, 'const x = 2;')
+
+  const apply = codingEventsForToolResult(
+    'coding_apply',
+    JSON.stringify({
+      applied: true,
+      results: [{
+        filePath: 'src/a.ts',
+        operationCount: 2,
+        changes: [
+          { operation: 'replace', before: 'a', after: 'b' },
+          { operation: 'rename', before: 'foo', after: 'bar' }
+        ]
+      }]
+    }),
+    edit.status,
+    edit.diff
+  )
+  assert.equal(apply.status.changedFiles.length, 2)
+  assert.equal(apply.diff.files[0].filePath, 'src/main.ts')
+  assert.equal(apply.diff.files[1].filePath, 'src/a.ts')
+  assert.equal(apply.diff.files[1].changes.length, 2)
+})
+
+test('renderer stream contract maps coding status and diff field names', () => {
+  const status = { phase: 'edit' }
+  const diff = { files: [], updatedAt: 1 }
+  assert.deepEqual(toRendererStreamEvent({ type: 'coding_status', status }), {
+    type: 'coding_status',
+    codingStatus: status
+  })
+  assert.deepEqual(toRendererStreamEvent({ type: 'coding_diff', diff }), {
+    type: 'coding_diff',
+    codingDiff: diff
+  })
+  const token = { type: 'token', content: 'hello' }
+  assert.equal(toRendererStreamEvent(token), token)
+})
+
+test('AI-selected and implicit coding actions activate coding mode', () => {
+  assert.equal(shouldActivateCodingMode('select_work_mode', { mode: 'coding' }), true)
+  assert.equal(shouldActivateCodingMode('select_work_mode', { mode: 'document' }), false)
+  assert.equal(shouldActivateCodingMode('select_work_mode', { mode: 'chat' }), false)
+  assert.equal(shouldActivateCodingMode('create_project', {}), true)
+  assert.equal(shouldActivateCodingMode('coding_verify', {}), true)
+  assert.equal(shouldActivateCodingMode('write_project_file', { file_path: 'src/main.ts' }), false)
+  assert.equal(shouldActivateCodingMode('write_workspace_file', { path: 'src/App.vue' }), false)
+  assert.equal(shouldActivateCodingMode('doc_draft', { file_path: 'docs/report.docx' }), false)
+})
+
+test('generic code writes map into coding status and diff', () => {
+  const written = codingEventsForGenericFileResult(
+    'write_workspace_file',
+    JSON.stringify({
+      success: true,
+      file_path: 'src/main.ts',
+      before_content: '',
+      after_content: 'const a = 1;\n',
+      content_truncated: false
+    }),
+    null,
+    null
+  )
+  assert.equal(written.status.phase, 'edit')
+  assert.deepEqual(written.status.changedFiles, ['src/main.ts'])
+  assert.deepEqual(written.diff.files[0], {
+    filePath: 'src/main.ts',
+    operationCount: 1,
+    changes: [{ operation: 'write', before: '', after: 'const a = 1;\n' }]
+  })
+
+  const truncated = codingEventsForGenericFileResult(
+    'patch_workspace_file',
+    JSON.stringify({
+      success: true,
+      file_path: 'src/large.ts',
+      content_truncated: true
+    }),
+    written.status,
+    written.diff
+  )
+  assert.equal(truncated.status.phase, 'edit')
+  assert.deepEqual(truncated.status.changedFiles, ['src/main.ts', 'src/large.ts'])
+  assert.equal(truncated.diff, null)
+
+  const read = codingEventsForGenericFileResult(
+    'read_workspace_file',
+    JSON.stringify({ file_path: 'src/main.ts', before_content: 'a', after_content: 'b' }),
+    null,
+    null
+  )
+  assert.equal(read.status, null)
+  assert.equal(read.diff, null)
+})
+
+test('select_work_mode activates coding events for a following generic write', async () => {
+  const client = {
+    ...createNativeToolClient([{
+      name: 'select_work_mode',
+      description: 'Select work mode',
+      inputSchema: { type: 'object' },
+      electronNative: true
+    }, {
+      name: 'write_project_file',
+      description: 'Write a project file',
+      inputSchema: { type: 'object' },
+      electronNative: true
+    }]),
+    async chatStream (_sessionId, _conversationId, _text, _options, onFrame) {
+      onFrame({ kind: 'tool_call', name: 'select_work_mode', call_id: 'mode-1', args: { mode: 'coding' } })
+      onFrame({
+        kind: 'tool_result',
+        name: 'select_work_mode',
+        call_id: 'mode-1',
+        content: JSON.stringify({ mode: 'coding', coding: true, acknowledged: true })
+      })
+      onFrame({ kind: 'tool_call', name: 'write_project_file', call_id: 'write-1', args: { file_path: 'src/main.ts' } })
+      onFrame({
+        kind: 'tool_result',
+        name: 'write_project_file',
+        call_id: 'write-1',
+        content: JSON.stringify({
+          success: true,
+          file_path: 'src/main.ts',
+          before_content: 'const a = 1;\n',
+          after_content: 'const a = 2;\n',
+          content_truncated: false
+        })
+      })
+      onFrame({ kind: 'done', stopReason: 'completed' })
+      return { streamId: 'mode-activation-stream' }
+    }
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  const events = []
+  for await (const event of engine.chatStream([{ role: 'user', content: 'create an app' }])) {
+    events.push(event)
+  }
+
+  const statuses = events.filter(event => event.type === 'coding_status').map(event => event.status)
+  const diffs = events.filter(event => event.type === 'coding_diff').map(event => event.diff)
+  assert.ok(statuses.length >= 1)
+  assert.equal(statuses[0].phase, 'plan')
+  assert.equal(statuses.at(-1).phase, 'edit')
+  assert.deepEqual(statuses.at(-1).changedFiles, ['src/main.ts'])
+  assert.equal(diffs.at(-1).files[0].filePath, 'src/main.ts')
+  assert.equal(diffs.at(-1).files[0].changes[0].before, 'const a = 1;\n')
+  assert.equal(diffs.at(-1).files[0].changes[0].after, 'const a = 2;\n')
+})
+
+test('cancelled coding runs map to a blocked cancelled status stream event', async () => {
+  const client = {
+    ...createNativeToolClient([{
+      name: 'coding_verify',
+      description: 'Rust coding_verify',
+      inputSchema: { type: 'object' },
+      electronNative: true
+    }]),
+    async chatStream (_sessionId, _conversationId, _text, _options, onFrame) {
+      onFrame({ kind: 'tool_call', name: 'coding_verify', call_id: 'verify-1', args: {} })
+      onFrame({
+        kind: 'tool_result',
+        name: 'coding_verify',
+        call_id: 'verify-1',
+        content: JSON.stringify({
+          passed: false,
+          diagnostics: [{
+            severity: 'error',
+            message: "Cannot find name 'x'.",
+            code: 'TS2304',
+            file: 'src/main.ts',
+            line: 12,
+            column: 7,
+            confidence: 0.95
+          }]
+        })
+      })
+      onFrame({ kind: 'done', stopReason: 'aborted' })
+      return { streamId: 'coding-abort-stream' }
+    }
+  }
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  const events = []
+
+  await assert.rejects(async () => {
+    for await (const event of engine.chatStream([{ role: 'user', content: 'fix the project' }])) {
+      events.push(event)
+    }
+  }, /stopped by user/i)
+
+  const statuses = events.filter(event => event.type === 'coding_status').map(event => event.status)
+  assert.equal(statuses.length, 3)
+  assert.equal(statuses.at(-1).phase, 'blocked')
+  assert.equal(statuses.at(-1).stopReason, 'cancelled')
+  assert.equal(statuses.at(-1).verificationAttempts, 1)
+  assert.equal(statuses.at(-1).diagnostics[0].code, 'TS2304')
+})
+
+test('cancelled coding status keeps completed and blocked runs terminal', () => {
+  const active = {
+    phase: 'repair',
+    repairRound: 1,
+    verificationAttempts: 1,
+    changedFiles: ['src/main.ts'],
+    commands: [],
+    diagnostics: [],
+    dependencyIssues: [],
+    repairInstructions: [],
+    updatedAt: 1
+  }
+  const cancelled = codingStatusForCancelledRun(active)
+  assert.equal(cancelled.phase, 'blocked')
+  assert.equal(cancelled.stopReason, 'cancelled')
+  assert.deepEqual(cancelled.changedFiles, ['src/main.ts'])
+
+  const complete = { ...active, phase: 'complete', stopReason: 'verificationPassed' }
+  assert.equal(codingStatusForCancelledRun(complete), complete)
+
+  const blocked = { ...active, phase: 'blocked', stopReason: 'maxRepairRounds' }
+  assert.equal(codingStatusForCancelledRun(blocked), blocked)
+  assert.equal(codingStatusForCancelledRun(null), null)
+})
+
+test('coding persistence serializes status and diff with legacy tolerance', () => {
+  const status = {
+    phase: 'repair',
+    repairRound: 1,
+    maxRepairRounds: 3,
+    verificationAttempts: 2,
+    changedFiles: ['src/main.ts'],
+    commands: [{
+      kind: 'typecheck',
+      program: 'pnpm',
+      args: ['run', 'typecheck'],
+      exitCode: 2,
+      timedOut: false,
+      cancelled: false,
+      durationMs: 1200,
+      stderr: 'TS2304'
+    }],
+    diagnostics: [{
+      severity: 'error',
+      message: "Cannot find name 'x'.",
+      code: 'TS2304',
+      file: 'src/main.ts',
+      line: 12,
+      column: 7,
+      confidence: 0.95
+    }],
+    dependencyIssues: [],
+    repairInstructions: ['Import x.'],
+    stopReason: 'verificationFailed',
+    updatedAt: 10
+  }
+  const diff = {
+    files: [{
+      filePath: 'src/main.ts',
+      operationCount: 1,
+      changes: [{ operation: 'edit', before: 'const a = 1', after: 'const a = 2' }]
+    }],
+    updatedAt: 11
+  }
+
+  const raw = encodeCodingState({ status, diff })
+  assert.ok(raw)
+  const decoded = decodeCodingState(raw)
+  assert.deepEqual(decoded.status, status)
+  assert.deepEqual(decoded.diff, diff)
+
+  const legacy = decodeCodingState(JSON.stringify(status))
+  assert.equal(legacy.status.phase, 'repair')
+  assert.equal(legacy.diff, null)
+
+  assert.deepEqual(decodeCodingState('{not json'), { status: null, diff: null })
+  assert.deepEqual(decodeCodingState(JSON.stringify({ phase: 'unknown' })), { status: null, diff: null })
+})
+
+test('coding persistence caps oversized diffs and keeps the newest files', () => {
+  const diff = {
+    files: [
+      {
+        filePath: 'src/old.ts',
+        operationCount: 1,
+        changes: [{ operation: 'edit', before: 'x'.repeat(180000), after: 'y'.repeat(180000) }]
+      },
+      {
+        filePath: 'src/new.ts',
+        operationCount: 1,
+        changes: [{ operation: 'edit', before: 'a', after: 'b' }]
+      }
+    ],
+    updatedAt: 12
+  }
+
+  const raw = encodeCodingState({ status: null, diff })
+  assert.ok(raw)
+  const decoded = decodeCodingState(raw)
+  assert.ok(decoded.diff)
+  assert.equal(decoded.diff.files.length, 1)
+  assert.equal(decoded.diff.files[0].filePath, 'src/new.ts')
+  assert.ok(Buffer.byteLength(JSON.stringify(decoded.diff), 'utf8') <= MAX_CODING_DIFF_BYTES)
+})
+
+test('coding persistence keys localStorage by conversation and clears it', () => {
+  const data = new Map()
+  const previousWindow = globalThis.window
+  globalThis.window = {
+    localStorage: {
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => { data.set(key, String(value)) },
+      removeItem: (key) => { data.delete(key) }
+    }
+  }
+
+  try {
+    const status = {
+      phase: 'complete',
+      repairRound: 0,
+      verificationAttempts: 1,
+      changedFiles: [],
+      commands: [],
+      diagnostics: [],
+      dependencyIssues: [],
+      repairInstructions: [],
+      stopReason: 'verificationPassed',
+      updatedAt: 20
+    }
+    saveCodingStateNow('conv-a', { status, diff: null })
+    assert.ok(data.has(codingStateStorageKey('conv-a')))
+    assert.ok(data.has(`${CODING_STATE_STORAGE_PREFIX}conv-a`))
+    assert.equal(loadCodingState('conv-a').status.phase, 'complete')
+    assert.equal(loadCodingState('conv-b').status, null)
+
+    clearCodingState('conv-a')
+    assert.equal(loadCodingState('conv-a').status, null)
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
   }
 })

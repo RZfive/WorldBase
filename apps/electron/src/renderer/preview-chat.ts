@@ -6,10 +6,13 @@ import ChatHeader from './components/chat/layout/ChatHeader.vue'
 import MessageList from './components/chat/messages/MessageList.vue'
 import ChatInput from './components/chat/layout/ChatInput.vue'
 import PinnedTodoPanel from './components/chat/layout/PinnedTodoPanel.vue'
+import CodingDiffTab from './components/workspace/tabs/CodingDiffTab.vue'
 import AuthPermissionPanel from './components/chat/layout/AuthPermissionPanel.vue'
 import AskUserPanel from './components/chat/layout/AskUserPanel.vue'
 import { createAttentionAccordion, type AttentionPanelId } from './components/chat/panel/attention-accordion'
 import type { ChatMessage } from './components/chat/types'
+import type { CodingDiffState, CodingStatus } from '../shared/coding-status-types.js'
+import { sharedChatPanelState } from './components/chat/panel/shared-state'
 import type { AgentSidebarItem, ConversationSidebarItem, GroupSidebarItem, LongTermGoalSidebarItem } from './components/chat/layout/ConversationSidebar.types'
 
 document.documentElement.dataset.theme = 'light'
@@ -50,6 +53,73 @@ const messages: ChatMessage[] = [
   ] }
 ]
 
+const codingStatus: CodingStatus = {
+  phase: 'repair',
+  repairRound: 1,
+  maxRepairRounds: 3,
+  verificationAttempts: 2,
+  changedFiles: ['src/components/Table.vue', 'src/lib/virtual.ts'],
+  commands: [{
+    kind: 'typecheck',
+    program: 'pnpm',
+    args: ['run', 'typecheck'],
+    exitCode: 2,
+    timedOut: false,
+    cancelled: false,
+    durationMs: 8420,
+    stdout: '> tsc --noEmit\n',
+    stderr: "src/components/Table.vue(42,9): error TS2339: Property 'visibleRows' does not exist on type 'TableState'."
+  }],
+  diagnostics: [
+    { severity: 'error', message: "Property 'visibleRows' does not exist on type 'TableState'.", code: 'TS2339', file: 'src/components/Table.vue', line: 42, column: 9, confidence: 0.95 },
+    { severity: 'error', message: "Cannot find name 'rowHeight'.", code: 'TS2304', file: 'src/lib/virtual.ts', line: 18, column: 22, confidence: 0.95 },
+    { severity: 'warning', message: "React Hook useMemo has a missing dependency: 'rows'.", code: 'react-hooks/exhaustive-deps', file: 'src/components/Table.vue', line: 61, column: 5, confidence: 0.8 }
+  ],
+  dependencyIssues: [],
+  repairInstructions: ['Add visibleRows to TableState.', "Declare or import rowHeight in virtual.ts."],
+  stopReason: 'verificationFailed',
+  summary: '2 errors, 1 warning',
+  updatedAt: Date.now()
+}
+
+const codingDiff: CodingDiffState = {
+  files: [{
+    filePath: 'src/components/Table.vue',
+    operationCount: 2,
+    changes: [{
+      operation: 'edit',
+      before: "const rows = computed(() => props.rows)\nconst rendered = rows.value",
+      after: "const rows = computed(() => props.rows)\nconst visibleRows = computed(() => rows.value.slice(start.value, end.value))"
+    }, {
+      operation: 'edit',
+      before: 'watch(() => props.sortKey, resetScroll)',
+      after: 'watch(() => [props.sortKey, props.sortDirection], resetScroll)'
+    }]
+  }, {
+    filePath: 'src/lib/virtual.ts',
+    operationCount: 1,
+    changes: [{
+      operation: 'edit',
+      before: 'const ROW_HEIGHT = 32',
+      after: 'const ROW_HEIGHT = 36'
+    }]
+  }],
+  updatedAt: Date.now()
+}
+
+const blockedCodingStatus: CodingStatus = {
+  ...codingStatus,
+  phase: 'blocked',
+  repairRound: 3,
+  diagnostics: [
+    ...codingStatus.diagnostics,
+    { severity: 'warning', message: 'Table virtualization may still drop sorted rows on resize.', code: 'WB-TABLE-02', file: 'src/components/Table.vue', line: 88, column: 3, confidence: 0.42 }
+  ],
+  stopReason: 'maxRepairRounds',
+  summary: '2 errors remain after 3 repair rounds',
+  updatedAt: Date.now()
+}
+
 const App = defineComponent({
   setup () {
     const text = ref('')
@@ -61,10 +131,24 @@ const App = defineComponent({
     const busy = params.get('busy') === '1'
     const auth = params.get('auth') === '1'
     const ask = params.get('ask') === '1'
+    // ?coding=1 previews an active run; ?coding=blocked previews the
+    // retryable failed state (including a low-confidence suggestion).
+    const codingParam = params.get('coding')
+    const coding = codingParam === '1' || codingParam === 'blocked' || codingParam === 'failed'
+    const codingBlocked = codingParam === 'blocked' || codingParam === 'failed'
+    const codingLoading = coding && !codingBlocked
+    const previewCodingStatus = codingBlocked ? blockedCodingStatus : codingStatus
+    const previewConversationId = 'c1'
+    if (coding) {
+      sharedChatPanelState.codingStatusByConversation.set(previewConversationId, previewCodingStatus)
+      sharedChatPanelState.codingDiffByConversation.set(previewConversationId, codingDiff)
+    }
+    // ?coding=1 exposes the real diagnostics tab; switch to the diff tab to
+    // exercise the new per-file open/copy actions.
     // ?new=1 renders a brand-new conversation (interactive agent picker in
     // the header); default is a bound conversation (subdued agent badge).
     const isNew = params.get('new') === '1'
-    const isLoading = busy || auth
+    const isLoading = busy || auth || codingLoading
     // Same one-expanded-at-a-time accordion as ChatPanelContainer.
     const pendingAttentionPanels = computed<AttentionPanelId[]>(() => {
       const ids: AttentionPanelId[] = []
@@ -80,8 +164,9 @@ const App = defineComponent({
     return () => h('div',{class:'preview-shell'},[
       h(ConversationSidebar,{agentItems,groupItems,longTermGoalItems:goalItems,conversationItems,conversationListLoaded:true,onNewConversation:()=>{},onToggleCollapse:()=>{},onSelectConversation:()=>{},onOpenAgent:()=>{},onOpenGroup:()=>{},onOpenLongTermGoal:()=>{},onNewLongTermGoal:()=>{},onDeleteLongTermGoal:()=>{},onDeleteConversation:()=>{},onRenameConversation:()=>{}}),
       h('main',{class:'preview-chat'},[
-        h(ChatHeader,{contextLabel:isNew?'💬 新对话':'🤖 主 Agent',contextDetail:'',availableChannelBindings:[],selectedChannelBindingId:'',providers:[{id:'anthropic',name:'Anthropic',models:['Opus 4.8']}],activeProviderId:'anthropic',selectedModel:'Opus 4.8',showProviderSelector:true,reasoningStrength:'high',temperature:null,providerDefaultTemperature:1,isGroupConversation:false,showAgentSelector:isNew,availableAgents:[{id:'a1',name:'前端工程师',icon:'🤖'},{id:'a2',name:'文案作者',icon:'✍️'}],selectedAgentId:'',onSelectProviderModel:()=>{},'onUpdate:reasoningStrength':()=>{},'onUpdate:temperature':()=>{},'onUpdate:selectedAgentId':()=>{}}),
+        h(ChatHeader,{contextLabel:isNew?'💬 新对话':'🤖 主 Agent',contextDetail:'',availableChannelBindings:[],selectedChannelBindingId:'',providers:[{id:'anthropic',name:'Anthropic',models:['Opus 4.8']}],activeProviderId:'anthropic',selectedModel:'Opus 4.8',showProviderSelector:true,reasoningStrength:'high',temperature:null,providerDefaultTemperature:1,isGroupConversation:false,showAgentSelector:isNew,availableAgents:[{id:'a1',name:'前端工程师',icon:'🤖'},{id:'a2',name:'文案作者',icon:'✍️'}],selectedAgentId:'',codingStatus:coding?previewCodingStatus:null,codingDiffFileCount:coding?2:0,codingLoading,onSelectProviderModel:()=>{},'onUpdate:reasoningStrength':()=>{},'onUpdate:temperature':()=>{},'onUpdate:selectedAgentId':()=>{},onOpenCodingDiff:()=>{},onCancelCoding:()=>{},onRetryCoding:()=>{}}),
         h(MessageList,{messages,isLoading,filePreview:{active:false,filePath:'',lineCount:0,added:0,removed:0},assistantName:'前端工程师'}),
+        h('div',{class:'preview-dock'},[
         h('div',{class:'preview-attention'},[
           h(PinnedTodoPanel,{items:[{id:1,title:'定位表格渲染瓶颈',status:'completed'},{id:2,title:'实现虚拟滚动窗口',status:'in-progress'},{id:3,title:'补充性能回归数据',status:'not-started'}],isLoading:true,expanded:accordion.expandedPanel.value==='todo',onToggle:()=>accordion.togglePanel('todo')}),
           ...(auth ? [h(AuthPermissionPanel,{request:{requestId:'r1',title:'运行命令',detail:'local_run_command · 只读'},pendingCount:1,expanded:accordion.expandedPanel.value==='auth',onToggle:()=>accordion.togglePanel('auth'),onRespond:()=>{}})] : []),
@@ -94,12 +179,21 @@ const App = defineComponent({
         h(ChatInput,{
           modelValue:text.value,'onUpdate:modelValue':(v:string)=>text.value=v,isLoading,pendingAuthCount:auth?1:0,pendingImages:[],pendingFiles:[],isUploadingFiles:false,uploadFeedback:'',workspaceVisible:false,authMode:'strict',planModeActive:false,computerUseEnabled:false,computerUsePermissionGranted:true,availableSkills:[{id:'s1',name:'网页开发'},{id:'s2',name:'代码审查'}],activeSkillIds:new Set(['s1']),showSkillPicker:false,isGroupConversation:false,onSend:()=>{},onStop:()=>{},onAddAttachments:()=>{},onRemoveImage:()=>{},onRemoveFile:()=>{},onToggleWorkspace:()=>{},'onUpdate:authMode':()=>{},onTogglePlanMode:()=>{},onToggleComputerUse:()=>{},onToggleSkillPicker:()=>{},onSelectAllSkills:()=>{},onClearSkills:()=>{},onToggleSkill:()=>{}
         })
-      ])
+        ])
+      ]),
+      ...(coding ? [h('aside',{class:'preview-workspace'},[
+        h('div',{class:'preview-workspace-tabs'},[
+          h('button',{type:'button',class:{active:true}},'Diff')
+        ]),
+        h('div',{class:'preview-workspace-body'},[
+          h(CodingDiffTab,{conversationId:previewConversationId})
+        ])
+      ])] : [])
     ])
   }
 })
 const app=createApp(App); app.use(i18n); app.mount('#app')
 
 const style=document.createElement('style'); style.textContent=`
-html,body,#app{height:100%;overflow:hidden}.preview-shell{display:flex;height:100%;background:var(--app-main-surface)}.preview-shell>.conv-sidebar{width:224px;flex:0 0 224px}.preview-chat{--chat-message-gutter:clamp(24px,4vw,64px);--chat-message-track-max:980px;--chat-user-message-max:680px;--chat-user-bubble-max:540px;--chat-event-card-max:100%;--chat-input-gutter:16px;position:relative;display:flex;flex:1;min-width:640px;min-height:0;flex-direction:column;overflow:hidden;background:var(--app-chat-canvas)}.preview-attention{flex:0 0 auto;width:calc(100% - 32px);margin:0 auto;padding:0 0 6px;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:auto}.preview-attention>*{flex:0 0 auto;width:100%}
+html,body,#app{height:100%;overflow:hidden}.preview-shell{display:flex;height:100%;background:var(--app-main-surface)}.preview-shell>.conv-sidebar{width:224px;flex:0 0 224px}.preview-chat{--chat-message-gutter:clamp(24px,4vw,64px);--chat-message-track-max:980px;--chat-user-message-max:680px;--chat-user-bubble-max:540px;--chat-event-card-max:100%;--chat-input-gutter:16px;position:relative;display:flex;flex:1;min-width:640px;min-height:0;flex-direction:column;overflow:hidden;background:var(--app-chat-canvas)}.preview-dock{position:absolute;left:0;right:0;bottom:0;z-index:7;display:flex;flex-direction:column;width:100%;pointer-events:none}.preview-attention{position:relative;width:calc(100% - 32px);max-height:min(42vh,360px);overflow-y:auto;margin:0 auto 8px;padding:0;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:none}.preview-attention>*{flex:0 0 auto;width:100%;pointer-events:auto}.preview-workspace{display:flex;flex:0 0 min(460px,42vw);min-width:0;flex-direction:column;border-left:1px solid var(--app-border);background:var(--app-panel)}.preview-workspace-tabs{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--app-border)}.preview-workspace-tabs button{appearance:none;border:1px solid var(--app-border);border-radius:999px;background:var(--app-panel-muted);color:var(--app-text-muted);padding:3px 9px;font:inherit;font-size:.7rem;cursor:pointer}.preview-workspace-tabs button.active{border-color:var(--app-accent);color:var(--app-accent)}.preview-workspace-tabs button:focus-visible{outline:2px solid var(--app-accent);outline-offset:1px}.preview-workspace-body{flex:1;min-width:0;min-height:0;overflow:hidden}
 `; document.head.appendChild(style)

@@ -68,9 +68,9 @@ export interface WorkGroupToolCounts {
  * Status for a collapsed work-summary group. A turn folds every tool call into
  * one group, so marking the group failed on any single failure painted whole
  * conversations red: 54 successful runs plus 5 failures must read as a
- * completed turn with a failure count, not as an error. The group is failed
- * only when every finished tool failed; mixed results stay completed and are
- * surfaced through the separate failure badge.
+ * completed turn, not as an error. The group is failed only when every
+ * finished tool failed; mixed results stay completed. The summary row itself
+ * shows no failure count — expanded tool rows keep their per-call status.
  */
 export function deriveWorkGroupStatus (counts: WorkGroupToolCounts): WorkGroupStatus {
   if (counts.running > 0) return 'running'

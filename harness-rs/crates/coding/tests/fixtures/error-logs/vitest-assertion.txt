@@ -1,0 +1,4 @@
+ FAIL  src/lib/math.test.ts > math > adds numbers
+AssertionError: expected 4 to be 5
+ ❯ src/lib/math.test.ts:6:20
+ ❯ src/lib/math.test.ts:4:5

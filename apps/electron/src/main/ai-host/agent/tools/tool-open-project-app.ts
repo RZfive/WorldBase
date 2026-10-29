@@ -3,6 +3,8 @@ import type { ToolDefinition } from '../../../ai-harness/contracts.js'
 
 interface ToolServices {
   getMainWindow?: () => BrowserWindow | null
+  /** Chat conversation this run belongs to (see ToolServices in tools/index.ts). */
+  conversationId?: string
 }
 
 interface OpenProjectAppArgs {
@@ -52,7 +54,8 @@ export function toolOpenProjectApp (services: ToolServices): Tool {
       onProgress?.('Opening project in shell UI...', `${project_id} (${mode})`)
       mainWindow.webContents.send('project:openInShell', {
         projectId: project_id,
-        mode
+        mode,
+        ...(services.conversationId ? { conversationId: services.conversationId } : {})
       })
 
       return {

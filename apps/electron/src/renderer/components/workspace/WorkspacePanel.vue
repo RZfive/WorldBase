@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import './tab-registry-entries'
 import {
   getWorkspaceTabDefinition,
-  listWorkspaceTabDefinitions,
+  listUserAddableWorkspaceTabDefinitions,
   type WorkspaceTabInstance
 } from './tab-registry'
 
@@ -85,7 +85,7 @@ const activeTabProps = computed<Record<string, unknown>>(() => {
 })
 
 const addableDefinitions = computed(() => {
-  return listWorkspaceTabDefinitions()
+  return listUserAddableWorkspaceTabDefinitions()
     .filter(definition => {
       if (!definition.singleton) return true
       return !props.tabs.some(tab => tab.kind === definition.kind)

@@ -195,7 +195,23 @@ fn selected_folder_workspace(services: &ToolServices) -> Result<&Path> {
         .ok_or_else(|| anyhow::anyhow!("no folder workspace is selected for this conversation"))
 }
 
-fn project_path(input: &Value, services: &ToolServices) -> Result<(String, PathBuf)> {
+/// Resolve the managed project selected by the conversation. Command tools use
+/// this as a fallback when the conversation has no folder workspace, so a
+/// project conversation still runs in its project root.
+fn target_project_workspace(services: &ToolServices) -> Result<Option<(String, PathBuf)>> {
+    let Some(project_id) = services
+        .target_project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let root = services.projects.project_root(project_id)?;
+    Ok(Some((project_id.to_string(), root)))
+}
+
+pub(crate) fn project_path(input: &Value, services: &ToolServices) -> Result<(String, PathBuf)> {
     let id = input
         .get("project_id")
         .or_else(|| input.get("project"))
@@ -214,6 +230,76 @@ fn project_relative_path(
     services.projects.project_path(project_id, relative_path)
 }
 
+/// The filesystem scope used by coding tools. A managed project wins when the
+/// conversation or caller names one; otherwise the selected folder workspace
+/// is a first-class coding root instead of requiring a managed project.
+#[derive(Debug, Clone)]
+pub(crate) struct CodingWorkspace {
+    pub(crate) project_id: Option<String>,
+    pub(crate) root: PathBuf,
+}
+
+impl CodingWorkspace {
+    pub(crate) fn is_project(&self) -> bool {
+        self.project_id.is_some()
+    }
+
+    pub(crate) fn file_path(
+        &self,
+        services: &ToolServices,
+        relative_path: &str,
+    ) -> Result<PathBuf> {
+        if let Some(project_id) = self.project_id.as_deref() {
+            return services.projects.project_path(project_id, relative_path);
+        }
+        let path = services.folder_workspace_path(relative_path);
+        services.ensure_folder_workspace_path(&path)?;
+        Ok(path)
+    }
+}
+
+pub(crate) fn resolve_coding_workspace(
+    input: &Value,
+    services: &ToolServices,
+) -> Result<CodingWorkspace> {
+    let explicit_project = input
+        .get("project_id")
+        .or_else(|| input.get("project"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty());
+    let target_project = services
+        .target_project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty());
+    // After create_project, coding tools should continue against the project
+    // created earlier in the same run even if the model omits project_id.
+    let created_project = services
+        .created_project_id
+        .lock()
+        .ok()
+        .and_then(|value| value.clone());
+    let project_id = explicit_project
+        .or(target_project)
+        .map(str::to_string)
+        .or(created_project);
+    if let Some(project_id) = project_id {
+        let root = services.projects.project_root(&project_id)?;
+        return Ok(CodingWorkspace {
+            project_id: Some(project_id),
+            root,
+        });
+    }
+    if let Some(root) = services.folder_workspace.as_ref() {
+        return Ok(CodingWorkspace {
+            project_id: None,
+            root: root.clone(),
+        });
+    }
+    anyhow::bail!("coding tools require a managed project or a selected folder workspace")
+}
+
 fn shell_program(command: &str) -> (String, Vec<String>) {
     if cfg!(target_os = "windows") {
         ("cmd".into(), vec!["/C".into(), command.into()])
@@ -221,7 +307,6 @@ fn shell_program(command: &str) -> (String, Vec<String>) {
         ("sh".into(), vec!["-c".into(), command.into()])
     }
 }
-
 
 #[derive(Debug, Clone)]
 struct ParsedCommand {
@@ -1180,7 +1265,7 @@ fn spill_files_note(record: &Value) -> String {
 /// allow-listed `run_workspace_command` contract, and `Shell` only blocks the
 /// destructive-command class (general `run_shell_command`).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CommandPolicy {
+pub(crate) enum CommandPolicy {
     Project,
     Workspace,
     Shell,
@@ -1192,7 +1277,7 @@ enum CommandPolicy {
 /// final exit code. Output beyond the inline caps is spilled to files under
 /// `spill_dir` (typically the tool-results directory) while the command keeps
 /// running to completion.
-async fn run_managed_command(
+pub(crate) async fn run_managed_command(
     command: &str,
     cwd: &Path,
     timeout: u64,
@@ -1666,23 +1751,36 @@ fn output_mode_name(mode: worldbase_search::GrepOutputMode) -> &'static str {
 
 const WORKSPACE_PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
 const WORKSPACE_BINARY_PREVIEW_EXTENSIONS: &[&str] = &[
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".avif",
-    ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    ".zip", ".tar", ".gz", ".bz2", ".rar", ".7z",
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-    ".mp3", ".mp4", ".avi", ".mov", ".wav", ".flac",
-    ".exe", ".dll", ".so", ".dylib", ".o",
-    ".sqlite", ".db",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".avif", ".woff", ".woff2", ".ttf",
+    ".eot", ".otf", ".zip", ".tar", ".gz", ".bz2", ".rar", ".7z", ".pdf", ".doc", ".docx", ".xls",
+    ".xlsx", ".ppt", ".pptx", ".mp3", ".mp4", ".avi", ".mov", ".wav", ".flac", ".exe", ".dll",
+    ".so", ".dylib", ".o", ".sqlite", ".db",
 ];
 const WORKSPACE_GLOB_IGNORED_DIRS: &[&str] = &[
-    "node_modules", ".next", ".git", "dist", "build", ".cache",
-    ".turbo", "coverage", ".output", "__pycache__", ".venv",
+    "node_modules",
+    ".next",
+    ".git",
+    "dist",
+    "build",
+    ".cache",
+    ".turbo",
+    "coverage",
+    ".output",
+    "__pycache__",
+    ".venv",
 ];
 
-/// Normalize a workspace-relative path exactly like the Electron host:
-/// trim, convert backslashes, and strip leading slashes.
+/// Normalize a workspace-relative path: trim, convert backslashes, drop
+/// leading/trailing slashes, and collapse `.`/empty segments. A root selector
+/// such as `.` or `./` must resolve to the workspace root, not to a literal
+/// child directory named `.` (which would list nothing).
 fn normalize_workspace_rel(rel: &str) -> String {
-    rel.trim().replace('\\', "/").trim_start_matches('/').to_string()
+    rel.trim()
+        .replace('\\', "/")
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn workspace_preview_extension_is_binary(path: &Path) -> bool {
@@ -1690,7 +1788,9 @@ fn workspace_preview_extension_is_binary(path: &Path) -> bool {
         return false;
     };
     let lower = name.to_lowercase();
-    WORKSPACE_BINARY_PREVIEW_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+    WORKSPACE_BINARY_PREVIEW_EXTENSIONS
+        .iter()
+        .any(|ext| lower.ends_with(ext))
 }
 
 /// Durable temp-file-then-rename write, same as the Electron host's folder
@@ -1720,7 +1820,10 @@ async fn write_workspace_file_atomic(path: &Path, content: &str) -> Result<()> {
 }
 
 fn workspace_glob_escape_char(ch: char) -> String {
-    if matches!(ch, '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '\\') {
+    if matches!(
+        ch,
+        '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '\\'
+    ) {
         format!("\\{ch}")
     } else {
         ch.to_string()
@@ -1828,12 +1931,15 @@ fn walk_workspace_glob(
             if WORKSPACE_GLOB_IGNORED_DIRS.contains(&name.as_str()) {
                 continue;
             }
-            if matcher.is_match(&entry_relative) || matcher.is_match(&format!("{entry_relative}/")) {
+            if matcher.is_match(&entry_relative) || matcher.is_match(&format!("{entry_relative}/"))
+            {
                 results.push(json!({ "path": entry_relative, "size": 0, "type": "directory" }));
             }
             walk_workspace_glob(base, &entry_relative, matcher, results, cap)?;
         } else if matcher.is_match(&entry_relative) {
-            let size = std::fs::metadata(entry.path()).map(|meta| meta.len()).unwrap_or(0);
+            let size = std::fs::metadata(entry.path())
+                .map(|meta| meta.len())
+                .unwrap_or(0);
             results.push(json!({ "path": entry_relative, "size": size, "type": "file" }));
         }
     }
@@ -1856,9 +1962,8 @@ impl Tool for WorkspaceListFilesTool {
         true
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        let rel = normalize_workspace_rel(
-            input.get("dir_path").and_then(Value::as_str).unwrap_or(""),
-        );
+        let rel =
+            normalize_workspace_rel(input.get("dir_path").and_then(Value::as_str).unwrap_or(""));
         let root = selected_folder_workspace(services)?;
         let mut total = 0;
         let mut truncated = false;
@@ -2017,14 +2122,11 @@ impl Tool for WorkspaceReadFileTool {
             head_end -= 1;
         }
         let mut tail_start = numbered_content.len() - EDGE_RETURN_CHARS;
-        while tail_start < numbered_content.len()
-            && !numbered_content.is_char_boundary(tail_start)
+        while tail_start < numbered_content.len() && !numbered_content.is_char_boundary(tail_start)
         {
             tail_start += 1;
         }
-        let truncated_chars = numbered_content
-            .len()
-            .saturating_sub(EDGE_RETURN_CHARS * 2);
+        let truncated_chars = numbered_content.len().saturating_sub(EDGE_RETURN_CHARS * 2);
         Ok(json!({
             "file_path": rel,
             "content": format!(
@@ -2065,15 +2167,21 @@ impl Tool for WorkspaceWriteFileTool {
         let content = require_str(&input, "content")?.to_string();
         let rel = normalize_workspace_rel(require_str(&input, "file_path")?);
         anyhow::ensure!(!rel.is_empty(), "file_path is required");
+        crate::work_file_guard::assert_direct_write_allowed(&rel)?;
         let _root = selected_folder_workspace(services)?;
         let path = services.folder_workspace_path(&rel);
         services.ensure_folder_workspace_path(&path)?;
         let overwritten = path.is_file();
+        let before = if overwritten {
+            tokio::fs::read_to_string(&path).await.ok()
+        } else {
+            None
+        };
         write_workspace_file_atomic(&path, &content).await?;
         services.mark_file_read(&path.canonicalize().unwrap_or(path.clone()));
-        Ok(
-            json!({"success": true, "file_path": rel, "bytes_written": content.len(), "overwritten": overwritten}),
-        )
+        let mut result = json!({"success": true, "file_path": rel, "bytes_written": content.len(), "overwritten": overwritten});
+        crate::work_file_guard::attach_write_diff(&mut result, &rel, before.as_deref(), &content);
+        Ok(result)
     }
 }
 
@@ -2104,6 +2212,7 @@ impl Tool for WorkspaceEditFileTool {
             .unwrap_or(false);
         let rel = normalize_workspace_rel(require_str(&input, "file_path")?);
         anyhow::ensure!(!rel.is_empty(), "file_path is required");
+        crate::work_file_guard::assert_direct_write_allowed(&rel)?;
         anyhow::ensure!(
             !old.is_empty(),
             "old_string must not be empty. To create a new file, use write_workspace_file instead."
@@ -2143,9 +2252,9 @@ impl Tool for WorkspaceEditFileTool {
         };
         write_workspace_file_atomic(&path, &updated).await?;
         services.mark_file_read(&tracked_path);
-        Ok(
-            json!({"success": true, "file_path": rel, "replacements": if replace_all { occurrences } else { 1 }}),
-        )
+        let mut result = json!({"success": true, "file_path": rel, "replacements": if replace_all { occurrences } else { 1 }});
+        crate::work_file_guard::attach_write_diff(&mut result, &rel, Some(&content), &updated);
+        Ok(result)
     }
 }
 
@@ -2164,8 +2273,7 @@ fn workspace_patch_number(value: Option<&Value>) -> Option<f64> {
 }
 
 fn normalize_workspace_patches(raw: Option<&Value>) -> Result<Vec<WorkspacePatchEntry>> {
-    const SHAPE: &str =
-        "patches must be an array of { start_line, end_line, content } objects.";
+    const SHAPE: &str = "patches must be an array of { start_line, end_line, content } objects.";
     let Some(value) = raw else {
         anyhow::bail!("{SHAPE}");
     };
@@ -2183,10 +2291,13 @@ fn normalize_workspace_patches(raw: Option<&Value>) -> Result<Vec<WorkspacePatch
     let mut patches = Vec::with_capacity(array.len());
     for (index, entry) in array.iter().enumerate() {
         let Some(object) = entry.as_object() else {
-            anyhow::bail!("patches[{index}] must be an object with start_line, end_line, and content.");
+            anyhow::bail!(
+                "patches[{index}] must be an object with start_line, end_line, and content."
+            );
         };
-        let start_line = workspace_patch_number(object.get("start_line"))
-            .ok_or_else(|| anyhow::anyhow!("patches[{index}].start_line must be a positive integer."))?;
+        let start_line = workspace_patch_number(object.get("start_line")).ok_or_else(|| {
+            anyhow::anyhow!("patches[{index}].start_line must be a positive integer.")
+        })?;
         let end_line = workspace_patch_number(object.get("end_line"))
             .ok_or_else(|| anyhow::anyhow!("patches[{index}].end_line must be an integer."))?;
         let Some(content) = object.get("content").and_then(Value::as_str) else {
@@ -2230,6 +2341,7 @@ impl Tool for WorkspacePatchFileTool {
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let rel = normalize_workspace_rel(require_str(&input, "file_path")?);
         anyhow::ensure!(!rel.is_empty(), "file_path is required");
+        crate::work_file_guard::assert_direct_write_allowed(&rel)?;
         let patches = normalize_workspace_patches(input.get("patches"))?;
         anyhow::ensure!(
             !patches.is_empty(),
@@ -2284,9 +2396,9 @@ impl Tool for WorkspacePatchFileTool {
         let new_content = lines.join("\n");
         write_workspace_file_atomic(&path, &new_content).await?;
         services.mark_file_read(&path.canonicalize().unwrap_or(path.clone()));
-        Ok(
-            json!({"success": true, "file_path": rel, "patches_applied": sorted.len(), "original_lines": total_lines, "new_lines": lines.len()}),
-        )
+        let mut result = json!({"success": true, "file_path": rel, "patches_applied": sorted.len(), "original_lines": total_lines, "new_lines": lines.len()});
+        crate::work_file_guard::attach_write_diff(&mut result, &rel, Some(&content), &new_content);
+        Ok(result)
     }
 }
 
@@ -2340,9 +2452,8 @@ impl Tool for WorkspaceGlobTool {
         const DEFAULT_GLOB_RESULTS: usize = 100;
         const MAX_GLOB_RESULTS: usize = 500;
         let pattern = require_str(&input, "pattern")?.to_string();
-        let rel = normalize_workspace_rel(
-            input.get("dir_path").and_then(Value::as_str).unwrap_or(""),
-        );
+        let rel =
+            normalize_workspace_rel(input.get("dir_path").and_then(Value::as_str).unwrap_or(""));
         let root = selected_folder_workspace(services)?;
         let base = if rel.is_empty() {
             root.to_path_buf()
@@ -2363,15 +2474,13 @@ impl Tool for WorkspaceGlobTool {
         if truncated {
             matches.truncate(limit);
         }
-        Ok(
-            json!({
-                "pattern": pattern,
-                "dir_path": if rel.is_empty() { Value::from(".") } else { Value::from(rel) },
-                "matches": matches,
-                "total_matches": if truncated { limit + 1 } else { matches.len() },
-                "truncated": truncated,
-            }),
-        )
+        Ok(json!({
+            "pattern": pattern,
+            "dir_path": if rel.is_empty() { Value::from(".") } else { Value::from(rel) },
+            "matches": matches,
+            "total_matches": if truncated { limit + 1 } else { matches.len() },
+            "truncated": truncated,
+        }))
     }
 }
 
@@ -2392,9 +2501,8 @@ impl Tool for WorkspaceGrepTool {
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let pattern = require_str(&input, "pattern")?.to_string();
-        let rel = normalize_workspace_rel(
-            input.get("dir_path").and_then(Value::as_str).unwrap_or(""),
-        );
+        let rel =
+            normalize_workspace_rel(input.get("dir_path").and_then(Value::as_str).unwrap_or(""));
         let root = selected_folder_workspace(services)?;
         let base = if rel.is_empty() {
             root.to_path_buf()
@@ -2468,10 +2576,10 @@ impl Tool for WorkspaceCommandTool {
         "run_workspace_command"
     }
     fn description(&self) -> &str {
-        "Run a short-lived install, build, test, lint, type-check, or diagnostic command inside the selected folder workspace. Do not start long-lived dev servers. Allowed commands: npm / npx / pnpm / yarn / bun / node / tsx, the tsc / eslint / prettier / vitest / jest / playwright runners, read-only git (status, diff, log, show, rev-parse, branch), and read-only shell utilities (cat, ls, pwd, which, head, tail, wc, find, grep, sort, uniq, echo, env, date). Other interpreters such as python or sqlite3 are rejected — do the equivalent with `node`. Run ONE command per call: shell chaining (&& | ;), redirections and newlines are rejected unless developer command mode (THE_WORLD_DEV_COMMANDS=1) is enabled, and backticks / $() command substitution are always rejected. For chained commands, pipes, redirections, other interpreters, or git write operations use run_shell_command instead. Output is captured inline up to 20k chars of stdout / 10k of stderr plus their last few thousand chars (tail fields); when the cap is exceeded the command keeps running and the full output is saved to files listed in stdoutFile / stderrFile. grep exit code 1 just means no matches. If the foreground wait times out the command keeps running in the background and returns a command_id; poll it with get_workspace_command_status instead of retrying."
+        "Run a short-lived install, build, test, lint, type-check, or diagnostic command inside the selected folder workspace, or inside the conversation's active managed project when no folder workspace is selected. Project fallback uses the stricter project command policy. Do not start long-lived dev servers. Allowed commands: npm / npx / pnpm / yarn / bun / node / tsx, the tsc / eslint / prettier / vitest / jest / playwright runners, read-only git (status, diff, log, show, rev-parse, branch), and read-only shell utilities (cat, ls, pwd, which, head, tail, wc, find, grep, sort, uniq, echo, env, date). Other interpreters such as python or sqlite3 are rejected — do the equivalent with `node`. Run ONE command per call: shell chaining (&& | ;), redirections and newlines are rejected unless developer command mode (THE_WORLD_DEV_COMMANDS=1) is enabled, and backticks / $() command substitution are always rejected. For chained commands, pipes, redirections, other interpreters, or git write operations use run_shell_command instead. Output is captured inline up to 20k chars of stdout / 10k of stderr plus their last few thousand chars (tail fields); when the cap is exceeded the command keeps running and the full output is saved to files listed in stdoutFile / stderrFile. grep exit code 1 just means no matches. If the foreground wait times out the command keeps running in the background and returns a command_id; poll it with get_workspace_command_status instead of retrying."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"command":{"type":"string","description":"The command to run, e.g. \"npm test\", \"pnpm build\", \"npx tsc --noEmit\"."},"cwd":{"type":"string","description":"Working subdirectory relative to the workspace root."},"timeout_seconds":{"type":"integer","description":"Foreground wait timeout. Default 90, max 180."}},"required":["command"]})
+        json!({"type":"object","properties":{"command":{"type":"string","description":"The command to run, e.g. \"npm test\", \"pnpm build\", \"npx tsc --noEmit\"."},"cwd":{"type":"string","description":"Working subdirectory relative to the workspace root, or relative to the active managed project root when no folder workspace is selected."},"timeout_seconds":{"type":"integer","description":"Foreground wait timeout. Default 90, max 180."}},"required":["command"]})
     }
     fn domain(&self) -> &str {
         "desktop"
@@ -2484,25 +2592,49 @@ impl Tool for WorkspaceCommandTool {
     }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let command = require_str(&input, "command")?;
-        let root = selected_folder_workspace(services)?;
-        let cwd = input
-            .get("cwd")
-            .and_then(Value::as_str)
-            .map(|value| services.folder_workspace_path(value))
-            .unwrap_or_else(|| root.to_path_buf());
-        services.ensure_folder_workspace_path(&cwd)?;
         // Node's handlers never sandboxed these commands, and package
         // managers legitimately write caches under $HOME — keep parity.
         let spill_dir = services.store.data_dir().join("tool-results");
+        if let Some(root) = services.folder_workspace.as_deref() {
+            let cwd = input
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(|value| services.folder_workspace_path(value))
+                .unwrap_or_else(|| root.to_path_buf());
+            services.ensure_folder_workspace_path(&cwd)?;
+            return run_managed_command(
+                command,
+                &cwd,
+                timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
+                None,
+                false,
+                Some(root),
+                None,
+                CommandPolicy::Workspace,
+                Some(&spill_dir),
+            )
+            .await;
+        }
+        let Some((project_id, root)) = target_project_workspace(services)? else {
+            return Err(anyhow::anyhow!(
+                "no folder workspace is selected for this conversation"
+            ));
+        };
+        let cwd = input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(|value| project_relative_path(services, &project_id, value))
+            .transpose()?
+            .unwrap_or_else(|| root.clone());
         run_managed_command(
             command,
             &cwd,
             timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
-            None,
+            Some(&project_id),
             false,
             Some(&root),
-            None,
-            CommandPolicy::Workspace,
+            Some(Arc::clone(&services.projects)),
+            CommandPolicy::Project,
             Some(&spill_dir),
         )
         .await
@@ -2516,10 +2648,10 @@ impl Tool for WorkspaceShellCommandTool {
         "run_shell_command"
     }
     fn description(&self) -> &str {
-        "Run a short-lived shell command with normal shell semantics: chaining (&& || ;), pipes, redirections, newlines, and $()/backtick substitution are all allowed, and any interpreter (node, python, go, sqlite3, …) may be used. The command runs inside the selected folder workspace, or inside a managed project when project_id is provided. Destructive commands (rm -rf /, sudo, mkfs, fork bombs, curl | bash) are blocked; `cd` targets outside the workspace and a `cwd` outside it require user approval. Do not start long-lived dev servers. Output is captured inline up to 20k chars of stdout / 10k of stderr plus their last few thousand chars (tail fields); when the cap is exceeded the command keeps running and the full output is saved to files listed in stdoutFile / stderrFile. If the foreground wait times out (default 90s, max 180) the command keeps running in the background and returns a command_id; poll it with get_command_status instead of retrying."
+        "Run a short-lived shell command with normal shell semantics: chaining (&& || ;), pipes, redirections, newlines, and $()/backtick substitution are all allowed, and any interpreter (node, python, go, sqlite3, …) may be used. The command runs inside the selected folder workspace, or inside a managed project when project_id is provided. When no folder workspace is selected and the conversation has an active managed project, the command runs in that project root with project-scoped ownership while keeping normal shell semantics. Destructive commands (rm -rf /, sudo, mkfs, fork bombs, curl | bash) are blocked; `cd` targets outside the workspace and a `cwd` outside it require user approval. Do not start long-lived dev servers. Output is captured inline up to 20k chars of stdout / 10k of stderr plus their last few thousand chars (tail fields); when the cap is exceeded the command keeps running and the full output is saved to files listed in stdoutFile / stderrFile. If the foreground wait times out (default 90s, max 180) the command keeps running in the background and returns a command_id; poll it with get_command_status instead of retrying."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to run, e.g. \"pnpm test\", \"git add -A && git commit -m 'msg'\", \"python3 script.py\", \"ls -la | head -50\"."},"cwd":{"type":"string","description":"Working subdirectory relative to the workspace or project root."},"timeout_seconds":{"type":"integer","description":"Foreground wait timeout. Default 90, max 180."},"project_id":{"type":"string","description":"Run inside this managed project instead of the selected folder workspace."}},"required":["command"]})
+        json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to run, e.g. \"pnpm test\", \"git add -A && git commit -m 'msg'\", \"python3 script.py\", \"ls -la | head -50\"."},"cwd":{"type":"string","description":"Working subdirectory relative to the workspace root or the project root."},"timeout_seconds":{"type":"integer","description":"Foreground wait timeout. Default 90, max 180."},"project_id":{"type":"string","description":"Run inside this managed project instead of the selected folder workspace or the conversation's active managed project."}},"required":["command"]})
     }
     fn domain(&self) -> &str {
         "desktop"
@@ -2547,7 +2679,7 @@ impl Tool for WorkspaceShellCommandTool {
                 .map(|value| project_relative_path(services, &project_id, value))
                 .transpose()?
                 .unwrap_or_else(|| root.clone());
-            run_managed_command(
+            return run_managed_command(
                 command,
                 &cwd,
                 timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
@@ -2558,28 +2690,51 @@ impl Tool for WorkspaceShellCommandTool {
                 CommandPolicy::Shell,
                 Some(&spill_dir),
             )
-            .await
-        } else {
-            let root = selected_folder_workspace(services)?;
+            .await;
+        }
+        if let Some(root) = services.folder_workspace.as_deref() {
             let cwd = input
                 .get("cwd")
                 .and_then(Value::as_str)
                 .map(|value| services.folder_workspace_path(value))
                 .unwrap_or_else(|| root.to_path_buf());
             services.ensure_folder_workspace_path(&cwd)?;
-            run_managed_command(
+            return run_managed_command(
                 command,
                 &cwd,
                 timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
                 None,
                 false,
-                Some(&root),
+                Some(root),
                 None,
                 CommandPolicy::Shell,
                 Some(&spill_dir),
             )
-            .await
+            .await;
         }
+        let Some((project_id, root)) = target_project_workspace(services)? else {
+            return Err(anyhow::anyhow!(
+                "no folder workspace is selected for this conversation"
+            ));
+        };
+        let cwd = input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(|value| project_relative_path(services, &project_id, value))
+            .transpose()?
+            .unwrap_or_else(|| root.clone());
+        run_managed_command(
+            command,
+            &cwd,
+            timeout_argument(&input, "timeout_seconds", "timeout", 90, 5, 180),
+            Some(&project_id),
+            false,
+            Some(&root),
+            Some(Arc::clone(&services.projects)),
+            CommandPolicy::Shell,
+            Some(&spill_dir),
+        )
+        .await
     }
 }
 
@@ -3034,10 +3189,10 @@ impl Tool for LocalReadFileTool {
         let content = decode_local_file_bytes(&bytes, encoding)?;
         let content: String = content.chars().take(100_000).collect();
         Ok(json!({"file_path": path, "size": meta.len(), "content": content}))
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct LocalWriteFileTool;
@@ -3230,10 +3385,10 @@ impl Tool for LocalWriteFileTool {
             "size": content.len(),
             "message": format!("File saved: {}", path.display())
         }))
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 fn value_to_cell(value: &Value) -> String {
@@ -3482,10 +3637,10 @@ impl Tool for LocalCommandTool {
         };
         local_command_output(&mut result);
         Ok(result)
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct GlobSearchTool;
@@ -3728,7 +3883,8 @@ impl Tool for CallProjectApiTool {
                                 if c.is_ascii_alphanumeric() || "-_.~".contains(c) {
                                     c.to_string().into_bytes()
                                 } else {
-                                    c.to_string().into_bytes()
+                                    c.to_string()
+                                        .into_bytes()
                                         .iter()
                                         .flat_map(|b| format!("%{:02X}", b).into_bytes())
                                         .collect()
@@ -4095,11 +4251,11 @@ impl Tool for AnalyzeProjectDataTool {
             "required": ["project_id", "analysis_type"]
         })
     }
-        fn electron_native(&self) -> bool {
+    fn electron_native(&self) -> bool {
         true
     }
 
-async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let analysis_type = supported_project_analysis_type(&input)?;
         let (id, _root) = project_path(&input, services)?;
         let requested_database = input.get("database_path").and_then(Value::as_str);
@@ -4883,7 +5039,9 @@ impl Tool for ManageWorkspaceTabsTool {
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         let action = require_str(&input, "action")?;
         if action != "list" && action != "activate" && action != "close" {
-            anyhow::bail!("manage_workspace_tabs: action must be \"list\", \"activate\" or \"close\"");
+            anyhow::bail!(
+                "manage_workspace_tabs: action must be \"list\", \"activate\" or \"close\""
+            );
         }
         let optional_field = |key: &str| {
             input
@@ -5031,8 +5189,11 @@ impl Tool for ManageTodoListTool {
         // every call error out and the todo UI never received a list to show.
         let normalize_status = |status: Option<&str>| -> &'static str {
             match status.map(str::trim).filter(|value| !value.is_empty()) {
-                Some("completed") | Some("complete") | Some("done") | Some("finished") => "completed",
-                Some("in-progress") | Some("in_progress") | Some("inprogress") | Some("doing") | Some("active") => "in-progress",
+                Some("completed") | Some("complete") | Some("done") | Some("finished") => {
+                    "completed"
+                }
+                Some("in-progress") | Some("in_progress") | Some("inprogress") | Some("doing")
+                | Some("active") => "in-progress",
                 _ => "not-started",
             }
         };
@@ -5923,7 +6084,6 @@ impl Tool for CreateScheduledTaskTool {
     fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 #[cfg(test)]
@@ -5968,7 +6128,6 @@ impl Tool for ListScheduledTasksTool {
     fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct InstallMcpServerTool;
@@ -6241,7 +6400,6 @@ impl Tool for InstallMcpServerTool {
     fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 #[cfg(test)]
@@ -7460,10 +7618,10 @@ impl Tool for StartAsyncTaskTool {
             trim_async_task_history(&mut map);
         });
         Ok(snapshot)
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct GetTaskStatusTool;
@@ -7486,10 +7644,10 @@ impl Tool for GetTaskStatusTool {
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Async task not found: {id}"))
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct SpawnSubagentsTool;
@@ -7757,10 +7915,10 @@ impl Tool for DocumentListTool {
     }
     async fn execute(&self, _input: Value, services: &ToolServices) -> Result<Value> {
         crate::document_artifacts::list_documents_result(&services.workspace)
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct DocumentReadTool;
@@ -7803,10 +7961,10 @@ impl Tool for DocumentReadTool {
             max_chars,
             &region_ids,
         )
-    }    fn electron_native(&self) -> bool {
+    }
+    fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 fn optional_document_number(input: &Value, key: &str) -> Result<Option<f64>> {
@@ -8759,7 +8917,7 @@ fn _keep_types_linked(_: Option<Duration>) {}
 #[cfg(test)]
 mod workspace_native_parity_tests {
     use super::{
-        WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool,
+        WorkspaceDeleteFileTool, WorkspaceEditFileTool, WorkspaceGlobTool, WorkspaceListFilesTool,
         WorkspacePatchFileTool, WorkspaceReadFileTool, WorkspaceWriteFileTool,
     };
     use crate::{Tool, ToolServices};
@@ -8790,10 +8948,44 @@ mod workspace_native_parity_tests {
             skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
             scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
             mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
-            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(root.join("projects"))),
+            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(
+                root.join("projects"),
+            )),
             group_collaboration: None,
             subagent_runtime: None,
         }
+    }
+
+    #[tokio::test]
+    async fn list_workspace_files_treats_dot_as_workspace_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+        std::fs::create_dir_all(temp.path().join("ws/src")).unwrap();
+        std::fs::write(temp.path().join("ws/README.md"), "root file").unwrap();
+        std::fs::write(temp.path().join("ws/src/main.ts"), "export {}").unwrap();
+
+        for dir_path in [".", "./", "/"] {
+            let listed = WorkspaceListFilesTool
+                .execute(json!({ "dir_path": dir_path }), &service)
+                .await
+                .unwrap();
+            let entries = listed["entries"].as_array().unwrap();
+            assert!(
+                entries.iter().any(|entry| entry["name"] == "README.md"),
+                "dir_path {dir_path:?} did not list the workspace root"
+            );
+            assert!(
+                entries.iter().any(|entry| entry["name"] == "src"),
+                "dir_path {dir_path:?} did not list the workspace directory"
+            );
+            assert_eq!(listed["totalEntries"], 3);
+        }
+
+        let nested = WorkspaceListFilesTool
+            .execute(json!({ "dir_path": "./src/" }), &service)
+            .await
+            .unwrap();
+        assert_eq!(nested["entries"][0]["path"], "src/main.ts");
     }
 
     #[tokio::test]
@@ -8807,7 +8999,10 @@ mod workspace_native_parity_tests {
             .execute(json!({ "file_path": "empty.md" }), &service)
             .await
             .unwrap();
-        assert_eq!(empty["content"], "(This file exists but is empty - 0 lines.)");
+        assert_eq!(
+            empty["content"],
+            "(This file exists but is empty - 0 lines.)"
+        );
         assert_eq!(empty["total_lines"], 0);
 
         let segment = WorkspaceReadFileTool
@@ -8963,13 +9158,19 @@ mod workspace_native_parity_tests {
         let service = services(temp.path());
 
         let created = WorkspaceWriteFileTool
-            .execute(json!({ "file_path": "app.txt", "content": "one" }), &service)
+            .execute(
+                json!({ "file_path": "app.txt", "content": "one" }),
+                &service,
+            )
             .await
             .unwrap();
         assert_eq!(created["overwritten"], false);
 
         let updated = WorkspaceWriteFileTool
-            .execute(json!({ "file_path": "app.txt", "content": "two" }), &service)
+            .execute(
+                json!({ "file_path": "app.txt", "content": "two" }),
+                &service,
+            )
             .await
             .unwrap();
         assert_eq!(updated["overwritten"], true);
@@ -8983,6 +9184,100 @@ mod workspace_native_parity_tests {
             .await
             .unwrap();
         assert_eq!(edited["replacements"], 1);
+    }
+
+    #[tokio::test]
+    async fn generic_workspace_writes_report_before_after_for_code_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+
+        let created = WorkspaceWriteFileTool
+            .execute(
+                json!({ "file_path": "src/main.ts", "content": "const a = 1;\n" }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["before_content"], "");
+        assert_eq!(created["after_content"], "const a = 1;\n");
+        assert_eq!(created["content_truncated"], false);
+
+        let edited = WorkspaceEditFileTool
+            .execute(
+                json!({ "file_path": "src/main.ts", "old_string": "1", "new_string": "2" }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited["before_content"], "const a = 1;\n");
+        assert_eq!(edited["after_content"], "const a = 2;\n");
+        assert_eq!(edited["content_truncated"], false);
+
+        let patched = WorkspacePatchFileTool
+            .execute(
+                json!({ "file_path": "src/main.ts", "patches": [
+                    { "start_line": 1, "end_line": 1, "content": "const a = 3;" }
+                ] }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(patched["before_content"], "const a = 2;\n");
+        assert_eq!(patched["after_content"], "const a = 3;\n");
+        assert_eq!(patched["content_truncated"], false);
+
+        let oversized = "x".repeat(crate::work_file_guard::MAX_WRITE_DIFF_BYTES + 1);
+        let truncated = WorkspaceWriteFileTool
+            .execute(
+                json!({ "file_path": "src/large.ts", "content": oversized }),
+                &service,
+            )
+            .await
+            .unwrap();
+        assert_eq!(truncated["content_truncated"], true);
+        assert!(truncated.get("before_content").is_none());
+        assert!(truncated.get("after_content").is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_write_tools_reject_office_targets_with_doc_draft_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = services(temp.path());
+
+        for (tool, input) in [
+            (
+                "write",
+                json!({ "file_path": "docs/report.DOCX", "content": "x" }),
+            ),
+            (
+                "edit",
+                json!({ "file_path": "docs/report.docx", "old_string": "x", "new_string": "y" }),
+            ),
+            (
+                "patch",
+                json!({ "file_path": "docs/report.pdf", "patches": [
+                    { "start_line": 1, "end_line": 1, "content": "x" }
+                ] }),
+            ),
+        ] {
+            let error = match tool {
+                "write" => WorkspaceWriteFileTool
+                    .execute(input, &service)
+                    .await
+                    .unwrap_err(),
+                "edit" => WorkspaceEditFileTool
+                    .execute(input, &service)
+                    .await
+                    .unwrap_err(),
+                _ => WorkspacePatchFileTool
+                    .execute(input, &service)
+                    .await
+                    .unwrap_err(),
+            };
+            let message = error.to_string();
+            assert!(message.contains("doc_draft"), "{tool}: {message}");
+        }
+        assert!(!temp.path().join("ws/docs/report.docx").exists());
     }
 
     #[tokio::test]

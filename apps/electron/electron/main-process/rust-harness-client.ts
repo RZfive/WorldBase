@@ -120,6 +120,8 @@ export interface RustChatOptions {
   customTools?: RustCustomToolRegistration[]
   workspaceRoot?: string | null
   targetProjectId?: string | null
+  /** Enable the Rust coding verification gate for project/workspace edits. */
+  codingMode?: boolean
   /** Restrict native Rust MCP calls to servers authorized for this run. */
   allowedMcpServerIds?: string[]
   /** Match the Node providers: reasoning is sent only when thinking is enabled. */
@@ -852,6 +854,7 @@ export class RustHarnessClient {
         customTools: (options?.customTools || []).map(toRustToolDescriptor),
         workspaceRoot: normalizeOptionalString(options?.workspaceRoot),
         targetProjectId: normalizeOptionalString(options?.targetProjectId),
+        codingMode: options?.codingMode === true,
         // Electron treats an empty MCP selection as unrestricted. Keep Rust
         // on that contract instead of turning an empty persisted array into a
         // deny-all policy.
@@ -920,6 +923,10 @@ export class RustHarnessClient {
 
   setSessionAuthMode (sessionId: string, authMode: 'strict' | 'auto'): void {
     this.sessionAuthModes.set(sessionId, authMode)
+  }
+
+  isSessionAutoApproved (sessionId: string): boolean {
+    return this.sessionAuthModes.get(sessionId) === 'auto'
   }
 
   hasSession (sessionId: string): boolean {

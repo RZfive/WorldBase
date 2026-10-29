@@ -5,8 +5,6 @@ const props = withDefaults(defineProps<{
   title: string
   meta?: string
   detail?: string
-  /** Red count badge (e.g. "2 failed") for mixed completed/failed groups. */
-  failureLabel?: string
   /** Target path for a file-tool row; makes `fileLabel` a click-to-open link. */
   filePath?: string
   /** Visible label of the click-to-open link (usually the clamped file path). */
@@ -16,7 +14,6 @@ const props = withDefaults(defineProps<{
 }>(), {
   meta: '',
   detail: '',
-  failureLabel: '',
   filePath: '',
   fileLabel: '',
   status: 'neutral',
@@ -34,6 +31,7 @@ function openFile (): void {
 const expanded = ref(props.defaultExpanded)
 const slots = defineSlots<{
   default?: () => unknown
+  meta?: () => unknown
 }>()
 const hasDetails = computed(() => Boolean(slots.default))
 
@@ -69,10 +67,15 @@ watch(
         @click.stop="openFile"
         @keydown.enter.stop.prevent="openFile"
       >{{ props.fileLabel }}</span>
-      <span v-if="props.meta" class="execution-meta">{{ props.meta }}</span>
-      <span v-if="props.failureLabel" class="execution-failures">{{ props.failureLabel }}</span>
+      <slot name="meta">
+        <span v-if="props.meta" class="execution-meta">{{ props.meta }}</span>
+      </slot>
       <span v-if="props.detail" class="execution-detail">{{ props.detail }}</span>
-      <span v-if="hasDetails" class="execution-chevron" aria-hidden="true">›</span>
+      <span v-if="hasDetails" class="execution-chevron" aria-hidden="true">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </span>
     </button>
 
     <div v-if="expanded && hasDetails" class="execution-body">
@@ -120,7 +123,7 @@ watch(
 .execution-summary:hover:not(:disabled) .execution-detail { color: var(--app-text); }
 .execution-summary:hover:not(:disabled) .execution-chevron,
 .execution-summary:focus-visible:not(:disabled) .execution-chevron,
-.execution-disclosure.expanded .execution-chevron { opacity: 1; }
+.execution-disclosure.expanded > .execution-summary > .execution-chevron { opacity: 1; }
 
 .execution-dot {
   width: 6px;
@@ -174,17 +177,6 @@ watch(
   cursor: pointer;
 }
 .execution-file-link:hover { color: var(--app-accent); text-decoration-style: solid; }
-.execution-failures {
-  flex: 0 0 auto;
-  padding: 0 6px;
-  border: 1px solid rgba(239, 68, 68, 0.25);
-  border-radius: 999px;
-  background: rgba(239, 68, 68, 0.12);
-  color: var(--app-danger-strong);
-  font-size: 0.94em;
-  font-weight: 600;
-  white-space: nowrap;
-}
 .execution-detail {
   flex: 1 1 auto;
   min-width: 0;
@@ -201,7 +193,8 @@ watch(
   opacity: 0.8;
   transform: rotate(0deg);
 }
-.execution-disclosure.expanded .execution-chevron { transform: rotate(90deg); }
+/* Only the row's own chevron rotates; nested tool rows keep theirs collapsed. */
+.execution-disclosure.expanded > .execution-summary > .execution-chevron { transform: rotate(90deg); }
 .execution-body {
   margin-top: 6px;
   padding: 10px 12px 11px;

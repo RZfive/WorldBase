@@ -1,0 +1,8 @@
+{
+  "name": "benchmark100-mixed",
+  "private": true,
+  "scripts": {
+    "test": "vitest run",
+    "build": "vite build"
+  }
+}

@@ -13,6 +13,13 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use worldbase_protocol::types::ToolDescriptor;
 
+pub mod coding_apply;
+pub mod coding_diagnose;
+pub mod coding_edit;
+pub mod coding_fix;
+pub mod coding_lsp;
+pub mod coding_project;
+pub mod coding_verify;
 pub mod command;
 pub mod compat_tools;
 pub mod computer_use;
@@ -32,6 +39,8 @@ pub mod skill_tools;
 pub mod subagent;
 pub mod todo;
 pub mod web;
+pub mod work_file_guard;
+pub mod work_mode;
 
 pub use command::ExecuteCommandTool;
 pub use compat_tools::{
@@ -72,8 +81,7 @@ pub use mcp_tools::{
 pub use memory_tools::{MemoryAddTool, MemoryDeleteTool, MemorySearchTool};
 pub use project_tools::{
     ProjectCreateTool, ProjectDevRestartTool, ProjectDevStartTool, ProjectDevStopTool,
-    ProjectRestartServerTool, ProjectStartServerTool,
-    ProjectListTool, ProjectStatusTool,
+    ProjectListTool, ProjectRestartServerTool, ProjectStartServerTool, ProjectStatusTool,
 };
 pub use schedule_tools::{ScheduleCreateTool, ScheduleDeleteTool, ScheduleListTool};
 pub use skill_tools::{SkillListTool, SkillRunTool};
@@ -206,6 +214,9 @@ impl ToolServices {
                 | "write_project_file"
                 | "patch_project_file"
                 | "delete_project_file"
+                | "coding_edit"
+                | "coding_apply"
+                | "coding_fix_dependencies"
                 | "write_workspace_file"
                 | "edit_workspace_file"
                 | "patch_workspace_file"
@@ -560,6 +571,11 @@ pub fn filter_tools<'a>(
 }
 
 /// Whether a tool belongs to Electron's generated canonical agent surface.
+/// Whether a path should be routed through the coding workflow.
+pub fn is_coding_file_path(path: &str) -> bool {
+    work_file_guard::is_coding_activation_path(path)
+}
+
 pub fn is_electron_tool_name(name: &str) -> bool {
     electron_contract::contains(name)
 }
@@ -661,6 +677,14 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(QueryProjectDatabaseTool),
         Arc::new(AnalyzeProjectDataTool),
         Arc::new(RebuildProjectTool),
+        Arc::new(coding_verify::CodingVerifyTool),
+        Arc::new(coding_edit::CodingEditTool),
+        Arc::new(coding_apply::CodingApplyTool),
+        Arc::new(coding_diagnose::CodingDiagnoseTool),
+        Arc::new(coding_lsp::CodingLspTool),
+        Arc::new(coding_project::CodingProjectTool),
+        Arc::new(coding_fix::CodingFixDependenciesTool),
+        Arc::new(work_mode::SelectWorkModeTool),
         Arc::new(FinalizeProjectTool),
         Arc::new(ClearProjectBuildFlagTool),
         Arc::new(GetProjectLogsTool),
@@ -1049,7 +1073,7 @@ mod tests {
             .collect::<Vec<_>>();
         actual.sort();
 
-let mut expected = [
+        let mut expected = [
             "ask_user",
             "create_agent",
             "create_agent_group",
@@ -1346,6 +1370,7 @@ let mut expected = [
         assert!(services.enter_plan_mode("inspect before editing"));
         assert!(services.plan_mode_active());
         assert!(services.is_tool_allowed_in_plan_mode("read_project_file"));
+        assert!(!services.is_tool_allowed_in_plan_mode("coding_edit"));
         assert!(!services.is_tool_allowed_in_plan_mode("write_project_file"));
         assert!(!services.is_tool_allowed_in_plan_mode("write_file"));
         assert!(!services.is_tool_allowed_in_plan_mode("computer_observe"));

@@ -184,6 +184,9 @@ function toggleCollapsed(): void {
 }
 
 .todo-strip {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
   width: 100%;
   height: 36px;
   min-width: 0;
@@ -195,8 +198,8 @@ function toggleCollapsed(): void {
   border: 1px solid
     color-mix(in srgb, var(--app-accent) 16%, var(--app-border-strong));
   border-radius: 13px;
-  background: var(--app-panel);
-  box-shadow: var(--shadow-2);
+  background: var(--app-panel-strong);
+  box-shadow: var(--shadow-1);
   color: var(--app-text);
   cursor: pointer;
   text-align: left;
@@ -288,12 +291,14 @@ function toggleCollapsed(): void {
 }
 
 .todo-detail {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
   padding: 10px;
   border: 1px solid
     color-mix(in srgb, var(--app-accent) 16%, var(--app-border-strong));
   border-radius: 8px;
-  background: var(--app-panel);
-  box-shadow: var(--app-shadow);
+  background: var(--app-panel-strong);
   overflow: hidden;
 }
 
@@ -331,8 +336,9 @@ function toggleCollapsed(): void {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: min(260px, 38vh);
+  max-height: min(220px, 30vh);
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding-right: 4px;
   scrollbar-width: thin;
   scrollbar-color: var(--app-scrollbar) transparent;

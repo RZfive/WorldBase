@@ -5,12 +5,9 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use worldbase_protocol::event::EventKind;
 use worldbase_protocol::types::PermissionRequest;
-
-const ASK_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum SafetyLevel {
@@ -738,21 +735,21 @@ async fn ask_host(
     };
     hub.emit(stream_id, frame_kind).await;
 
-    let response = async { tokio::time::timeout(ASK_TIMEOUT, rx).await };
+    // Authorization waits for the host indefinitely: a user who steps away
+    // must be able to answer when they return instead of having the tool
+    // silently rejected. Only an explicit host response or run cancellation
+    // ends the wait.
     let result = match abort {
         Some(abort) => {
             tokio::select! {
                 biased;
                 _ = abort.cancelled() => return false,
-                result = response => result,
+                result = rx => result,
             }
         }
-        None => response.await,
+        None => rx.await,
     };
-    let allowed = match result {
-        Ok(Ok(allow)) => allow,
-        _ => false,
-    };
+    let allowed = result.unwrap_or(false);
     allowed && !abort.is_some_and(CancellationToken::is_cancelled)
 }
 
@@ -873,7 +870,6 @@ mod tests {
 
     #[test]
     fn command_classifier_judges_compound_commands_by_riskiest_segment() {
-        use super::classify_command;
         assert_eq!(classify("pnpm test"), SafetyLevel::Safe);
         assert_eq!(
             classify("pnpm install && pnpm run build"),

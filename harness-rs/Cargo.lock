@@ -1852,6 +1852,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
@@ -1984,6 +1985,12 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
 
 [[package]]
 name = "strsim"
@@ -2337,6 +2344,86 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "tree-sitter"
+version = "0.25.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78f873475d258561b06f1c595d93308a7ed124d9977cb26b148c2084a4a3cc87"
+dependencies = [
+ "cc",
+ "regex",
+ "regex-syntax",
+ "serde_json",
+ "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-go"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8560a4d2f835cc0d4d2c2e03cbd0dde2f6114b43bc491164238d333e28b16ea"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-java"
+version = "0.23.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-javascript"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-language"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0af592be68c579aa78a16846bd19422978c3c52e438523d45ff5d1bff1f9d4a"
+
+[[package]]
+name = "tree-sitter-python"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-rust"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-typescript"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -2749,7 +2836,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "worldbase-app-server"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2767,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-cli"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2782,8 +2869,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "worldbase-coding"
+version = "1.7.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+]
+
+[[package]]
 name = "worldbase-core"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2798,6 +2906,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "worldbase-coding",
  "worldbase-docs",
  "worldbase-exec",
  "worldbase-group",
@@ -2816,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-docs"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "calamine",
@@ -2829,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-exec"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -2842,7 +2951,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-group"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2857,7 +2966,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-im-gateway"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "aes",
  "anyhow",
@@ -2884,7 +2993,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-mcp-client"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "futures",
@@ -2898,7 +3007,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-memory"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2918,7 +3027,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-mobile-ffi"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2935,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-project-runtime"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -2953,7 +3062,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-protocol"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2963,7 +3072,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-providers"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2980,7 +3089,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-scheduler"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2996,7 +3105,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-search"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "ignore",
@@ -3008,7 +3117,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-skills"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -3022,7 +3131,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-tools"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3044,6 +3153,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "uuid",
+ "worldbase-coding",
  "worldbase-docs",
  "worldbase-exec",
  "worldbase-mcp-client",

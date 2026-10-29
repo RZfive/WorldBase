@@ -61,6 +61,12 @@ import {
   buildCurrentFolderWorkspaceState,
   buildOutgoingMessagesWithDocumentWorkspaceContext
 } from '../../workspace/workspace-store'
+import { codingStatusForCancelledRun, type CodingDiffState, type CodingStatus } from '../../../../shared/coding-status-types.js'
+import {
+  flushCodingStateSave,
+  saveCodingStateNow,
+  scheduleCodingStateSave
+} from './coding-status-storage'
 import type {
   AIExecutionAuthMode,
   BackgroundStreamState,
@@ -108,6 +114,8 @@ interface ChatMessageSenderOptions {
   activeGroupSessionIds: Set<string>
   backgroundStreamMessages: Map<string, BackgroundStreamState>
   unreadConversationIds: Set<string>
+  codingStatusByConversation: Map<string, CodingStatus>
+  codingDiffByConversation: Map<string, CodingDiffState>
   setConversationTarget: (conversationId: string, projectId: string | null | undefined) => void
   resolveAssistantSpeakerName: (sourceText: string) => string
   saveConversation: (conversationId: string, messages: ChatMessage[], options?: { refreshSidebar?: boolean }) => Promise<void>
@@ -135,6 +143,11 @@ export interface PreparedUserMessage {
   blocks?: ChatMessageBlock[]
   /** Plain text used for assistant speaker-name resolution. */
   text: string
+}
+
+export interface SendMessageOptions {
+  /** Optional coding root for this run; work mode itself is chosen by the model. */
+  codingWorkspaceRoot?: string | null
 }
 
 export function extractSelectionQuoteRefs (text: string, pattern: RegExp): { quoteIds: string[]; normalizedText: string } {
@@ -192,6 +205,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     activeGroupSessionIds,
     backgroundStreamMessages,
     unreadConversationIds,
+    codingStatusByConversation,
+    codingDiffByConversation,
     setConversationTarget,
     resolveAssistantSpeakerName,
     saveConversation: doSaveConversation,
@@ -205,6 +220,13 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     content: t('chatUi.stoppedMessage')
   })
   const getNoResponseText = () => t('chatUi.noResponse')
+
+  const persistCodingState = (convId: string): void => {
+    scheduleCodingStateSave(convId, {
+      status: codingStatusByConversation.get(convId) ?? null,
+      diff: codingDiffByConversation.get(convId) ?? null
+    })
+  }
 
   function releaseStreamSession (convId: string, sessionId: string): void {
     const cleanup = activeCleanups.get(sessionId)
@@ -227,12 +249,13 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     }
   }
 
-  async function stopCurrentStream () {
-    if (!window.electronAPI || !currentConversationId.value) return
-    const convId = currentConversationId.value
-    const targetMessages = messages.value
+  async function stopCurrentStream (conversationId?: string) {
+    const convId = conversationId || currentConversationId.value
+    if (!window.electronAPI || !convId) return
     const sessionId = activeStreamSessionIds.get(convId)
     if (!sessionId) return
+    const isForeground = currentConversationId.value === convId
+    const targetMessages = isForeground ? messages.value : null
 
     try {
       await window.electronAPI.stopChatStream(sessionId)
@@ -240,7 +263,24 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       console.warn('[chat] Failed to request stream stop:', (err as Error).message)
     }
 
+    // Reflect the user's stop immediately; the harness may emit its own
+    // cancelled status after the listener has already been torn down.
+    const currentStatus = codingStatusByConversation.get(convId)
+    const cancelledStatus = codingStatusForCancelledRun(currentStatus)
+    if (cancelledStatus && cancelledStatus !== currentStatus) {
+      codingStatusByConversation.set(convId, cancelledStatus)
+    }
+    if (cancelledStatus) {
+      saveCodingStateNow(convId, {
+        status: cancelledStatus,
+        diff: codingDiffByConversation.get(convId) ?? null
+      })
+    }
+
     if (!streamingConvIds.has(convId)) return
+    // Background streams finalize through their own event handler, which owns
+    // the assistant message object and its save target.
+    if (!isForeground || !targetMessages) return
 
     const assistantMessage = findLatestAssistantMessage(targetMessages)
     if (assistantMessage) {
@@ -248,13 +288,50 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     }
 
     releaseStreamSession(convId, sessionId)
-    if (currentConversationId.value === convId) {
-      resetTransientStreamState()
-    }
+    resetTransientStreamState()
     void doSaveConversation(convId, targetMessages)
   }
 
-  async function sendMessage (prepared?: PreparedUserMessage) {
+  /**
+   * Retry the last coding request through the normal send path: truncate the
+   * failed turn, then re-send the same user message so the runner starts a
+   * fresh stream instead of inventing a second runtime.
+   */
+  async function retryLastUserMessage (conversationId?: string): Promise<void> {
+    const convId = conversationId || currentConversationId.value
+    if (!convId || convId !== currentConversationId.value) return
+    if (isLoading.value || isUploadingFiles.value) return
+
+    let lastUserIndex = -1
+    for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+      if (messages.value[index].role === 'user') {
+        lastUserIndex = index
+        break
+      }
+    }
+    if (lastUserIndex < 0) return
+
+    const original = messages.value[lastUserIndex]
+    const prepared: PreparedUserMessage = {
+      id: original.id || generateId(),
+      content: original.content,
+      blocks: original.blocks && original.blocks.length > 0 ? original.blocks : undefined,
+      text: getMessageTextContent(original.content)
+    }
+    const snapshot = [...messages.value]
+    messages.value = messages.value.slice(0, lastUserIndex)
+
+    try {
+      await doSaveConversation(convId, messages.value)
+      await sendMessage(prepared)
+    } catch (err) {
+      console.warn('[chat] Retry failed, restoring previous messages:', (err as Error).message)
+      messages.value = snapshot
+      await doSaveConversation(convId, snapshot)
+    }
+  }
+
+  async function sendMessage (prepared?: PreparedUserMessage, sendOptions?: SendMessageOptions) {
     if (isLoading.value || isUploadingFiles.value) return
 
     let messageContent: ChatMessage['content']
@@ -481,6 +558,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
           const finishSession = (saveConversation = false) => {
             flushPendingStreamText()
             clearPendingStreamSave()
+            flushCodingStateSave(convId)
             releaseStreamSession(convId, sessionId)
             // No pending panel of this conversation can be answered by the
             // model anymore; keep stale panels from stacking above the input.
@@ -589,6 +667,12 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
             } else if (event.type === 'group_peer_message' && event.peerMessage) {
               flushPendingStreamText()
               appendGroupPeerMessageBlock(assistantMessage, event.peerMessage)
+            } else if (event.type === 'coding_status' && event.codingStatus) {
+              codingStatusByConversation.set(convId, event.codingStatus)
+              persistCodingState(convId)
+            } else if (event.type === 'coding_diff' && event.codingDiff) {
+              codingDiffByConversation.set(convId, event.codingDiff)
+              persistCodingState(convId)
             } else if (event.type === 'tool_start' && event.name) {
               flushPendingStreamText()
               hadToolSinceLastThinking = true
@@ -726,7 +810,8 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
           buildCurrentFolderWorkspaceState()?.rootPath,
           computerUseEnabled.value,
           getActiveTerminalContext() ?? undefined,
-          getActiveCodeContext() ?? undefined
+          getActiveCodeContext() ?? undefined,
+          sendOptions?.codingWorkspaceRoot ?? undefined
         )
 
         if (streamingConvIds.has(convId)) {
@@ -762,6 +847,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
         }
       }
     } catch (err) {
+      flushCodingStateSave(convId)
       releaseStreamSession(convId, sessionId)
       setAssistantErrorState(assistantMessage, (err as Error).message, getMessageTextContent)
       finalizePendingAuthBlocks(assistantMessage)
@@ -773,6 +859,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
 
   return {
     sendMessage,
-    stopCurrentStream
+    stopCurrentStream,
+    retryLastUserMessage
   }
 }

@@ -1,0 +1,3 @@
+src/App.tsx(10,15): error TS2304: Cannot find name 'DEFAULT_THEM'.
+src/components/Counter.tsx(9,24): error TS2339: Property 'value' does not exist on type 'CounterProps'.
+src/lib/math.ts(8,10): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.

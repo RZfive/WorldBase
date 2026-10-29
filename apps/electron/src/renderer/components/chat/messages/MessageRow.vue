@@ -108,16 +108,28 @@ const lastContentBlockIndex = computed(() => getLastContentBlockIndex(blocks.val
 const messageText = computed(() => getMessageText())
 
 /**
- * Codex-style work summary: consecutive thinking + tool + web result runs —
- * plus the narration text between tool calls and settled "已写入" file rows —
- * collapse into ONE row (live seconds while working, frozen total once
- * settled), expanding to the full trace — narration paragraphs, thinking
- * pills, per-tool rows, web result cards and written-file rows. The message's
- * trailing content (the actual answer) always stays visible outside the
- * summary. The transform lives in message-segments.ts so it stays
- * unit-testable.
+ * Codex-style work summary: consecutive thinking + tool + web result runs plus
+ * settled "已写入" file rows collapse into ONE row (live seconds while working,
+ * frozen total once settled), expanding to the full trace inside — narration,
+ * thinking pills, per-tool rows, web result cards and written-file rows.
+ * Assistant narration is folded into the summary while the turn runs and
+ * expands to show it from there; trailing output with no work after it is
+ * released outside once the turn settles, so the final answer never stays
+ * hidden in the group. While the latest assistant message streams, live
+ * content defaults into the group so text never appears outside and then jumps
+ * into the summary; the group holds live activity. The transform lives in
+ * message-segments.ts so it stays unit-testable.
  */
-const renderSegments = computed(() => buildRenderSegments(blocks.value))
+const renderSegments = computed(() => buildRenderSegments(blocks.value, { streaming: isStreamingAssistantMessage.value }))
+
+// Only the trailing work group belongs to the live turn; older groups in the
+// same message are settled and must not keep ticking while a later group works.
+const lastGroupSegmentIndex = computed(() => {
+  for (let i = renderSegments.value.length - 1; i >= 0; i--) {
+    if (renderSegments.value[i].type === 'group') return i
+  }
+  return -1
+})
 
 // A thinking block is only "live" while it is the newest block and still open —
 // message-level streaming alone made every historical thinking block tick.
@@ -159,12 +171,12 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
 
       <template v-else>
         <div class="message-flow" :class="props.msg.role">
-          <template v-for="segment in renderSegments" :key="segment.key">
+          <template v-for="(segment, segmentIndex) in renderSegments" :key="segment.key">
             <!-- design v1.7: consecutive thinking + tool runs as one work summary row -->
             <ToolGroupBlock
               v-if="segment.type === 'group'"
               :entries="segment.groupEntries"
-              :message-streaming="isStreamingAssistantMessage"
+              :message-streaming="isStreamingAssistantMessage && segmentIndex === lastGroupSegmentIndex"
               :role="props.msg.role"
               :message-index="props.index"
               :message-text="messageText"
@@ -175,6 +187,9 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
               @open-annotation-thread="(payload) => emit('openAnnotationThread', payload)"
               @open-file-path="filePath => emit('openFilePath', filePath)"
             />
+
+            <!-- Single (ungrouped) blocks only: a group renders its own members,
+                 so this chain can never duplicate a block that lives inside one. -->
             <template v-else>
               <ThinkingBlock
                 v-if="segment.block.kind === 'thinking' && hasRenderableBlock(segment.block)"
@@ -189,99 +204,99 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
                 :block="segment.block"
                 @open-file-path="filePath => emit('openFilePath', filePath)"
               />
+
+              <FilePreviewBlock
+                v-else-if="segment.block.kind === 'file_preview'"
+                :block="segment.block"
+              />
+
+              <GroupCollaborationPlanBlock
+                v-else-if="segment.block.kind === 'group_collaboration_plan'"
+                :block="segment.block"
+              />
+
+              <AgentSidechatBlock
+                v-else-if="segment.block.kind === 'agent_sidechat'"
+                :block="segment.block"
+              />
+
+              <GroupProgressBlock
+                v-else-if="segment.block.kind === 'group_progress'"
+                :block="segment.block"
+              />
+
+              <GroupTranscriptBlock
+                v-else-if="segment.block.kind === 'group_transcript'"
+                :block="segment.block"
+              />
+
+              <SharedBoardBlock
+                v-else-if="segment.block.kind === 'group_board'"
+                :block="segment.block"
+              />
+
+              <GroupDirectReplyBlock
+                v-else-if="segment.block.kind === 'group_direct_reply'"
+                :block="segment.block"
+              />
+
+              <GroupUserInjectionBlock
+                v-else-if="segment.block.kind === 'group_user_injection'"
+                :block="segment.block"
+              />
+
+              <GroupPeerMessageBlock
+                v-else-if="segment.block.kind === 'group_peer_message'"
+                :block="segment.block"
+              />
+
+              <WebSearchBlock
+                v-else-if="segment.block.kind === 'web_search'"
+                :block="segment.block"
+              />
+
+              <WebFetchBlock
+                v-else-if="segment.block.kind === 'web_fetch'"
+                :block="segment.block"
+              />
+
+              <AttachmentBlock
+                v-else-if="segment.block.kind === 'attachment'"
+                :block="segment.block"
+              />
+
+              <AuthRequestBlock
+                v-else-if="segment.block.kind === 'auth_request'"
+                :block="segment.block"
+                @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
+              />
+
+              <SudoPasswordBlock
+                v-else-if="segment.block.kind === 'sudo_password_request'"
+                :block="segment.block"
+                @respond-sudo-password="(requestId, password) => emit('respondSudoPassword', requestId, password)"
+              />
+
+              <ErrorBlock
+                v-else-if="segment.block.kind === 'error'"
+                :block="segment.block"
+              />
+
+              <ContentBlock
+                v-else-if="segment.block.kind === 'content' && (hasRenderableBlock(segment.block) || (isStreamingAssistantMessage && segment.blockIndex === lastContentBlockIndex))"
+                :block="segment.block"
+                :role="props.msg.role"
+                :message-index="props.index"
+                :block-index="segment.blockIndex"
+                :is-streaming-block="isStreamingAssistantMessage && segment.blockIndex === lastContentBlockIndex"
+                :message-text="messageText"
+                :annotations="props.msg.annotations"
+                @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
+                @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
+                @remove-annotation="(annotationId) => emit('removeAnnotation', annotationId)"
+                @open-annotation-thread="(payload) => emit('openAnnotationThread', payload)"
+              />
             </template>
-
-            <FilePreviewBlock
-              v-if="segment.block.kind === 'file_preview'"
-              :block="segment.block"
-            />
-
-            <GroupCollaborationPlanBlock
-              v-else-if="segment.block.kind === 'group_collaboration_plan'"
-              :block="segment.block"
-            />
-
-            <AgentSidechatBlock
-              v-else-if="segment.block.kind === 'agent_sidechat'"
-              :block="segment.block"
-            />
-
-            <GroupProgressBlock
-              v-else-if="segment.block.kind === 'group_progress'"
-              :block="segment.block"
-            />
-
-            <GroupTranscriptBlock
-              v-else-if="segment.block.kind === 'group_transcript'"
-              :block="segment.block"
-            />
-
-            <SharedBoardBlock
-              v-else-if="segment.block.kind === 'group_board'"
-              :block="segment.block"
-            />
-
-            <GroupDirectReplyBlock
-              v-else-if="segment.block.kind === 'group_direct_reply'"
-              :block="segment.block"
-            />
-
-            <GroupUserInjectionBlock
-              v-else-if="segment.block.kind === 'group_user_injection'"
-              :block="segment.block"
-            />
-
-            <GroupPeerMessageBlock
-              v-else-if="segment.block.kind === 'group_peer_message'"
-              :block="segment.block"
-            />
-
-            <WebSearchBlock
-              v-else-if="segment.block.kind === 'web_search'"
-              :block="segment.block"
-            />
-
-            <WebFetchBlock
-              v-else-if="segment.block.kind === 'web_fetch'"
-              :block="segment.block"
-            />
-
-            <AttachmentBlock
-              v-else-if="segment.block.kind === 'attachment'"
-              :block="segment.block"
-            />
-
-            <AuthRequestBlock
-              v-else-if="segment.block.kind === 'auth_request'"
-              :block="segment.block"
-              @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
-            />
-
-            <SudoPasswordBlock
-              v-else-if="segment.block.kind === 'sudo_password_request'"
-              :block="segment.block"
-              @respond-sudo-password="(requestId, password) => emit('respondSudoPassword', requestId, password)"
-            />
-
-            <ErrorBlock
-              v-else-if="segment.block.kind === 'error'"
-              :block="segment.block"
-            />
-
-            <ContentBlock
-              v-else-if="segment.block.kind === 'content' && (hasRenderableBlock(segment.block) || (isStreamingAssistantMessage && segment.blockIndex === lastContentBlockIndex))"
-              :block="segment.block"
-              :role="props.msg.role"
-              :message-index="props.index"
-              :block-index="segment.blockIndex"
-              :is-streaming-block="isStreamingAssistantMessage && segment.blockIndex === lastContentBlockIndex"
-              :message-text="messageText"
-              :annotations="props.msg.annotations"
-              @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
-              @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
-              @remove-annotation="(annotationId) => emit('removeAnnotation', annotationId)"
-              @open-annotation-thread="(payload) => emit('openAnnotationThread', payload)"
-            />
           </template>
 
           <div v-if="isUserMessage && props.msg.id" class="message-user-actions">

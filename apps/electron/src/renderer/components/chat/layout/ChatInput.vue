@@ -1215,10 +1215,10 @@ onUnmounted(() => {
   position: relative;
   z-index: 6;
   flex: 0 0 auto;
-  padding: 10px var(--chat-input-gutter, 16px) 18px;
-  /* This is a real footer now, not a negative-margin overlay. Keep its paint
-     surface opaque so a compositor repaint can never reveal message glyphs
-     through the composer while scrolling stops. */
+  padding: 0px var(--chat-input-gutter, 16px) 18px;
+  /* The composer is a floating dock, but its footer paints an opaque
+     boundary so scrolled text is clipped at the composer edge instead of
+     showing through underneath the input card. */
   background: var(--app-chat-canvas);
   isolation: isolate;
 }

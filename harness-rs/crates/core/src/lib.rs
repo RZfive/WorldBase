@@ -7,6 +7,7 @@ pub mod permissions;
 pub mod studio;
 mod subagents;
 pub mod tool_results;
+mod tool_scheduler;
 
 pub use agent::{start_chat, to_llm_messages, ChatRun};
 pub use dispatcher::ConnectionContext;

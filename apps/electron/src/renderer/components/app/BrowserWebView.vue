@@ -7,11 +7,19 @@ import type {
   BrowserAutomationAction,
   BrowserAutomationArticle,
   BrowserAutomationActionResult,
+  BrowserAutomationConsoleEntry,
+  BrowserAutomationDiagnostics,
+  BrowserAutomationEmulateAction,
+  BrowserAutomationNetworkEntry,
+  BrowserAutomationPageError,
+  BrowserAutomationScreenshot,
+  BrowserAutomationSearchResults,
   BrowserAutomationSnapshot,
   BrowserAutomationSnapshotElement,
   BrowserAutomationSnapshotFormField,
   BrowserPageContextMenuPayload,
 } from "../../../shared/page-automation-types.js";
+import { findSearchExtractPreset } from "../../../shared/search-extract-presets.js";
 
 interface BrowserAppStatePayload {
   appId: string;
@@ -51,21 +59,43 @@ interface PageContextMenuState {
   copied: boolean;
 }
 
+interface NativeImageLike {
+  toDataURL: () => string;
+  getSize: () => { width: number; height: number };
+  resize?: (options: { width?: number; height?: number; quality?: "good" | "better" | "best" }) => NativeImageLike;
+}
+
 interface WebviewLikeElement extends HTMLElement {
   src: string;
   getURL: () => string;
-  loadURL?: (url: string) => void;
+  loadURL?: (url: string) => Promise<void> | void;
   reload?: () => void;
+  reloadIgnoringCache?: () => void;
+  canGoBack?: () => boolean;
+  canGoForward?: () => boolean;
+  goBack?: () => void;
+  goForward?: () => void;
+  isLoading?: () => boolean;
+  getZoomFactor?: () => number;
   getWebContentsId?: () => number;
+  setAudioMuted?: (muted: boolean) => void;
+  capturePage?: () => Promise<NativeImageLike>;
+  sendInputEvent?: (event: Record<string, unknown>) => Promise<void> | void;
   executeJavaScript?: <T>(code: string, userGesture?: boolean) => Promise<T>;
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   appId: string;
   url: string;
   title: string;
   icon?: string;
-}>();
+  hideBar?: boolean;
+  allowPopups?: boolean;
+  backgroundHost?: boolean;
+}>(), {
+  allowPopups: true,
+  backgroundHost: false,
+});
 
 const emit = defineEmits<{
   (e: "stateChange", payload: BrowserAppStatePayload): void;
@@ -76,11 +106,21 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const webviewRef = ref<WebviewLikeElement | null>(null);
+const webviewGeneration = ref(0);
 const addressInputRef = ref<HTMLInputElement | null>(null);
 const currentUrl = ref(props.url);
 const currentTitle = ref(props.title);
 const currentIcon = ref(props.icon);
 const addressInput = ref(props.url);
+/** Optional AI device viewport; rendered as the webview's CSS box. */
+const agentViewport = ref<{ width: number; height: number } | null>(null);
+
+const MAX_DIAGNOSTICS_ENTRIES = 120;
+const consoleBuffer: BrowserAutomationConsoleEntry[] = [];
+const pageErrorBuffer: BrowserAutomationPageError[] = [];
+let diagnosticsNavigationId = 0;
+let diagnosticsNetworkClearedAt = 0;
+let diagnosticsHookInstall: { key: string; promise: Promise<void> } | null = null;
 const isAddressInputFocused = ref(false);
 const addressContextMenu = reactive({
   visible: false,
@@ -280,30 +320,178 @@ function selectAddressInputText() {
   hideAddressContextMenu();
 }
 
+interface PageExecutionError extends Error {
+  pageExecutionRawMessage?: string;
+}
+
+const PAGE_EXECUTION_ERROR_PREFIXES = [
+  /^Error invoking remote method '[^']*':\s*/,
+  /^Error invoking remote method "[^"]*":\s*/,
+  /^Error:\s*/,
+];
+
+function cleanPageExecutionMessage(error: unknown): string {
+  let message = error instanceof Error ? error.message : String(error ?? "");
+  let previous = "";
+  while (message !== previous) {
+    previous = message;
+    for (const prefix of PAGE_EXECUTION_ERROR_PREFIXES) {
+      message = message.replace(prefix, "");
+    }
+  }
+  return message.trim() || "Page execution failed.";
+}
+
+function pageExecutionRawMessage(error: unknown): string {
+  if (error instanceof Error) {
+    const raw = (error as PageExecutionError).pageExecutionRawMessage;
+    return typeof raw === "string" ? raw : error.message;
+  }
+  return String(error ?? "");
+}
+
 async function executeInPage<T>(runner: string, payload?: unknown): Promise<T> {
   const webview = webviewRef.value;
   if (!webview || typeof webview.executeJavaScript !== "function") {
     throw new Error("Browser automation is unavailable for this page surface.");
   }
 
-  return await webview.executeJavaScript<T>(
-    `(() => {
-      const payload = ${JSON.stringify(payload ?? null)};
-      ${runner}
-    })()`,
-    true,
-  );
+  const serializedPayload = JSON.stringify(payload ?? null)
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+
+  try {
+    return await webview.executeJavaScript<T>(
+      `(async () => {
+        const payload = ${serializedPayload};
+        ${runner}
+      })()`,
+      true,
+    );
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : String(error ?? "");
+    const cleaned: PageExecutionError = new Error(cleanPageExecutionMessage(rawMessage));
+    cleaned.pageExecutionRawMessage = rawMessage;
+    throw cleaned;
+  }
 }
 
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: number | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = window.setTimeout(() => {
+          const error = new Error(`${message} timed out after ${ms}ms.`);
+          error.name = "TimeoutError";
+          reject(error);
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer != null) window.clearTimeout(timer);
+  }
+}
+
+const PAGE_CAPTURE_TIMEOUT_MS = 12_000;
+const SCREENSHOT_DEFAULT_TIMEOUT_MS = 15_000;
+const SCREENSHOT_MIN_TIMEOUT_MS = 3_000;
+const SCREENSHOT_MAX_TIMEOUT_MS = 30_000;
+const SCREENSHOT_FULL_PAGE_TIMEOUT_MS = SCREENSHOT_DEFAULT_TIMEOUT_MS;
+const SCREENSHOT_VIEWPORT_TIMEOUT_MS = SCREENSHOT_DEFAULT_TIMEOUT_MS;
+const SCREENSHOT_RENDER_TIMEOUT_MS = 8_000;
+const PAGE_ACTION_TIMEOUT_MS = 15_000;
+const DIAGNOSTICS_HOOK_TIMEOUT_MS = 5_000;
+const PAGE_WAIT_TIMEOUT_MAX_MS = 40_000;
+const PAGE_WAIT_RETRY_DELAY_MS = 120;
+const PAGE_WAIT_SUMMARY_TIMEOUT_MS = 1_000;
+const PAGE_WAIT_TEXT_PREVIEW_LIMIT = 240;
+
 const SNAPSHOT_TEXT_PREVIEW_LIMIT = 12000;
-const SNAPSHOT_INTERACTIVE_ELEMENT_LIMIT = 64;
+const SNAPSHOT_INTERACTIVE_ELEMENT_LIMIT = 96;
 const SNAPSHOT_FORM_FIELD_LIMIT = 64;
 const SNAPSHOT_ELEMENT_TEXT_LIMIT = 240;
 const PAGE_CONTEXT_TEXT_LIMIT = 20000;
 
+const PAGE_SERIALIZE_RESULT_SCRIPT = `
+const serializeResult = (value) => {
+  if (value === undefined) return { result: null, resultType: 'undefined' };
+  if (value === null) return { result: null, resultType: 'null' };
+  if (typeof value === 'function') return { result: String(value).slice(0, 8000), resultType: 'function' };
+  if (typeof value === 'symbol' || typeof value === 'bigint') return { result: String(value), resultType: typeof value };
+  if (value instanceof Element) return { result: value.outerHTML.slice(0, 8000), resultType: 'element' };
+  if (value instanceof Node) return { result: String(value.textContent || '').slice(0, 8000), resultType: 'node' };
+  if (value instanceof Error) {
+    return {
+      result: { name: value.name, message: value.message, stack: String(value.stack || '').slice(0, 8000) },
+      resultType: 'error',
+    };
+  }
+  if (value instanceof Date) return { result: value.toISOString(), resultType: 'date' };
+  let normalized = value;
+  if (value instanceof Map) normalized = Array.from(value.entries());
+  else if (value instanceof Set) normalized = Array.from(value.values());
+  if (typeof normalized !== 'object') return { result: normalized, resultType: typeof normalized };
+  const seen = new WeakSet();
+  try {
+    const json = JSON.stringify(normalized, (key, item) => {
+      if (typeof item === 'bigint') return String(item) + 'n';
+      if (typeof item === 'function') return '[Function ' + (item.name || 'anonymous') + ']';
+      if (typeof item === 'symbol') return String(item);
+      if (item && typeof item === 'object') {
+        if (seen.has(item)) return '[Circular]';
+        seen.add(item);
+      }
+      return item;
+    });
+    if (json === undefined) return { result: null, resultType: 'undefined' };
+    if (json.length <= 20000) {
+      return { result: JSON.parse(json), resultType: Array.isArray(normalized) ? 'array' : 'object' };
+    }
+    return { result: json.slice(0, 20000), resultType: 'json-truncated' };
+  } catch {
+    try { return { result: String(normalized).slice(0, 8000), resultType: 'string' }; }
+    catch { return { result: '[unserializable value]', resultType: 'unknown' }; }
+  }
+};
+  `;
+
 /** In-page helpers shared by the snapshot and context-menu capture runners. */
 const PAGE_SCRIPT_HELPERS = `
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+
+    const waitTextValues = (value) => {
+      const values = Array.isArray(value) ? value : (value ? [value] : []);
+      return values.map((text) => String(text || '')).filter(Boolean);
+    };
+
+    const describeWaitCondition = (value) => {
+      const parts = [];
+      if (value && value.selector) parts.push('selector="' + String(value.selector) + '"');
+      if (value && value.ref) parts.push('ref="' + String(value.ref) + '"');
+      const texts = waitTextValues(value && value.text);
+      if (texts.length === 1) parts.push('text="' + texts[0] + '"');
+      else if (texts.length > 1) parts.push('text matches one of ["' + texts.join('", "') + '"]');
+      if (value && value.url) parts.push('url contains "' + String(value.url) + '"');
+      if (value && value.state) parts.push('state="' + String(value.state) + '"');
+      return parts.length > 0 ? parts.join(' + ') : 'the page';
+    };
+
+    const waitTimeoutMessage = (value, timeoutMs) => {
+      const reportedTimeoutMs = Math.max(100, Number(value && value.reportTimeoutMs) || timeoutMs);
+      const pageText = normalizeText(document.body?.innerText || document.body?.textContent || '').slice(0, ${PAGE_WAIT_TEXT_PREVIEW_LIMIT});
+      return 'wait_for timed out after ' + reportedTimeoutMs + 'ms waiting for ' + describeWaitCondition(value)
+        + ' (url=' + location.href + ', title=' + (document.title || '')
+        + (pageText ? ', page text starts: "' + pageText + '"' : '')
+        + ')';
+    };
+
+    const normalizeReadableText = (value) => String(value || '')
+      .replace(/\\r\\n?/g, '\\n')
+      .replace(/[ \\t]+/g, ' ')
+      .replace(/\\n{3,}/g, '\\n\\n')
+      .trim();
 
     const buildSelector = (element) => {
       if (!(element instanceof Element)) return null;
@@ -345,10 +533,119 @@ const PAGE_SCRIPT_HELPERS = `
       }
       return path.join(' > ');
     };
+
+    const refFor = (element) => {
+      if (!(element instanceof Element)) return null;
+      let ref = element.getAttribute('data-worldbase-ref');
+      if (ref) return ref;
+      const next = Number(window.__worldbaseRefSeq || 0) + 1;
+      window.__worldbaseRefSeq = Number.isFinite(next) && next > 0 ? next : 1;
+      ref = 'e' + window.__worldbaseRefSeq;
+      element.setAttribute('data-worldbase-ref', ref);
+      return ref;
+    };
+
+    const resolveTarget = (target) => {
+      if (target && target.ref) {
+        const byRef = document.querySelector('[data-worldbase-ref="' + CSS.escape(String(target.ref)) + '"]');
+        if (byRef) return byRef;
+        throw new Error('Element not found for ref: ' + target.ref + '. The page may have re-rendered; take a new snapshot.');
+      }
+      if (target && target.selector) {
+        const bySelector = document.querySelector(target.selector);
+        if (bySelector) return bySelector;
+        throw new Error('Element not found for selector: ' + target.selector);
+      }
+      throw new Error('A selector or ref is required for this action');
+    };
+
+    const accessibleName = (element) => {
+      const ariaLabel = normalizeText(element.getAttribute('aria-label'));
+      if (ariaLabel) return ariaLabel;
+      const labelledBy = element.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        const text = labelledBy.split(/\\s+/)
+          .map((id) => document.getElementById(id)?.textContent || '')
+          .join(' ');
+        if (normalizeText(text)) return normalizeText(text);
+      }
+      if (element.id) {
+        const label = document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
+        if (label) return normalizeText(label.textContent);
+      }
+      if (element.getAttribute('placeholder')) return normalizeText(element.getAttribute('placeholder'));
+      if (element.getAttribute('title')) return normalizeText(element.getAttribute('title'));
+      if (element instanceof HTMLSelectElement && element.selectedOptions && element.selectedOptions[0]) {
+        return normalizeText(element.selectedOptions[0].textContent || element.selectedOptions[0].value || '');
+      }
+      if (element instanceof HTMLInputElement && ['button', 'submit', 'reset'].includes((element.type || '').toLowerCase())) {
+        if (element.value) return normalizeText(element.value);
+      }
+      if (element instanceof HTMLImageElement && element.alt) return normalizeText(element.alt);
+      return normalizeText(element.textContent || element.getAttribute('value') || '');
+    };
+
+    const inferredRole = (element) => {
+      const explicit = element.getAttribute('role');
+      if (explicit) return explicit;
+      if (element.isContentEditable) return 'textbox';
+      const tag = element.tagName.toLowerCase();
+      if (tag === 'a' || tag === 'area') return element.hasAttribute('href') ? 'link' : null;
+      if (tag === 'button' || tag === 'summary') return 'button';
+      if (tag === 'select') return element.multiple ? 'listbox' : 'combobox';
+      if (tag === 'textarea') return 'textbox';
+      if (tag === 'option') return 'option';
+      if (tag === 'input') {
+        const type = (element.getAttribute('type') || 'text').toLowerCase();
+        if (type === 'checkbox') return 'checkbox';
+        if (type === 'radio') return 'radio';
+        if (type === 'submit' || type === 'button' || type === 'reset') return 'button';
+        if (type === 'search') return 'searchbox';
+        if (type === 'number') return 'spinbutton';
+        if (type === 'range') return 'slider';
+        if (type === 'file') return 'button';
+        return 'textbox';
+      }
+      return null;
+    };
+
+    const isElementVisible = (element) => {
+      if (typeof element.checkVisibility === 'function') {
+        try {
+          if (!element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+        } catch {
+          // Older Chromium builds only accept the no-argument form.
+        }
+      }
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const style = getComputedStyle(element);
+      return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0;
+    };
+
+    const elementBounds = (element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        x: Math.round(rect.x * 100) / 100,
+        y: Math.round(rect.y * 100) / 100,
+        width: Math.round(rect.width * 100) / 100,
+        height: Math.round(rect.height * 100) / 100,
+      };
+    };
+
+    const elementHref = (element) => {
+      if (element instanceof HTMLAnchorElement || element instanceof HTMLAreaElement) {
+        return element.href || null;
+      }
+      const href = element.getAttribute('href');
+      return href ? String(href) : null;
+    };
+
+    ${PAGE_SERIALIZE_RESULT_SCRIPT}
   `;
 
 async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
-  return await executeInPage<BrowserAutomationSnapshot>(`
+  return await withTimeout(executeInPage<BrowserAutomationSnapshot>(`
     ${PAGE_SCRIPT_HELPERS}
 
     const findLabel = (element) => {
@@ -371,42 +668,77 @@ async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
     };
 
     const interactiveElements = Array.from(document.querySelectorAll(
-      'a, button, input, textarea, select, [role="button"], [role="link"], [role="tab"], [onclick]'
+      'a[href], area[href], button, input:not([type="hidden"]), textarea, select, summary, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="option"], [role="textbox"], [role="searchbox"], [role="slider"], [role="spinbutton"], [role="treeitem"], [contenteditable]:not([contenteditable="false"]), [onclick]'
     ))
       .slice(0, ${SNAPSHOT_INTERACTIVE_ELEMENT_LIMIT})
-      .map((element) => ({
-        selector: buildSelector(element),
-        tag: element.tagName.toLowerCase(),
-        text: normalizeText(
-          element.textContent || element.getAttribute('value') || element.getAttribute('placeholder') || element.getAttribute('aria-label')
-        ).slice(0, ${SNAPSHOT_ELEMENT_TEXT_LIMIT}),
-        role: element.getAttribute('role'),
-      }))
+      .map((element) => {
+        const tag = element.tagName.toLowerCase();
+        const type = element instanceof HTMLInputElement
+          ? (element.getAttribute('type') || 'text')
+          : element instanceof HTMLButtonElement
+            ? (element.getAttribute('type') || 'button')
+            : element.isContentEditable
+              ? 'contenteditable'
+              : null;
+        const ariaChecked = element.getAttribute('aria-checked');
+        return {
+          ref: refFor(element),
+          selector: buildSelector(element),
+          tag,
+          text: normalizeText(
+            element.textContent || element.getAttribute('value') || element.getAttribute('placeholder') || element.getAttribute('aria-label')
+          ).slice(0, ${SNAPSHOT_ELEMENT_TEXT_LIMIT}),
+          role: inferredRole(element),
+          name: accessibleName(element).slice(0, ${SNAPSHOT_ELEMENT_TEXT_LIMIT}),
+          type,
+          value: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement
+            ? String(element.value || '').slice(0, 2000)
+            : element.isContentEditable
+              ? normalizeText(element.innerText || element.textContent || '').slice(0, 2000)
+              : null,
+          href: elementHref(element),
+          placeholder: element.getAttribute('placeholder') || null,
+          title: element.getAttribute('title') || null,
+          checked: element instanceof HTMLInputElement && (type === 'checkbox' || type === 'radio')
+            ? Boolean(element.checked)
+            : ariaChecked === 'true'
+              ? true
+              : ariaChecked === 'false'
+                ? false
+                : null,
+          disabled: 'disabled' in element ? Boolean(element.disabled) : element.getAttribute('aria-disabled') === 'true',
+          visible: isElementVisible(element),
+          bounds: elementBounds(element),
+        };
+      })
       .filter((entry) => Boolean(entry.selector));
 
-    const formFieldSelectors = 'input, textarea, select';
+    const formFieldSelectors = 'input:not([type="hidden"]), textarea, select, [contenteditable]:not([contenteditable="false"])';
     const formFields = Array.from(document.querySelectorAll(formFieldSelectors))
       .slice(0, ${SNAPSHOT_FORM_FIELD_LIMIT})
       .map((element) => {
         const tag = element.tagName.toLowerCase();
-        const type = element.getAttribute('type') || null;
+        const type = element.getAttribute('type') || (tag === 'select' ? 'select' : element.isContentEditable ? 'contenteditable' : null);
         const field = {
+          ref: refFor(element),
           selector: buildSelector(element),
           tag,
           type,
           name: element.getAttribute('name') || null,
-          label: findLabel(element),
+          label: findLabel(element) || accessibleName(element),
           placeholder: element.getAttribute('placeholder') || null,
           value: '',
         };
         if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-          field.value = element.value || '';
+          field.value = String(element.value || '').slice(0, 2000);
         } else if (element instanceof HTMLSelectElement) {
-          field.value = element.value || '';
-          field.options = Array.from(element.options).map((opt) => ({
+          field.value = String(element.value || '').slice(0, 2000);
+          field.options = Array.from(element.options).slice(0, 200).map((opt) => ({
             value: opt.value,
             label: normalizeText(opt.textContent || opt.value || ''),
           }));
+        } else {
+          field.value = normalizeText(element.innerText || element.textContent || '').slice(0, 2000);
         }
         return field;
       })
@@ -425,7 +757,7 @@ async function captureAutomationSnapshot(): Promise<BrowserAutomationSnapshot> {
       formFields,
       capturedAt: Date.now(),
     };
-  `);
+  `), PAGE_CAPTURE_TIMEOUT_MS, "Page snapshot");
 }
 
 const ARTICLE_TEXT_LIMIT = 24000;
@@ -439,167 +771,2443 @@ const ARTICLE_SKIP_TAGS = 'nav, header, footer, aside, script, style, noscript, 
  * page chrome.
  */
 async function captureArticleSnapshot(): Promise<BrowserAutomationArticle> {
-  return await executeInPage<BrowserAutomationArticle>(`
+  return await withTimeout(executeInPage<BrowserAutomationArticle>(`
     const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
 
     const containerScore = (element) => {
       const copy = element.cloneNode(true);
       copy.querySelectorAll('${ARTICLE_SKIP_TAGS}').forEach((node) => node.remove());
       let score = 0;
-      copy.querySelectorAll('p, li, blockquote, article, section, td, pre, h1, h2, h3, h4, h5, h6').forEach((node) => {
-        score += (node.textContent || '').length;
+      copy.querySelectorAll('p, li, blockquote, article, section, td, th, pre, h1, h2, h3, h4, h5, h6').forEach((node) => {
+        score += normalize(node.textContent || '').length;
       });
-      return score;
+      const linkLength = Array.from(copy.querySelectorAll('a')).reduce(
+        (sum, anchor) => sum + normalize(anchor.textContent || '').length,
+        0
+      );
+      const totalLength = Math.max(1, normalize(copy.textContent || '').length);
+      return score * (1 - Math.min(0.9, linkLength / totalLength));
     };
 
-    const candidates = Array.from(document.querySelectorAll(
-      'article, main, [role="main"], .post, .article, .entry-content, .markdown-body, #content, .content, body'
-    ));
-    let best = document.body;
+    const textLengthOf = (element) => normalize(element.innerText || element.textContent || '').length;
+    const bodyTextLength = document.body ? textLengthOf(document.body) : 0;
+    let best = null;
     let bestScore = -1;
-    for (const candidate of candidates) {
-      const score = containerScore(candidate);
+    const consider = (candidate, weight) => {
+      const length = textLengthOf(candidate);
+      if (length < 200) return;
+      const score = containerScore(candidate) * weight;
       if (score > bestScore) {
         best = candidate;
         bestScore = score;
       }
-    }
-
-    const isBlock = (element) => {
-      const display = getComputedStyle(element).display;
-      return display === 'block' || display === 'list-item' || display === 'flex' || display === 'grid';
     };
 
+    const semanticMinimum = Math.min(400, Math.max(200, bodyTextLength * 0.15));
+    for (const candidate of Array.from(document.querySelectorAll('article, main, [role="main"], .markdown-body, .entry-content, .post, .article'))) {
+      if (textLengthOf(candidate) < semanticMinimum) continue;
+      consider(candidate, 1 + Math.min(0.5, textLengthOf(candidate) / Math.max(1, bodyTextLength)));
+    }
+    if (!best) {
+      for (const candidate of Array.from(document.querySelectorAll('article, main, [role="main"], .markdown-body, .entry-content, .post, .article, #content, .content, .post-content, .article-content, [itemprop="articleBody"]'))) {
+        consider(candidate, 1);
+      }
+    }
+    if (!best) best = document.body || document.documentElement;
+
+    if (!best) {
+      return {
+        url: location.href,
+        title: document.title,
+        origin: location.origin || null,
+        text: '',
+        wordCount: 0,
+        truncated: false,
+        capturedAt: Date.now(),
+      };
+    }
+
+    const blockTags = new Set([
+      'address', 'article', 'aside', 'blockquote', 'details', 'div', 'dl', 'fieldset', 'figcaption',
+      'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hr', 'li', 'main',
+      'nav', 'ol', 'p', 'pre', 'section', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul'
+    ]);
+    const isBlockElement = (element) => {
+      if (blockTags.has(element.tagName.toLowerCase())) return true;
+      const display = getComputedStyle(element).display;
+      return display === 'block' || display === 'list-item' || display === 'flex' || display === 'grid'
+        || display === 'table' || display.startsWith('table-');
+    };
+    const hasBlockChild = (element) => Array.from(element.children).some(isBlockElement);
+
+    const LIMIT = ${ARTICLE_TEXT_LIMIT};
     const lines = [];
+    let totalChars = 0;
+    let overflow = false;
+    const pushLine = (line) => {
+      if (!line) return;
+      if (totalChars >= LIMIT) {
+        overflow = true;
+        return;
+      }
+      lines.push(line);
+      totalChars += line.length + 2;
+    };
+
     const pushBlock = (element) => {
       if (element.closest('${ARTICLE_SKIP_TAGS}')) return;
       const tag = element.tagName.toLowerCase();
       if (/^h[1-6]$/.test(tag)) {
         const level = Number(tag[1]);
-        const text = normalize(element.textContent);
-        if (text) lines.push('#'.repeat(level) + ' ' + text);
+        pushLine('#'.repeat(level) + ' ' + normalize(element.textContent));
         return;
       }
       if (tag === 'li') {
-        const text = normalize(element.textContent);
-        if (text) lines.push('- ' + text);
+        pushLine('- ' + normalize(element.textContent));
         return;
       }
       if (tag === 'pre') {
         const text = (element.textContent || '').replace(/\\n+$/, '');
-        if (text.trim()) lines.push('\\n\`\`\`\\n' + text + '\\n\`\`\`\\n');
+        if (text.trim()) pushLine('\\n\`\`\`\\n' + text + '\\n\`\`\`\\n');
         return;
       }
       if (tag === 'br') return;
       if (['p', 'blockquote', 'dd', 'dt', 'figcaption', 'td', 'th'].includes(tag)) {
-        const text = normalize(element.textContent);
-        if (text) lines.push(text);
+        pushLine(normalize(element.textContent));
         return;
       }
-      if (element.children.length === 0) {
-        const ownText = Array.from(element.childNodes)
-          .filter((node) => node.nodeType === Node.TEXT_NODE)
-          .map((node) => normalize(node.textContent))
-          .filter(Boolean)
-          .join(' ');
-        if (ownText) lines.push(ownText);
+      if (!hasBlockChild(element)) {
+        const text = normalize(element.innerText || element.textContent || '');
+        if (text) pushLine(text);
         return;
       }
-      if (isBlock(element)) {
-        for (const child of element.children) pushBlock(child);
+      const directText = Array.from(element.childNodes)
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => normalize(node.textContent || ''))
+        .filter(Boolean)
+        .join(' ');
+      if (directText) pushLine(directText);
+      for (const child of element.children) {
+        pushBlock(child);
+        if (totalChars >= LIMIT) {
+          overflow = true;
+          break;
+        }
       }
     };
 
-    const body = [];
-    const LIMIT = ${ARTICLE_TEXT_LIMIT};
     for (const child of best.children) {
       pushBlock(child);
-      if (lines.length && lines.join('\\n\\n').length > LIMIT) break;
+      if (totalChars >= LIMIT) {
+        overflow = true;
+        break;
+      }
     }
-    for (const line of lines) {
-      body.push(line);
-      if (body.join('\\n\\n').length > LIMIT) break;
+
+    let text = lines.join('\\n\\n');
+    if (!text && document.body) {
+      text = String(document.body.innerText || document.body.textContent || '')
+        .replace(/\\r\\n?/g, '\\n')
+        .replace(/[ \\t]+/g, ' ')
+        .replace(/\\n{3,}/g, '\\n\\n')
+        .trim();
     }
-    let text = body.join('\\n\\n');
-    const truncated = text.length > LIMIT;
-    if (truncated) text = text.slice(0, LIMIT);
+    const truncated = overflow || text.length > LIMIT;
+    if (text.length > LIMIT) text = text.slice(0, LIMIT);
 
     return {
       url: location.href,
       title: document.title,
       origin: location.origin || null,
       text,
-      wordCount: text ? text.split(/\\s+/).length : 0,
+      wordCount: text ? text.split(/\\s+/).filter(Boolean).length : 0,
       truncated,
       capturedAt: Date.now(),
     };
-  `);
+  `), PAGE_CAPTURE_TIMEOUT_MS, "Article extraction");
+}
+
+async function captureSearchResults(): Promise<BrowserAutomationSearchResults> {
+  const webview = webviewRef.value;
+  const pageUrl = (webview ? readWebviewUrl(webview) : undefined) || currentUrl.value;
+  const preset = findSearchExtractPreset(pageUrl);
+  return await withTimeout(executeInPage<BrowserAutomationSearchResults>(`
+    ${PAGE_SCRIPT_HELPERS}
+
+    const preset = payload.preset;
+    const limit = Math.max(1, Math.min(Number(payload.limit) || 30, 60));
+    const results = [];
+    const seen = new Set();
+    const isGoogleHost = (host) => /(^|\\.)google\\.[a-z]{2,3}(\\.[a-z]{2})?$/.test(host);
+
+    const unwrapResultUrl = (raw) => {
+      let parsed;
+      try {
+        parsed = new URL(String(raw || ''), location.href);
+      } catch {
+        return '';
+      }
+      if (isGoogleHost(parsed.hostname.toLowerCase()) && parsed.pathname === '/url') {
+        const target = parsed.searchParams.get('q') || parsed.searchParams.get('url');
+        if (target) {
+          try { return new URL(target, location.href).href; } catch { /* keep the redirect URL */ }
+        }
+      }
+      if (parsed.hostname.toLowerCase().endsWith('duckduckgo.com') && parsed.pathname.startsWith('/l/')) {
+        const target = parsed.searchParams.get('uddg');
+        if (target) {
+          try { return new URL(target, location.href).href; } catch { /* keep the redirect URL */ }
+        }
+      }
+      if (parsed.hostname.toLowerCase().endsWith('bing.com') && parsed.pathname === '/ck/a') {
+        const target = parsed.searchParams.get('u');
+        if (target) {
+          if (/^https?:/i.test(target)) return target;
+          if (target.startsWith('a1')) {
+            try {
+              const base64 = target.slice(2).replace(/-/g, '+').replace(/_/g, '/');
+              const decoded = atob(base64 + '='.repeat((4 - (base64.length % 4)) % 4));
+              if (/^https?:/i.test(decoded)) return decoded;
+            } catch { /* keep the redirect URL */ }
+          }
+        }
+      }
+      return parsed.href;
+    };
+
+    const pushResult = (title, url, snippet) => {
+      const cleanTitle = normalizeText(title);
+      const cleanUrl = unwrapResultUrl(url);
+      if (!cleanTitle || !cleanUrl || !/^https?:/i.test(cleanUrl)) return;
+      const key = cleanUrl.replace(/#.*$/, '');
+      if (seen.has(key)) return;
+      seen.add(key);
+      results.push({
+        rank: results.length + 1,
+        title: cleanTitle.slice(0, 240),
+        url: cleanUrl,
+        snippet: normalizeText(snippet).slice(0, 400),
+      });
+    };
+
+    const pickLinkNode = (container, titleNode) => {
+      if (titleNode) {
+        if (titleNode instanceof HTMLAnchorElement && titleNode.href) return titleNode;
+        const closest = titleNode.closest('a[href]');
+        if (closest) return closest;
+        const nested = titleNode.querySelector('a[href]');
+        if (nested) return nested;
+      }
+      return preset.linkSelectors
+        .map((candidate) => container.querySelector(candidate))
+        .find(Boolean) || null;
+    };
+
+    if (preset) {
+      for (const selector of preset.resultSelectors) {
+        for (const container of Array.from(document.querySelectorAll(selector))) {
+          const titleNode = preset.titleSelectors
+            .map((candidate) => container.querySelector(candidate))
+            .find(Boolean);
+          const linkNode = pickLinkNode(container, titleNode);
+          const snippetNode = preset.snippetSelectors
+            .map((candidate) => container.querySelector(candidate))
+            .find(Boolean);
+          const title = titleNode
+            ? normalizeText(titleNode.getAttribute('aria-label') || titleNode.textContent || '')
+            : '';
+          const url = linkNode instanceof HTMLAnchorElement
+            ? (linkNode.href || linkNode.getAttribute('href') || '')
+            : (linkNode?.getAttribute('href') || '');
+          const snippet = snippetNode ? normalizeText(snippetNode.textContent || '') : '';
+          pushResult(title, url, snippet);
+          if (results.length >= limit) break;
+        }
+        if (results.length >= limit) break;
+      }
+    }
+
+    if (results.length === 0) {
+      const anchors = Array.from(document.querySelectorAll('a[href]'))
+        .filter((anchor) => {
+          if (anchor.closest('nav, header, footer, aside, form')) return false;
+          const href = String(anchor.href || '');
+          if (!/^https?:/i.test(href) || href.startsWith(location.origin + '/search')) return false;
+          const heading = anchor.querySelector('h1, h2, h3, h4');
+          return Boolean(heading) || normalizeText(anchor.textContent || '').length >= 24;
+        });
+      for (const anchor of anchors) {
+        const heading = anchor.querySelector('h1, h2, h3, h4');
+        const container = anchor.closest('li, article, section, div') || anchor.parentElement;
+        const text = normalizeText(anchor.textContent || '');
+        const containerText = container && container !== anchor ? normalizeText(container.textContent || '') : '';
+        const snippet = containerText && containerText !== text
+          ? (containerText.startsWith(text) ? containerText.slice(text.length) : containerText).trim().slice(0, 400)
+          : '';
+        pushResult(heading ? heading.textContent || '' : text, anchor.href, snippet);
+        if (results.length >= limit) break;
+      }
+    }
+
+    return {
+      url: location.href,
+      title: document.title,
+      origin: location.origin || null,
+      results,
+      capturedAt: Date.now(),
+    };
+  `, { preset, limit: 30 }), PAGE_CAPTURE_TIMEOUT_MS, "Search results capture");
+}
+
+/**
+ * Installs read-only diagnostics hooks in the current page context. The
+ * browser's own events capture console output; this captures uncaught errors
+ * and fetch/XHR traffic that never reaches the console.
+ */
+function diagnosticsDocumentKey(): string {
+  const webview = webviewRef.value;
+  const url = webview ? readWebviewUrl(webview) : undefined;
+  return `${diagnosticsNavigationId}:${url || currentUrl.value}`;
+}
+
+async function installDiagnosticsHooks(): Promise<void> {
+  const webview = webviewRef.value;
+  const executeJavaScript = webview?.executeJavaScript;
+  if (!executeJavaScript) return;
+
+  const key = diagnosticsDocumentKey();
+  if (diagnosticsHookInstall?.key === key) {
+    return await diagnosticsHookInstall.promise;
+  }
+
+  const promise = (async () => {
+    try {
+      await executeJavaScript(
+        `(() => {
+          const MAX = ${MAX_DIAGNOSTICS_ENTRIES};
+          let state = window.__worldbaseDiagnostics;
+          const legacyState = Boolean(state && typeof state.version !== 'number');
+          if (state && state.installedVersion >= 2) return true;
+          if (!state) {
+            state = { version: 2, installedVersion: 0, errors: [], network: [], clearedAt: 0 };
+            window.__worldbaseDiagnostics = state;
+          } else {
+            if (!Array.isArray(state.errors)) state.errors = [];
+            if (!Array.isArray(state.network)) state.network = [];
+            if (typeof state.clearedAt !== 'number') state.clearedAt = 0;
+          }
+          const push = (list, entry) => {
+            list.push(entry);
+            if (list.length > MAX) list.splice(0, list.length - MAX);
+          };
+          const recordNetwork = (entry) => push(state.network, entry);
+          if (legacyState || state.listenersInstalled) {
+            state.listenersInstalled = true;
+          } else {
+            state.listenersInstalled = true;
+            window.addEventListener('error', (event) => {
+              const target = event.target;
+              const tag = target && target !== window && target.tagName ? String(target.tagName).toLowerCase() : '';
+              if (tag === 'img' || tag === 'script' || tag === 'link' || tag === 'video' || tag === 'audio' || tag === 'source' || tag === 'iframe') {
+                const source = String(target.currentSrc || target.src || target.href || '');
+                push(state.errors, {
+                  kind: 'load',
+                  message: ('Resource failed to load: ' + tag + (source ? ' ' + source : '')).slice(0, 4000),
+                  source: source ? source.slice(0, 2000) : null,
+                  timestamp: Date.now(),
+                });
+                return;
+              }
+              push(state.errors, {
+                kind: 'error',
+                message: String(event.message || (event.error && event.error.message) || 'Unknown error').slice(0, 4000),
+                source: event.filename ? String(event.filename).slice(0, 2000) : null,
+                line: typeof event.lineno === 'number' ? event.lineno : null,
+                column: typeof event.colno === 'number' ? event.colno : null,
+                stack: event.error && event.error.stack ? String(event.error.stack).slice(0, 8000) : null,
+                timestamp: Date.now(),
+              });
+            }, true);
+            window.addEventListener('unhandledrejection', (event) => {
+              const reason = event.reason;
+              push(state.errors, {
+                kind: 'unhandledrejection',
+                message: String((reason && reason.message) || reason || 'Unhandled rejection').slice(0, 4000),
+                stack: reason && reason.stack ? String(reason.stack).slice(0, 8000) : null,
+                timestamp: Date.now(),
+              });
+            });
+          }
+          if (!legacyState && !state.fetchHooked && typeof window.fetch === 'function') {
+            state.fetchHooked = true;
+            const originalFetch = window.fetch;
+            window.fetch = function (...args) {
+              const startedAt = performance.now();
+              const input = args[0];
+              const url = typeof input === 'string' ? input : (input && input.url) || '';
+              const method = String((args[1] && args[1].method) || (input && input.method) || 'GET');
+              return originalFetch.apply(this, args).then((response) => {
+                recordNetwork({
+                  url: String(response.url || url),
+                  method,
+                  status: response.status,
+                  ok: response.ok,
+                  type: 'fetch',
+                  durationMs: Math.round(performance.now() - startedAt),
+                  transferSize: null,
+                  error: null,
+                  timestamp: Date.now(),
+                });
+                return response;
+              }).catch((error) => {
+                recordNetwork({
+                  url: String(url),
+                  method,
+                  status: null,
+                  ok: false,
+                  type: 'fetch',
+                  durationMs: Math.round(performance.now() - startedAt),
+                  transferSize: null,
+                  error: String(error),
+                  timestamp: Date.now(),
+                });
+                throw error;
+              });
+            };
+          } else if (legacyState) {
+            state.fetchHooked = true;
+          }
+          if (!legacyState && !state.xhrHooked && window.XMLHttpRequest) {
+            state.xhrHooked = true;
+            const OriginalXHR = window.XMLHttpRequest;
+            const originalOpen = OriginalXHR.prototype.open;
+            const originalSend = OriginalXHR.prototype.send;
+            OriginalXHR.prototype.open = function (method, url, ...rest) {
+              this.__worldbaseRequest = { method: String(method || 'GET'), url: String(url || '') };
+              return originalOpen.call(this, method, url, ...rest);
+            };
+            OriginalXHR.prototype.send = function (...args) {
+              const startedAt = performance.now();
+              this.addEventListener('loadend', () => {
+                const request = this.__worldbaseRequest || { method: 'GET', url: '' };
+                recordNetwork({
+                  url: String(request.url),
+                  method: String(request.method),
+                  status: this.status || null,
+                  ok: this.status >= 200 && this.status < 400,
+                  type: 'xhr',
+                  durationMs: Math.round(performance.now() - startedAt),
+                  transferSize: null,
+                  error: this.status === 0 ? (this.statusText || 'Request failed or was blocked') : null,
+                  timestamp: Date.now(),
+                });
+              });
+              return originalSend.apply(this, args);
+            };
+          } else if (legacyState) {
+            state.xhrHooked = true;
+          }
+          state.version = 2;
+          state.installedVersion = 2;
+          return true;
+        })()`,
+        true,
+      );
+    } catch {
+      // Diagnostics are best-effort: a page that blocks injection still has
+      // console/load events from the webview itself.
+    }
+  })();
+
+  const record = { key, promise };
+  diagnosticsHookInstall = record;
+  try {
+    await promise;
+  } finally {
+    if (diagnosticsHookInstall === record) diagnosticsHookInstall = null;
+  }
+}
+
+async function captureDiagnostics(options: { clear?: boolean } = {}): Promise<BrowserAutomationDiagnostics> {
+  const webview = webviewRef.value;
+  if (!webview) {
+    throw new Error("Browser diagnostics are unavailable for this page surface.");
+  }
+
+  try {
+    await withTimeout(installDiagnosticsHooks(), DIAGNOSTICS_HOOK_TIMEOUT_MS, "Page diagnostics hook install");
+  } catch {}
+
+  let captured: {
+    page: Omit<BrowserAutomationDiagnostics, "console" | "errors" | "network" | "canGoBack" | "canGoForward" | "capturedAt">;
+    errors: BrowserAutomationPageError[];
+    network: BrowserAutomationNetworkEntry[];
+    resources: BrowserAutomationNetworkEntry[];
+  } | null = null;
+  let captureError: Error | null = null;
+
+  try {
+    captured = await withTimeout(executeInPage<{
+      page: Omit<BrowserAutomationDiagnostics, "console" | "errors" | "network" | "canGoBack" | "canGoForward" | "capturedAt">;
+      errors: BrowserAutomationPageError[];
+      network: BrowserAutomationNetworkEntry[];
+      resources: BrowserAutomationNetworkEntry[];
+    }>(`
+      ${PAGE_SCRIPT_HELPERS}
+
+      const diagnostics = window.__worldbaseDiagnostics || { errors: [], network: [], clearedAt: 0 };
+      const clearedAt = Number(diagnostics.clearedAt) || 0;
+      const resources = [
+        ...(performance.getEntriesByType('navigation') || []),
+        ...(performance.getEntriesByType('resource') || []),
+      ]
+        .sort((left, right) => left.startTime - right.startTime)
+        .slice(-${MAX_DIAGNOSTICS_ENTRIES})
+        .map((entry) => ({
+          url: String(entry.name || ''),
+          method: null,
+          status: null,
+          ok: null,
+          type: String(entry.initiatorType || entry.entryType || 'resource'),
+          durationMs: Math.round(Number(entry.duration) || 0),
+          transferSize: typeof entry.transferSize === 'number' ? entry.transferSize : null,
+          error: null,
+          timestamp: Math.round(performance.timeOrigin + (Number(entry.startTime) || 0)),
+        }))
+        .filter((entry) => entry.url && !entry.url.startsWith('data:') && !entry.url.startsWith('blob:') && entry.timestamp >= clearedAt);
+
+      const documentElement = document.documentElement;
+      const body = document.body;
+      const result = {
+        page: {
+          url: location.href,
+          title: document.title,
+          origin: location.origin || null,
+          readyState: document.readyState,
+          visibilityState: document.visibilityState,
+          viewport: {
+            width: window.innerWidth,
+            height: window.innerHeight,
+            devicePixelRatio: window.devicePixelRatio || 1,
+          },
+          scroll: {
+            x: Math.round(window.scrollX),
+            y: Math.round(window.scrollY),
+            width: Math.max(documentElement ? documentElement.scrollWidth : 0, body ? body.scrollWidth : 0),
+            height: Math.max(documentElement ? documentElement.scrollHeight : 0, body ? body.scrollHeight : 0),
+          },
+          historyLength: window.history.length,
+          userAgent: navigator.userAgent,
+        },
+        errors: Array.isArray(diagnostics.errors) ? diagnostics.errors.slice(-${MAX_DIAGNOSTICS_ENTRIES}) : [],
+        network: Array.isArray(diagnostics.network) ? diagnostics.network.slice(-${MAX_DIAGNOSTICS_ENTRIES}) : [],
+        resources,
+      };
+
+      if (payload && payload.clear) {
+        diagnostics.errors.length = 0;
+        diagnostics.network.length = 0;
+        diagnostics.clearedAt = Date.now();
+      }
+
+      return result;
+    `, { clear: Boolean(options.clear) }), PAGE_CAPTURE_TIMEOUT_MS, "Page diagnostics");
+  } catch (error) {
+    captureError = error instanceof Error ? error : new Error(String(error));
+  }
+
+  let nativeNetwork: BrowserAutomationNetworkEntry[] = [];
+  const webContentsId = getWebContentsId();
+  const getNetworkLog = window.electronAPI?.getBrowserPageNetworkLog;
+  if (webContentsId && getNetworkLog) {
+    try {
+      nativeNetwork = await getNetworkLog(webContentsId, MAX_DIAGNOSTICS_ENTRIES) || [];
+    } catch {}
+  }
+  if (diagnosticsNetworkClearedAt > 0) {
+    nativeNetwork = nativeNetwork.filter(entry => entry.timestamp > diagnosticsNetworkClearedAt);
+  }
+
+  const pageUrl = captured?.page.url || readWebviewUrl(webview) || currentUrl.value;
+  let pageOrigin: string | null = null;
+  try { pageOrigin = pageUrl ? new URL(pageUrl).origin : null; } catch { pageOrigin = null; }
+
+  const page = captured?.page || {
+    url: pageUrl,
+    title: currentTitle.value,
+    origin: pageOrigin,
+    readyState: "unavailable",
+    visibilityState: "unknown",
+    viewport: { width: 0, height: 0, devicePixelRatio: window.devicePixelRatio || 1 },
+    scroll: { x: 0, y: 0, width: 0, height: 0 },
+    historyLength: 0,
+    userAgent: navigator.userAgent,
+  };
+
+  const canGoBack = (() => {
+    try { return Boolean(webview.canGoBack?.()); } catch { return false; }
+  })();
+  const canGoForward = (() => {
+    try { return Boolean(webview.canGoForward?.()); } catch { return false; }
+  })();
+
+  const network = mergeDiagnosticsNetwork([
+    ...nativeNetwork,
+    ...(captured?.network || []),
+    ...(captured?.resources || []),
+  ]);
+
+  const runtimeErrors: BrowserAutomationPageError[] = captured?.errors || [];
+  if (captureError) {
+    runtimeErrors.push({
+      kind: "error",
+      message: `Page diagnostics could not be collected: ${captureError.message}`,
+      timestamp: Date.now(),
+    });
+  }
+
+  const result: BrowserAutomationDiagnostics = {
+    ...page,
+    canGoBack,
+    canGoForward,
+    console: dedupeConsoleEntries([...consoleBuffer]),
+    errors: dedupeDiagnosticsErrors([...pageErrorBuffer, ...runtimeErrors]).slice(-MAX_DIAGNOSTICS_ENTRIES),
+    network,
+    capturedAt: Date.now(),
+  };
+
+  if (options.clear) {
+    diagnosticsNetworkClearedAt = Date.now();
+    consoleBuffer.length = 0;
+    pageErrorBuffer.length = 0;
+  }
+
+  return result;
+}
+
+
+function dedupeConsoleEntries (entries: BrowserAutomationConsoleEntry[]): BrowserAutomationConsoleEntry[] {
+  const seen = new Set<string>();
+  const deduped = entries.filter((entry) => {
+    const key = `${entry.level}|${entry.timestamp}|${entry.message}|${entry.source || ""}|${entry.line ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return deduped.slice(-MAX_DIAGNOSTICS_ENTRIES);
+}
+
+function mergeDiagnosticsNetwork (entries: BrowserAutomationNetworkEntry[]): BrowserAutomationNetworkEntry[] {
+  const sorted = [...entries].sort((left, right) => right.timestamp - left.timestamp);
+  const kept: BrowserAutomationNetworkEntry[] = [];
+
+  for (const entry of sorted) {
+    const duplicateIndex = kept.findIndex((candidate) => {
+      if (candidate.url !== entry.url) return false;
+      const sameRequest = candidate.method === entry.method
+        && (candidate.status ?? null) === (entry.status ?? null)
+        && Math.abs(candidate.timestamp - entry.timestamp) < 1500;
+      if (sameRequest) return true;
+      const resourceOverlap = isResourceLikeEntry(candidate) || isResourceLikeEntry(entry);
+      if (!resourceOverlap) return false;
+      return Math.abs(candidate.timestamp - entry.timestamp) < Math.max(2000, (candidate.durationMs || 0) + 1000);
+    });
+    if (duplicateIndex >= 0) {
+      const current = kept[duplicateIndex];
+      const preferred = isResourceLikeEntry(current) && !isResourceLikeEntry(entry) ? entry : current;
+      const fallback = preferred === current ? entry : current;
+      kept[duplicateIndex] = {
+        ...fallback,
+        ...preferred,
+        durationMs: preferred.durationMs ?? fallback.durationMs ?? null,
+        transferSize: preferred.transferSize ?? fallback.transferSize ?? null,
+      };
+      continue;
+    }
+    kept.push(entry);
+  }
+
+  return kept.slice(0, MAX_DIAGNOSTICS_ENTRIES);
+}
+
+function isResourceLikeEntry (entry: BrowserAutomationNetworkEntry): boolean {
+  return entry.method == null && entry.status == null;
+}
+
+function dedupeDiagnosticsErrors (entries: BrowserAutomationPageError[]): BrowserAutomationPageError[] {
+  const byKey = new Map<string, BrowserAutomationPageError>();
+  for (const entry of entries) {
+    const key = `${entry.kind}|${entry.message}|${entry.source || ""}|${entry.line ?? ""}|${entry.column ?? ""}`;
+    byKey.set(key, entry);
+  }
+  return [...byKey.values()].sort((left, right) => left.timestamp - right.timestamp);
+}
+
+function normalizeScreenshotQuality(value?: number): number {
+  return Math.max(10, Math.min(Math.round(Number(value) || 80), 100));
+}
+
+function normalizeScreenshotTimeout(value?: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return SCREENSHOT_DEFAULT_TIMEOUT_MS;
+  return Math.max(SCREENSHOT_MIN_TIMEOUT_MS, Math.min(Math.round(numeric), SCREENSHOT_MAX_TIMEOUT_MS));
+}
+
+const SCREENSHOT_MAX_HEIGHT = 16000;
+const SCREENSHOT_MAX_PIXELS = 25_000_000;
+
+function screenshotExceedsCaps(width: number, height: number, maxWidth: number): boolean {
+  return width > maxWidth
+    || height > SCREENSHOT_MAX_HEIGHT
+    || width * height > SCREENSHOT_MAX_PIXELS;
+}
+
+async function renderScreenshotDataUrl(
+  dataUrl: string,
+  maxWidth: number,
+  format: "png" | "jpeg",
+  quality: number,
+  allowFormatConversion: boolean,
+): Promise<{ dataUrl: string; width: number; height: number } | null> {
+  try {
+    const image = new Image();
+    image.decoding = "async";
+    image.src = dataUrl;
+    await withTimeout(image.decode(), SCREENSHOT_RENDER_TIMEOUT_MS, "Screenshot image decode");
+    const naturalWidth = image.naturalWidth || image.width;
+    const naturalHeight = image.naturalHeight || image.height;
+    if (!naturalWidth || !naturalHeight) return null;
+    const scale = Math.min(
+      1,
+      maxWidth / naturalWidth,
+      SCREENSHOT_MAX_HEIGHT / naturalHeight,
+      Math.sqrt(SCREENSHOT_MAX_PIXELS / (naturalWidth * naturalHeight)),
+    );
+    const width = Math.max(1, Math.floor(naturalWidth * scale));
+    const height = Math.max(1, Math.floor(naturalHeight * scale));
+    const needsFormatConversion = allowFormatConversion && format === "jpeg";
+    if (width >= naturalWidth && height >= naturalHeight && !needsFormatConversion) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    if (format === "jpeg") {
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, width, height);
+    }
+    context.drawImage(image, 0, 0, width, height);
+    return {
+      dataUrl: canvas.toDataURL(format === "jpeg" ? "image/jpeg" : "image/png", quality / 100),
+      width,
+      height,
+    };
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") throw error;
+    return null;
+  }
+}
+
+const SCREENSHOT_RECOVERY_BUDGET_MS = 20_000;
+const SCREENSHOT_RECOVERY_READY_TIMEOUT_MS = 8_000;
+let screenshotHostRecovery: Promise<void> | null = null;
+
+function isScreenshotTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "TimeoutError" || /timed?\s*out|timeout/i.test(error.message);
+}
+
+async function recoverPageHostAfterScreenshotTimeout(): Promise<void> {
+  if (screenshotHostRecovery) return await screenshotHostRecovery;
+  const previousWebview = webviewRef.value;
+  if (!previousWebview) throw new Error("Page screenshots are unavailable for this page surface.");
+
+  const recoveryUrl = readWebviewUrl(previousWebview) || currentUrl.value;
+  const recovery = (async () => {
+    currentUrl.value = recoveryUrl;
+    syncAddressInput(recoveryUrl);
+    detachListeners?.();
+    detachListeners = null;
+    diagnosticsHookInstall = null;
+    diagnosticsNavigationId += 1;
+    diagnosticsNetworkClearedAt = Date.now();
+    consoleBuffer.length = 0;
+    pageErrorBuffer.length = 0;
+    webviewGeneration.value += 1;
+    await nextTick();
+
+    const webview = webviewRef.value;
+    if (!webview || webview === previousWebview) {
+      throw new Error("The page surface could not be rebuilt after the screenshot timed out.");
+    }
+    detachListeners = attachWebviewListeners();
+    const deadline = Date.now() + SCREENSHOT_RECOVERY_READY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (webviewRef.value !== webview) {
+        throw new Error("The recovered page surface was replaced before it became ready.");
+      }
+      try {
+        const readyState = await withTimeout(
+          Promise.resolve(webview.executeJavaScript?.("document.readyState")),
+          1000,
+          "Recovered page readiness",
+        );
+        if (!webview.isLoading?.() && (readyState === "interactive" || readyState === "complete")) {
+          syncFromWebview();
+          emitStateChange();
+          return;
+        }
+      } catch {
+        // The replacement guest can reject or stall until it has attached.
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+    throw new Error("Timed out waiting for the rebuilt page surface to become ready.");
+  })();
+  screenshotHostRecovery = recovery;
+  try {
+    await recovery;
+  } finally {
+    if (screenshotHostRecovery === recovery) screenshotHostRecovery = null;
+  }
+}
+
+async function captureScreenshotAttempt(options: {
+  fullPage?: boolean;
+  maxWidth?: number;
+  format?: "png" | "jpeg";
+  quality?: number;
+  timeoutMs?: number;
+} = {}): Promise<BrowserAutomationScreenshot> {
+  const webview = webviewRef.value;
+  if (!webview) {
+    throw new Error("Page screenshots are unavailable for this page surface.");
+  }
+
+  const maxWidth = Math.max(320, Math.min(Number(options.maxWidth) || 1280, 4096));
+  const format = options.format === "jpeg" ? "jpeg" : "png";
+  const quality = normalizeScreenshotQuality(options.quality);
+  const title = currentTitle.value;
+  const url = readWebviewUrl(webview) || currentUrl.value;
+  const fullPage = Boolean(options.fullPage);
+  const defaultTimeoutMs = fullPage ? SCREENSHOT_FULL_PAGE_TIMEOUT_MS : SCREENSHOT_VIEWPORT_TIMEOUT_MS;
+  const timeoutMs = normalizeScreenshotTimeout(options.timeoutMs ?? defaultTimeoutMs);
+  const webContentsId = getWebContentsId();
+  const captureBridge = window.electronAPI?.captureBrowserPageScreenshot;
+  let note: string | undefined;
+
+  if (webContentsId && captureBridge) {
+    try {
+      const shot = await withTimeout(captureBridge({
+        webContentsId,
+        fullPage,
+        format,
+        quality,
+        timeoutMs,
+      }), Math.min(timeoutMs + 1000, SCREENSHOT_MAX_TIMEOUT_MS + 1000), fullPage ? "Full-page screenshot" : "Page screenshot");
+      if (shot?.dataUrl) {
+        let dataUrl = shot.dataUrl;
+        let width = shot.width;
+        let height = shot.height;
+        const scaled = screenshotExceedsCaps(width, height, maxWidth)
+          ? await renderScreenshotDataUrl(dataUrl, maxWidth, format, quality, false)
+          : null;
+        if (scaled) {
+          dataUrl = scaled.dataUrl;
+          width = scaled.width;
+          height = scaled.height;
+        }
+        const scalingNote = screenshotExceedsCaps(width, height, maxWidth)
+          ? `${shot.fullPage ? "Full-page" : "Viewport"} screenshot is ${width}x${height}px; it exceeded the ${maxWidth}px width, ${SCREENSHOT_MAX_HEIGHT}px height, or ${SCREENSHOT_MAX_PIXELS}px pixel cap and could not be scaled further.`
+          : undefined;
+        return {
+          url,
+          title,
+          dataUrl,
+          width,
+          height,
+          fullPage: shot.fullPage,
+          ...(shot.note || scalingNote ? { note: [shot.note, scalingNote].filter(Boolean).join(" ") } : {}),
+          capturedAt: Date.now(),
+        };
+      }
+      note = `${fullPage ? "Full-page" : "Viewport"} capture returned no image; used the browser view fallback.`;
+    } catch (error) {
+      note = `${fullPage ? "Full-page" : "Viewport"} capture failed (${error instanceof Error ? error.message : String(error)}); used the browser view fallback.`;
+    }
+  } else if (fullPage) {
+    note = "Full-page capture is unavailable for this page surface; returned the visible viewport instead.";
+  }
+
+  if (!webview.capturePage) {
+    throw new Error("This browser surface does not support screenshots.");
+  }
+
+  let image = await withTimeout(webview.capturePage(), timeoutMs, "Page screenshot");
+  let size = image.getSize();
+  let dataUrl = image.toDataURL();
+  const converted = screenshotExceedsCaps(size.width, size.height, maxWidth) || format === "jpeg"
+    ? await renderScreenshotDataUrl(dataUrl, maxWidth, format, quality, true)
+    : null;
+  if (converted) {
+    dataUrl = converted.dataUrl;
+    size = { width: converted.width, height: converted.height };
+  } else if (screenshotExceedsCaps(size.width, size.height, maxWidth)) {
+    note = [note, `Viewport screenshot is ${size.width}x${size.height}px; it exceeded the ${maxWidth}px width, ${SCREENSHOT_MAX_HEIGHT}px height, or ${SCREENSHOT_MAX_PIXELS}px pixel cap and could not be scaled further.`]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return {
+    url,
+    title,
+    dataUrl,
+    width: size.width,
+    height: size.height,
+    fullPage: false,
+    ...(note ? { note } : {}),
+    capturedAt: Date.now(),
+  };
+}
+
+async function captureScreenshot(options: {
+  fullPage?: boolean;
+  maxWidth?: number;
+  format?: "png" | "jpeg";
+  quality?: number;
+  timeoutMs?: number;
+} = {}): Promise<BrowserAutomationScreenshot> {
+  const defaultTimeoutMs = options.fullPage ? SCREENSHOT_FULL_PAGE_TIMEOUT_MS : SCREENSHOT_VIEWPORT_TIMEOUT_MS;
+  const timeoutMs = normalizeScreenshotTimeout(options.timeoutMs ?? defaultTimeoutMs);
+  const deadline = Date.now() + timeoutMs + SCREENSHOT_RECOVERY_BUDGET_MS;
+  const captureAttempt = async (attemptTimeoutMs: number) => await withTimeout(
+    captureScreenshotAttempt({ ...options, timeoutMs: attemptTimeoutMs }),
+    Math.min(attemptTimeoutMs + 1000, SCREENSHOT_MAX_TIMEOUT_MS + 1000),
+    options.fullPage ? "Full-page screenshot" : "Page screenshot",
+  );
+
+  try {
+    return await captureAttempt(timeoutMs);
+  } catch (error) {
+    if (!isScreenshotTimeoutError(error)) throw error;
+    console.warn("[browser-webview] screenshot timed out; rebuilding page host", { appId: props.appId });
+    const remainingMs = deadline - Date.now();
+    if (remainingMs < SCREENSHOT_MIN_TIMEOUT_MS + 2000) throw error;
+    try {
+      await withTimeout(
+        recoverPageHostAfterScreenshotTimeout(),
+        Math.min(SCREENSHOT_RECOVERY_READY_TIMEOUT_MS, remainingMs - SCREENSHOT_MIN_TIMEOUT_MS - 1000),
+        "Page host recovery",
+      );
+    } catch (recoveryError) {
+      const detail = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+      throw new Error(`Screenshot timed out and page-host recovery failed: ${detail}`);
+    }
+
+    const retryTimeoutMs = Math.min(timeoutMs, deadline - Date.now() - 1000);
+    if (retryTimeoutMs < SCREENSHOT_MIN_TIMEOUT_MS) {
+      throw new Error("Screenshot timed out; the rebuilt page host left too little time to retry the capture.");
+    }
+    try {
+      const screenshot = await captureAttempt(retryTimeoutMs);
+      return {
+        ...screenshot,
+        note: [
+          "The page host was rebuilt after the screenshot timed out; the page was reloaded and its emulation was reset.",
+          screenshot.note,
+        ].filter(Boolean).join(" "),
+      };
+    } catch (retryError) {
+      const detail = retryError instanceof Error ? retryError.message : String(retryError);
+      throw new Error(`Screenshot failed after rebuilding the page host: ${detail}`);
+    }
+  }
+}
+
+interface WebviewLoadWaiter {
+  promise: Promise<void>;
+  cancel: () => void;
+  fail: (error: Error) => void;
+}
+
+function waitForWebviewLoad(webview: WebviewLikeElement, timeoutMs = 15000): WebviewLoadWaiter {
+  let settled = false;
+  let timer: number | null = null;
+  let pollTimer: number | null = null;
+  let resolvePromise: (() => void) | null = null;
+  let rejectPromise: ((error: Error) => void) | null = null;
+  const initialUrl = readWebviewUrl(webview) || "";
+  let sawLoading = false;
+  try { sawLoading = Boolean(webview.isLoading?.()); } catch { sawLoading = false; }
+
+  const cleanup = () => {
+    webview.removeEventListener("did-start-loading", onStart as EventListener);
+    webview.removeEventListener("did-stop-loading", onStop as EventListener);
+    webview.removeEventListener("did-navigate-in-page", onNavigateInPage as EventListener);
+    webview.removeEventListener("did-fail-load", onFail as EventListener);
+    if (timer != null) {
+      window.clearTimeout(timer);
+      timer = null;
+    }
+    if (pollTimer != null) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  };
+
+  const settle = (error?: Error) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    if (error) rejectPromise?.(error);
+    else resolvePromise?.();
+  };
+
+  const onStart = () => {
+    sawLoading = true;
+  };
+  const onStop = () => settle();
+  const onNavigateInPage = () => {
+    window.setTimeout(() => {
+      if (settled) return;
+      let loading = false;
+      try { loading = Boolean(webview.isLoading?.()); } catch { loading = false; }
+      if (!loading) settle();
+    }, 80);
+  };
+  const onFail = (event: Event) => {
+    const payload = event as Event & {
+      errorCode?: number;
+      errorDescription?: string;
+      validatedURL?: string;
+      isMainFrame?: boolean;
+    };
+    if (payload.isMainFrame === false) return;
+    const errorCode = Number(payload.errorCode);
+    if (errorCode === -3) return;
+    const description = payload.errorDescription || `Navigation failed (${payload.errorCode ?? "unknown"})`;
+    settle(new Error(payload.validatedURL ? `${description}: ${payload.validatedURL}` : description));
+  };
+
+  const promise = new Promise<void>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+
+  webview.addEventListener("did-start-loading", onStart as EventListener);
+  webview.addEventListener("did-stop-loading", onStop as EventListener);
+  webview.addEventListener("did-navigate-in-page", onNavigateInPage as EventListener);
+  webview.addEventListener("did-fail-load", onFail as EventListener);
+
+  const effectiveTimeout = Math.max(1000, Math.min(Number(timeoutMs) || 15000, 25000));
+  timer = window.setTimeout(() => {
+    settle(new Error(`Timed out after ${effectiveTimeout}ms waiting for the page to finish loading.`));
+  }, effectiveTimeout);
+
+  pollTimer = window.setInterval(() => {
+    if (settled) return;
+    let loading = false;
+    try { loading = Boolean(webview.isLoading?.()); } catch { loading = false; }
+    if (loading) {
+      sawLoading = true;
+      return;
+    }
+    if (sawLoading) {
+      settle();
+      return;
+    }
+    const currentUrlValue = readWebviewUrl(webview);
+    if (currentUrlValue && currentUrlValue !== initialUrl) settle();
+  }, 120);
+
+  return {
+    promise,
+    cancel: () => settle(),
+    fail: (error: Error) => settle(error),
+  };
+}
+
+const NAVIGATION_GRACE_MS = 450;
+
+interface NavigationOutcome {
+  navigated: boolean;
+  url?: string;
+  timedOut?: boolean;
+  error?: string;
+}
+
+interface NavigationWatcher {
+  start: () => Promise<NavigationOutcome>;
+  cancel: () => void;
+}
+
+type NavigationAwareActionResult = BrowserAutomationActionResult & {
+  navigated?: boolean;
+  navigationTimedOut?: boolean;
+};
+
+function watchForNavigation(webview: WebviewLikeElement, timeoutMs = 15000): NavigationWatcher {
+  const initialUrl = readWebviewUrl(webview) || "";
+  let started = false;
+  let finished = false;
+  let navigated = false;
+  let startedAt = 0;
+  let pollTimer: number | null = null;
+  let timeoutTimer: number | null = null;
+  let resolveOutcome: ((outcome: NavigationOutcome) => void) | null = null;
+  const effectiveTimeout = Math.max(1000, Math.min(Number(timeoutMs) || 15000, 25000));
+
+  const currentUrl = () => readWebviewUrl(webview) || initialUrl;
+  const isLoadingNow = () => {
+    try { return Boolean(webview.isLoading?.()); } catch { return false; }
+  };
+
+  const cleanup = () => {
+    webview.removeEventListener("did-start-navigation", onStartNavigation as EventListener);
+    webview.removeEventListener("did-navigate", onNavigate as EventListener);
+    webview.removeEventListener("did-navigate-in-page", onInPageNavigate as EventListener);
+    webview.removeEventListener("did-stop-loading", onStop as EventListener);
+    webview.removeEventListener("did-fail-load", onFail as EventListener);
+    if (pollTimer != null) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    if (timeoutTimer != null) {
+      window.clearTimeout(timeoutTimer);
+      timeoutTimer = null;
+    }
+  };
+
+  const finish = (outcome: NavigationOutcome) => {
+    if (finished) return;
+    finished = true;
+    cleanup();
+    resolveOutcome?.(outcome);
+  };
+
+  const evaluate = () => {
+    if (!started || finished) return;
+    const url = currentUrl();
+    if (url && url !== initialUrl) navigated = true;
+    if (navigated && !isLoadingNow()) {
+      finish({ navigated: true, url });
+      return;
+    }
+    if (!navigated && Date.now() - startedAt >= NAVIGATION_GRACE_MS) {
+      finish({ navigated: false, url });
+    }
+  };
+
+  const onStartNavigation = (event: Event) => {
+    const payload = event as Event & { isMainFrame?: boolean };
+    if (payload.isMainFrame === false) return;
+    navigated = true;
+  };
+  const onNavigate = () => {
+    navigated = true;
+  };
+  const onInPageNavigate = () => {
+    navigated = true;
+    evaluate();
+  };
+  const onStop = () => evaluate();
+  const onFail = (event: Event) => {
+    const payload = event as Event & {
+      errorCode?: number;
+      errorDescription?: string;
+      validatedURL?: string;
+      isMainFrame?: boolean;
+    };
+    if (payload.isMainFrame === false) return;
+    if (Number(payload.errorCode) === -3) return;
+    navigated = true;
+    finish({
+      navigated: true,
+      url: payload.validatedURL || currentUrl(),
+      error: payload.errorDescription || `Navigation failed (${payload.errorCode ?? "unknown"})`,
+    });
+  };
+
+  const promise = new Promise<NavigationOutcome>((resolve) => {
+    resolveOutcome = resolve;
+  });
+
+  const start = () => {
+    if (!started) {
+      started = true;
+      startedAt = Date.now();
+      evaluate();
+      if (!finished) {
+        pollTimer = window.setInterval(evaluate, 80);
+        timeoutTimer = window.setTimeout(() => {
+          finish({ navigated, url: currentUrl(), timedOut: navigated });
+        }, effectiveTimeout);
+      }
+    }
+    return promise;
+  };
+
+  const cancel = () => {
+    finish({ navigated: false, url: currentUrl() });
+  };
+
+  webview.addEventListener("did-start-navigation", onStartNavigation as EventListener);
+  webview.addEventListener("did-navigate", onNavigate as EventListener);
+  webview.addEventListener("did-navigate-in-page", onInPageNavigate as EventListener);
+  webview.addEventListener("did-stop-loading", onStop as EventListener);
+  webview.addEventListener("did-fail-load", onFail as EventListener);
+
+  return { start, cancel };
+}
+
+function withNavigationOutcome(
+  result: BrowserAutomationActionResult,
+  outcome: NavigationOutcome,
+): NavigationAwareActionResult {
+  const notes: string[] = [];
+  if (outcome.timedOut) notes.push("Navigation was detected but did not finish within the action timeout.");
+  if (outcome.error) notes.push(`Navigation failed: ${outcome.error}`);
+  return {
+    ...result,
+    navigated: outcome.navigated,
+    ...(outcome.timedOut ? { navigationTimedOut: true } : {}),
+    ...(outcome.url ? { url: outcome.url } : {}),
+    ...(result.note || notes.length
+      ? { note: [result.note, ...notes].filter(Boolean).join(" ") }
+      : {}),
+  };
+}
+
+interface NavigationWaitTarget {
+  state?: "load" | "domcontentloaded";
+  url?: string;
+  selector?: string;
+  ref?: string;
+  text?: string | string[];
+}
+
+function waitTextValues(value: string | string[] | undefined): string[] {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return values.map(text => String(text || "")).filter(Boolean);
+}
+
+const PAGE_WAIT_CONTEXT_ERROR_PATTERN = /context destroyed|Execution context was destroyed|Script failed to execute|GUEST_VIEW_MANAGER_CALL|Cannot find context|Cannot access contents/i;
+const PAGE_WAIT_CONDITION_TIMEOUT_PATTERN = /wait_for timed out after/i;
+
+function isWaitContextError(error: unknown): boolean {
+  const rawMessage = pageExecutionRawMessage(error);
+  if (PAGE_WAIT_CONDITION_TIMEOUT_PATTERN.test(rawMessage)) return false;
+  return PAGE_WAIT_CONTEXT_ERROR_PATTERN.test(rawMessage);
+}
+
+function describeWaitCondition(condition: NavigationWaitTarget): string {
+  const parts: string[] = [];
+  if (condition.selector) parts.push(`selector="${condition.selector}"`);
+  if (condition.ref) parts.push(`ref="${condition.ref}"`);
+  const texts = waitTextValues(condition.text);
+  if (texts.length === 1) parts.push(`text="${texts[0]}"`);
+  else if (texts.length > 1) parts.push(`text matches one of ["${texts.join('", "')}"]`);
+  if (condition.url) parts.push(`url contains "${condition.url}"`);
+  if (condition.state) parts.push(`state="${condition.state}"`);
+  return parts.length > 0 ? parts.join(" + ") : "the page";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function readWaitPageSummary(webview: WebviewLikeElement): Promise<{ url: string; title: string; text: string }> {
+  const fallbackUrl = readWebviewUrl(webview) || currentUrl.value;
+  try {
+    const summary = await withTimeout(executeInPage<{ url?: string; title?: string; text?: string }>(`
+      const pageText = String(document.body?.innerText || document.body?.textContent || '')
+        .replace(/\\s+/g, ' ')
+        .trim()
+        .slice(0, ${PAGE_WAIT_TEXT_PREVIEW_LIMIT});
+      return {
+        url: location.href,
+        title: document.title || '',
+        text: pageText,
+      };
+    `), PAGE_WAIT_SUMMARY_TIMEOUT_MS, "Page wait summary");
+    return {
+      url: summary?.url || fallbackUrl,
+      title: summary?.title || currentTitle.value,
+      text: String(summary?.text || "").slice(0, PAGE_WAIT_TEXT_PREVIEW_LIMIT),
+    };
+  } catch {
+    return { url: fallbackUrl, title: currentTitle.value, text: "" };
+  }
+}
+
+async function buildWaitTimeoutError(
+  webview: WebviewLikeElement,
+  condition: NavigationWaitTarget,
+  timeoutMs: number,
+): Promise<Error> {
+  const summary = await readWaitPageSummary(webview);
+  const title = summary.title.replace(/\s+/g, " ").trim();
+  const preview = summary.text ? `, page text starts: "${summary.text}"` : "";
+  return new Error(
+    `wait_for timed out after ${timeoutMs}ms waiting for ${describeWaitCondition(condition)} (url=${summary.url}, title=${title}${preview})`,
+  );
+}
+
+async function waitForWebviewIdle(webview: WebviewLikeElement, deadline: number): Promise<void> {
+  while (Date.now() < deadline) {
+    let loading = false;
+    try { loading = Boolean(webview.isLoading?.()); } catch { loading = false; }
+    if (!loading) return;
+    await sleep(Math.min(PAGE_WAIT_RETRY_DELAY_MS, Math.max(1, deadline - Date.now())));
+  }
+}
+
+async function waitForNavigationCondition(
+  webview: WebviewLikeElement,
+  target: NavigationWaitTarget,
+  timeoutMs: number,
+): Promise<void> {
+  const effectiveTimeout = Math.max(100, Math.min(Number(timeoutMs) || 10000, PAGE_WAIT_TIMEOUT_MAX_MS));
+  const check = () => {
+    if (target.url) {
+      const url = readWebviewUrl(webview);
+      if (!url || !url.includes(target.url)) return false;
+    }
+    if (target.state) {
+      let loading = false;
+      try { loading = Boolean(webview.isLoading?.()); } catch { loading = false; }
+      if (loading) return false;
+    }
+    return true;
+  };
+
+  if (check()) return;
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let pollTimer: number | null = null;
+    let timeoutTimer: number | null = null;
+    const cleanup = () => {
+      webview.removeEventListener("did-start-loading", evaluate as EventListener);
+      webview.removeEventListener("did-stop-loading", evaluate as EventListener);
+      webview.removeEventListener("did-navigate", evaluate as EventListener);
+      webview.removeEventListener("did-navigate-in-page", evaluate as EventListener);
+      webview.removeEventListener("did-fail-load", onFail as EventListener);
+      if (pollTimer != null) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      if (timeoutTimer != null) {
+        window.clearTimeout(timeoutTimer);
+        timeoutTimer = null;
+      }
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const evaluate = () => {
+      if (check()) finish();
+    };
+    const onFail = (event: Event) => {
+      const payload = event as Event & {
+        errorCode?: number;
+        errorDescription?: string;
+        isMainFrame?: boolean;
+      };
+      if (payload.isMainFrame === false) return;
+      if (Number(payload.errorCode) === -3) return;
+      if (target.state) {
+        finish(new Error(payload.errorDescription || `Page load failed (${payload.errorCode ?? "unknown"})`));
+        return;
+      }
+      evaluate();
+    };
+
+    webview.addEventListener("did-start-loading", evaluate as EventListener);
+    webview.addEventListener("did-stop-loading", evaluate as EventListener);
+    webview.addEventListener("did-navigate", evaluate as EventListener);
+    webview.addEventListener("did-navigate-in-page", evaluate as EventListener);
+    webview.addEventListener("did-fail-load", onFail as EventListener);
+    pollTimer = window.setInterval(evaluate, 120);
+    timeoutTimer = window.setTimeout(() => {
+      cleanup();
+      void buildWaitTimeoutError(webview, target, effectiveTimeout).then(
+        (error) => finish(error),
+        () => finish(new Error(`wait_for timed out after ${effectiveTimeout}ms waiting for ${describeWaitCondition(target)}`)),
+      );
+    }, effectiveTimeout);
+    evaluate();
+  });
+}
+
+async function waitForPageCondition(
+  webview: WebviewLikeElement,
+  action: Extract<BrowserAutomationAction, { type: "wait_for" }>,
+  timeoutMs: number,
+  reportTimeoutMs = timeoutMs,
+): Promise<BrowserAutomationActionResult> {
+  return await executeInPage<BrowserAutomationActionResult>(`
+    ${PAGE_SCRIPT_HELPERS}
+    const startedAt = Date.now();
+    const timeoutMs = Math.max(100, Math.min(Number(payload.timeoutMs) || 10000, ${PAGE_WAIT_TIMEOUT_MAX_MS}));
+    const matches = () => {
+      if (payload.ref) {
+        if (!document.querySelector('[data-worldbase-ref="' + CSS.escape(String(payload.ref)) + '"]')) return false;
+      } else if (payload.selector) {
+        if (!document.querySelector(payload.selector)) return false;
+      }
+      const texts = waitTextValues(payload.text);
+      if (texts.length > 0) {
+        const haystack = String(document.body?.innerText || document.body?.textContent || '');
+        if (!texts.some((text) => haystack.includes(text))) return false;
+      }
+      return true;
+    };
+    while (!matches()) {
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new Error(waitTimeoutMessage(payload, timeoutMs));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+    return { ok: true, type: payload.type, timeoutMs: Date.now() - startedAt, url: location.href };
+  `, { ...action, timeoutMs, reportTimeoutMs });
+}
+
+async function runWaitForAction(
+  webview: WebviewLikeElement,
+  action: Extract<BrowserAutomationAction, { type: "wait_for" }>,
+): Promise<BrowserAutomationActionResult> {
+  const startedAt = Date.now();
+  const timeoutMs = Math.max(100, Math.min(Number(action.timeoutMs) || 10000, PAGE_WAIT_TIMEOUT_MAX_MS));
+  if (action.state || action.url) {
+    await waitForNavigationCondition(webview, action, timeoutMs);
+  }
+  const elapsed = Date.now() - startedAt;
+  if (!action.selector && !action.ref && waitTextValues(action.text).length === 0) {
+    return { ok: true, type: "wait_for", timeoutMs: elapsed, url: readWebviewUrl(webview) };
+  }
+  const deadline = startedAt + timeoutMs;
+  while (Date.now() < deadline) {
+    const remaining = Math.max(100, deadline - Date.now());
+    try {
+      const result = await waitForPageCondition(webview, action, remaining, timeoutMs);
+      return { ...result, timeoutMs: Date.now() - startedAt };
+    } catch (error) {
+      if (!isWaitContextError(error)) throw error;
+      if (Date.now() >= deadline) break;
+      await sleep(Math.min(PAGE_WAIT_RETRY_DELAY_MS, Math.max(0, deadline - Date.now())));
+      await waitForWebviewIdle(webview, deadline);
+    }
+  }
+  throw await buildWaitTimeoutError(webview, action, timeoutMs);
+}
+
+function nextAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    // Hidden or throttled host windows (e.g. background page hosts) never
+    // produce animation frames, which used to hang emulate/reset viewport
+    // settling and, through it, the per-tab automation queue. Race the frame
+    // callback with a short timer so the wait settles either way; the Vue
+    // nextTick flush before it already applied the layout changes.
+    let settled = false;
+    let fallbackTimer: number | null = null;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      if (fallbackTimer != null) window.clearTimeout(fallbackTimer);
+      resolve();
+    };
+    fallbackTimer = window.setTimeout(settle, 32);
+    window.requestAnimationFrame(settle);
+  });
+}
+
+async function measurePageViewport(): Promise<{ width: number; height: number } | null> {
+  try {
+    return await executeInPage<{ width: number; height: number }>(`
+      return {
+        width: Math.max(0, Math.round(window.innerWidth)),
+        height: Math.max(0, Math.round(window.innerHeight)),
+      };
+    `);
+  } catch {
+    return null;
+  }
+}
+
+async function applyAgentViewport(width?: number, height?: number, reset = false): Promise<{ width?: number; height?: number }> {
+  const measuredBefore = await measurePageViewport();
+
+  if (reset) {
+    agentViewport.value = null;
+    await nextTick();
+    await nextAnimationFrame();
+    await nextAnimationFrame();
+    return (await measurePageViewport()) || measuredBefore || {};
+  }
+
+  const hasWidth = typeof width === "number" && Number.isFinite(width) && width > 0;
+  const hasHeight = typeof height === "number" && Number.isFinite(height) && height > 0;
+  if (!hasWidth && !hasHeight) {
+    return measuredBefore || agentViewport.value || {};
+  }
+
+  const base = measuredBefore || agentViewport.value || { width: 1280, height: 800 };
+  const next = {
+    width: Math.round(Math.max(320, Math.min(hasWidth ? width : base.width, 4096))),
+    height: Math.round(Math.max(240, Math.min(hasHeight ? height : base.height, 4096))),
+  };
+  agentViewport.value = next;
+  await nextTick();
+  await nextAnimationFrame();
+  await nextAnimationFrame();
+  return (await measurePageViewport()) || next;
+}
+
+function toElectronModifiers(modifiers?: string[]): Array<"alt" | "control" | "meta" | "shift"> {
+  const normalized = new Set<"alt" | "control" | "meta" | "shift">();
+  for (const modifier of modifiers || []) {
+    const value = modifier.toLowerCase();
+    if (value === "alt" || value === "option") normalized.add("alt");
+    else if (value === "control" || value === "ctrl") normalized.add("control");
+    else if (value === "meta" || value === "cmd" || value === "command") normalized.add("meta");
+    else if (value === "shift") normalized.add("shift");
+  }
+  return [...normalized];
+}
+
+function normalizeElectronKey(key: string): string {
+  if (key === "Space" || key === "space" || key === " ") return "Space";
+  if (key === "Esc") return "Escape";
+  if (key === "Return") return "Enter";
+  if (key.startsWith("Arrow")) return key.slice("Arrow".length);
+  return key;
+}
+
+function electronCharForKey(key: string, shift: boolean): string | null {
+  if (key === "Space" || key === "space" || key === " ") return " ";
+  if (Array.from(key).length !== 1) return null;
+  if (shift && /^[a-z]$/.test(key)) return key.toUpperCase();
+  return key;
+}
+
+function applyBackgroundHostMediaPolicy(webview: WebviewLikeElement): void {
+  if (!props.backgroundHost) return;
+  try {
+    webview.setAudioMuted?.(true);
+  } catch {}
+}
+
+function focusWebviewForInput(webview: WebviewLikeElement): void {
+  if (props.backgroundHost) return;
+  try {
+    webview.focus({ preventScroll: true });
+  } catch {
+    try { webview.focus(); } catch { /* best effort */ }
+  }
+}
+
+function webviewZoomFactor(webview: WebviewLikeElement): number {
+  try {
+    const factor = webview.getZoomFactor?.();
+    return typeof factor === "number" && Number.isFinite(factor) && factor > 0 ? factor : 1;
+  } catch {
+    return 1;
+  }
+}
+
+async function sendRealKey(
+  webview: WebviewLikeElement,
+  key: string,
+  modifiers?: string[],
+): Promise<void> {
+  if (!webview.sendInputEvent) throw new Error("Real keyboard input is unavailable on this page surface.");
+  const keyCode = normalizeElectronKey(key);
+  const electronModifiers = toElectronModifiers(modifiers);
+  const hasCommandModifier = electronModifiers.includes("control")
+    || electronModifiers.includes("meta")
+    || electronModifiers.includes("alt");
+  const char = hasCommandModifier ? null : electronCharForKey(key, electronModifiers.includes("shift"));
+  await webview.sendInputEvent({ type: "keyDown", keyCode, modifiers: electronModifiers });
+  if (char) {
+    await webview.sendInputEvent({ type: "char", keyCode: char, modifiers: electronModifiers });
+  }
+  await webview.sendInputEvent({ type: "keyUp", keyCode, modifiers: electronModifiers });
+}
+
+type SelectNavigationKey = "ArrowUp" | "ArrowDown" | "Home" | "End";
+
+interface FocusedSelectState {
+  value: string;
+  selectedIndex: number;
+  optionCount: number;
+}
+
+function selectNavigationKeyFor(key: string): SelectNavigationKey | null {
+  const normalized = key.trim().toLowerCase();
+  if (normalized === "arrowup" || normalized === "up") return "ArrowUp";
+  if (normalized === "arrowdown" || normalized === "down") return "ArrowDown";
+  if (normalized === "home") return "Home";
+  if (normalized === "end") return "End";
+  return null;
+}
+
+async function prepareRealTarget(
+  target: { selector?: string; ref?: string },
+): Promise<{ x: number; y: number; width: number; height: number }> {
+  return await executeInPage<{ x: number; y: number; width: number; height: number }>(`
+    ${PAGE_SCRIPT_HELPERS}
+    const element = resolveTarget(payload.target);
+    if (!isElementVisible(element)) {
+      throw new Error('Element is not visible: ' + (payload.target.ref || payload.target.selector));
+    }
+    element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    await Promise.race([
+      new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(null)))),
+      new Promise((resolve) => setTimeout(resolve, 250)),
+    ]);
+    if (!isElementVisible(element)) {
+      throw new Error('Element is not visible after scrolling: ' + (payload.target.ref || payload.target.selector));
+    }
+    const rect = element.getBoundingClientRect();
+    const x = rect.x + rect.width / 2;
+    const y = rect.y + rect.height / 2;
+    if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) {
+      throw new Error('Element center is outside the visible viewport.');
+    }
+    const hit = document.elementFromPoint(x, y);
+    if (!hit || (hit !== element && !element.contains(hit))) {
+      throw new Error('Element is covered by another element at its center point.');
+    }
+    return {
+      x,
+      y,
+      width: rect.width,
+      height: rect.height,
+    };
+  `, { target });
+}
+
+async function dispatchRealPointerAction(
+  webview: WebviewLikeElement,
+  action: { type: "click" | "hover"; selector?: string; ref?: string },
+  rect: { x: number; y: number; width: number; height: number },
+): Promise<BrowserAutomationActionResult> {
+  if (!webview.sendInputEvent) {
+    throw new Error("Real pointer input is unavailable on this page surface.");
+  }
+  focusWebviewForInput(webview);
+  const zoom = webviewZoomFactor(webview);
+  const x = Math.round(rect.x * zoom);
+  const y = Math.round(rect.y * zoom);
+  await webview.sendInputEvent({ type: "mouseMove", x, y });
+  if (action.type === "hover") {
+    return { ok: true, type: action.type, selector: action.selector, ref: action.ref };
+  }
+  await webview.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
+  await webview.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
+  return { ok: true, type: action.type, selector: action.selector, ref: action.ref };
+}
+
+const MAX_ACTION_DEPTH = 4;
+
+interface SerializedPageValue {
+  result: unknown;
+  resultType: string;
+}
+
+function isSyntaxErrorLike(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /SyntaxError|Unexpected token|Unexpected identifier|Unexpected end of input|Invalid or unexpected token|await is only valid|Cannot use 'await'|missing \) after argument list/i.test(message);
+}
+
+async function executeWithTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: number | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = window.setTimeout(() => {
+          reject(new Error(`${label} timed out after ${timeoutMs}ms. The script may still be running in the page.`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer != null) window.clearTimeout(timer);
+  }
+}
+
+async function evaluateScriptInPage(
+  webview: WebviewLikeElement,
+  script: string,
+  timeoutMs?: number,
+): Promise<SerializedPageValue> {
+  if (typeof webview.executeJavaScript !== "function") {
+    throw new Error("Script evaluation is unavailable for this page surface.");
+  }
+
+  const trimmed = script.trim();
+  if (!trimmed) throw new Error("evaluate requires a non-empty script string.");
+
+  const effectiveTimeout = Math.max(1000, Math.min(Number(timeoutMs) || 10000, PAGE_WAIT_TIMEOUT_MAX_MS));
+  const looksLikeFunction = /^(async\s+)?function\b/.test(trimmed)
+    || /^(async\s+)?\([\s\S]*\)\s*=>/.test(trimmed)
+    || /^(async\s+)?[\w$]+\s*=>/.test(trimmed);
+
+  const buildScript = (body: string) => `(async () => {
+    ${PAGE_SERIALIZE_RESULT_SCRIPT}
+    ${body}
+  })()`;
+
+  const attempts: string[] = [];
+  if (looksLikeFunction) {
+    attempts.push(buildScript(`
+      const fn = (${trimmed}
+      );
+      if (typeof fn !== 'function') return serializeResult(fn);
+      return serializeResult(await fn());
+    `));
+  }
+  attempts.push(buildScript(`return serializeResult(await (${trimmed}
+  ));`));
+  attempts.push(buildScript(`return serializeResult(await (async () => { ${trimmed}
+  })());`));
+
+  let lastError: unknown = null;
+  for (const attempt of attempts) {
+    try {
+      const value = await executeWithTimeout(
+        webview.executeJavaScript<SerializedPageValue>(attempt, true),
+        effectiveTimeout,
+        "evaluate",
+      );
+      if (value && typeof value === "object" && "result" in value && "resultType" in value) {
+        return value as SerializedPageValue;
+      }
+      return { result: value ?? null, resultType: typeof value };
+    } catch (error) {
+      lastError = error;
+      if (!isSyntaxErrorLike(error)) throw error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || "evaluate failed."));
+}
+
+function canWebviewGo(webview: WebviewLikeElement, direction: "back" | "forward"): boolean {
+  try {
+    return direction === "back" ? Boolean(webview.canGoBack?.()) : Boolean(webview.canGoForward?.());
+  } catch {
+    return false;
+  }
+}
+
+const EMULATION_VIEWPORT_MIN = 320;
+const EMULATION_VIEWPORT_MAX = 4096;
+const EMULATION_SCALE_MIN = 0.5;
+const EMULATION_SCALE_MAX = 4;
+
+function normalizeEmulationDimension(value: number | undefined, fallback: number, label: string): number {
+  if (value === undefined) {
+    return Math.round(Math.max(EMULATION_VIEWPORT_MIN, Math.min(fallback, EMULATION_VIEWPORT_MAX)));
+  }
+  if (!Number.isFinite(value)) {
+    throw new Error(`${label} must be a finite number.`);
+  }
+  if (value < EMULATION_VIEWPORT_MIN || value > EMULATION_VIEWPORT_MAX) {
+    throw new Error(`${label} must be between ${EMULATION_VIEWPORT_MIN} and ${EMULATION_VIEWPORT_MAX} CSS pixels.`);
+  }
+  return Math.round(value);
+}
+
+function normalizeEmulationScale(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isFinite(value) || value < EMULATION_SCALE_MIN || value > EMULATION_SCALE_MAX) {
+    throw new Error(`Emulated device scale factor must be between ${EMULATION_SCALE_MIN} and ${EMULATION_SCALE_MAX}.`);
+  }
+  return value;
+}
+
+function normalizeEmulationMobile(value: boolean | undefined, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") throw new Error("Emulated mobile flag must be a boolean.");
+  return value;
+}
+
+async function runEmulationAction(action: BrowserAutomationEmulateAction): Promise<BrowserAutomationActionResult> {
+  // Honor the action-level timeout end to end: the main-process CDP commands
+  // are bounded per command, but renderer-side viewport settling and page
+  // measurement must share the same deadline instead of outliving the budget
+  // (which previously surfaced as the fixed 50s queue timeout).
+  const timeoutMs = Math.max(100, Math.min(Number(action.timeoutMs) || 10000, 60000));
+  return await withTimeout(runEmulationActionWithinBudget(action), timeoutMs, "Emulate action");
+}
+
+async function runEmulationActionWithinBudget(action: BrowserAutomationEmulateAction): Promise<BrowserAutomationActionResult> {
+  const emulate = window.electronAPI?.emulateBrowserPage;
+  if (!emulate) {
+    throw new Error("Page emulation is unavailable: the emulateBrowserPage IPC bridge is missing.");
+  }
+  const webContentsId = getWebContentsId();
+  if (webContentsId == null) {
+    throw new Error("Page emulation is unavailable before the browser page finishes attaching.");
+  }
+
+  if (action.reset === true) {
+    const result = await emulate({ webContentsId, reset: true, timeoutMs: action.timeoutMs });
+    const size = await applyAgentViewport(undefined, undefined, true);
+    return {
+      ok: true,
+      type: "emulate",
+      ...(size.width != null ? { width: size.width } : {}),
+      ...(size.height != null ? { height: size.height } : {}),
+      emulated: result.emulated,
+    };
+  }
+
+
+  if (action.media !== undefined && action.media !== "screen" && action.media !== "print") {
+    throw new Error(`Unsupported emulated media type: ${String(action.media)}.`);
+  }
+  if (
+    action.colorScheme !== undefined &&
+    action.colorScheme !== "light" &&
+    action.colorScheme !== "dark" &&
+    action.colorScheme !== "no-preference"
+  ) {
+    throw new Error(`Unsupported emulated color scheme: ${String(action.colorScheme)}.`);
+  }
+  if (
+    action.reducedMotion !== undefined &&
+    action.reducedMotion !== "reduce" &&
+    action.reducedMotion !== "no-preference"
+  ) {
+    throw new Error(`Unsupported emulated reduced-motion value: ${String(action.reducedMotion)}.`);
+  }
+  if (action.userAgent !== undefined && (typeof action.userAgent !== "string" || !action.userAgent.trim())) {
+    throw new Error("Emulated user agent must be a non-empty string.");
+  }
+
+  const current = await emulate({ webContentsId });
+  const currentViewport = current.emulated?.viewport;
+  const hasViewportFields = action.width !== undefined
+    || action.height !== undefined
+    || action.deviceScaleFactor !== undefined
+    || action.mobile !== undefined;
+
+  let viewport: {
+    width: number;
+    height: number;
+    deviceScaleFactor: number;
+    mobile: boolean;
+  } | undefined;
+
+  if (hasViewportFields) {
+    const measured = action.width === undefined || action.height === undefined
+      ? await measurePageViewport()
+      : null;
+    const baseWidth = currentViewport?.width ?? agentViewport.value?.width ?? measured?.width ?? 1280;
+    const baseHeight = currentViewport?.height ?? agentViewport.value?.height ?? measured?.height ?? 800;
+    viewport = {
+      width: normalizeEmulationDimension(action.width, baseWidth, "Emulated viewport width"),
+      height: normalizeEmulationDimension(action.height, baseHeight, "Emulated viewport height"),
+      deviceScaleFactor: normalizeEmulationScale(action.deviceScaleFactor, currentViewport?.deviceScaleFactor ?? 1),
+      mobile: normalizeEmulationMobile(action.mobile, currentViewport?.mobile ?? false),
+    };
+  }
+
+  const hasOverrides = action.media !== undefined
+    || action.colorScheme !== undefined
+    || action.reducedMotion !== undefined
+    || action.userAgent !== undefined
+    || viewport !== undefined;
+
+  if (!hasOverrides) {
+    const size = currentViewport ?? agentViewport.value ?? await measurePageViewport();
+    return {
+      ok: true,
+      type: "emulate",
+      ...(size?.width != null ? { width: size.width } : {}),
+      ...(size?.height != null ? { height: size.height } : {}),
+      emulated: current.emulated,
+    };
+  }
+
+  const result = await emulate({
+    webContentsId,
+    ...(action.media !== undefined ? { media: action.media } : {}),
+    ...(action.colorScheme !== undefined ? { colorScheme: action.colorScheme } : {}),
+    ...(action.reducedMotion !== undefined ? { reducedMotion: action.reducedMotion } : {}),
+    ...(action.userAgent !== undefined ? { userAgent: action.userAgent } : {}),
+    ...(viewport ? { viewport } : {}),
+    ...(action.timeoutMs !== undefined ? { timeoutMs: action.timeoutMs } : {}),
+  });
+
+
+  const size = viewport
+    ? await applyAgentViewport(viewport.width, viewport.height)
+    : currentViewport ?? agentViewport.value ?? await measurePageViewport();
+  const emulatedViewport = result.emulated?.viewport;
+
+  return {
+    ok: true,
+    type: "emulate",
+    ...(emulatedViewport?.width != null ? { width: emulatedViewport.width } : size?.width != null ? { width: size.width } : {}),
+    ...(emulatedViewport?.height != null ? { height: emulatedViewport.height } : size?.height != null ? { height: size.height } : {}),
+    emulated: result.emulated,
+  };
 }
 
 async function runAutomationAction(action: BrowserAutomationAction): Promise<BrowserAutomationActionResult> {
-  return await executeInPage<BrowserAutomationActionResult>(`
-    const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  return await runAutomationActionInternal(action, 0);
+}
 
-    const ensureElement = (selector) => {
-      const element = document.querySelector(selector);
-      if (!element) {
-        throw new Error('Element not found for selector: ' + selector);
+async function runAutomationActionInternal(
+  action: BrowserAutomationAction,
+  depth: number,
+): Promise<BrowserAutomationActionResult> {
+  const webview = webviewRef.value;
+  if (!webview) {
+    throw new Error("Browser automation is unavailable for this page surface.");
+  }
+  if (depth > MAX_ACTION_DEPTH) {
+    throw new Error(`Batch actions are nested too deeply (max ${MAX_ACTION_DEPTH}).`);
+  }
+
+  if (action.type === "batch") {
+    const results: BrowserAutomationActionResult[] = [];
+    for (const [index, step] of action.actions.entries()) {
+      try {
+        const result = await runAutomationActionInternal(step, depth + 1);
+        results.push(result);
+        const navigationTimedOut = (result as NavigationAwareActionResult).navigationTimedOut === true;
+        if (result.ok === false || navigationTimedOut) {
+          return {
+            ok: false,
+            type: "batch",
+            completed: index,
+            results,
+            error: result.error
+              || (navigationTimedOut
+                ? `Batch step ${index + 1} triggered a navigation that did not finish.`
+                : `Batch step ${index + 1} failed.`),
+          };
+        }
+      } catch (error) {
+        return {
+          ok: false,
+          type: "batch",
+          completed: index,
+          results,
+          error: error instanceof Error ? error.message : String(error),
+        };
       }
-      return element;
+    }
+    return { ok: true, type: "batch", completed: results.length, results };
+  }
+
+  if (action.type === "wait_for") {
+    return await runWaitForAction(webview, action);
+  }
+
+  if (action.type === "evaluate") {
+    const serialized = await evaluateScriptInPage(webview, action.script, action.timeoutMs);
+    return {
+      ok: true,
+      type: "evaluate",
+      result: serialized.result,
+      resultType: serialized.resultType,
+    };
+  }
+
+  if (action.type === "navigate") {
+    const target = normalizeWebUrlInput(action.url);
+    if (!target) throw new Error(`Invalid page URL: ${action.url}`);
+    const waiter = waitForWebviewLoad(webview, action.timeoutMs ?? 15000);
+    currentUrl.value = target;
+    addressInput.value = target;
+    emitStateChange();
+    try {
+      if (typeof webview.loadURL === "function") {
+        const loadResult = webview.loadURL(target);
+        if (loadResult && typeof loadResult.catch === "function") {
+          loadResult.catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            if (/ERR_ABORTED|\(-3\)/.test(message)) return;
+            waiter.fail(error instanceof Error ? error : new Error(String(error)));
+          });
+        }
+      } else {
+        webview.src = target;
+      }
+      await waiter.promise;
+    } catch (error) {
+      waiter.cancel();
+      syncFromWebview();
+      throw error;
+    }
+    syncFromWebview();
+    return { ok: true, type: action.type, url: readWebviewUrl(webview) || target };
+  }
+
+  if (action.type === "reload") {
+    const waiter = waitForWebviewLoad(webview, action.timeoutMs ?? 15000);
+    try {
+      if (action.ignoreCache && typeof webview.reloadIgnoringCache === "function") {
+        webview.reloadIgnoringCache();
+      } else if (typeof webview.reload === "function") {
+        webview.reload();
+      } else {
+        loadUrlInWebview(currentUrl.value);
+      }
+      await waiter.promise;
+    } catch (error) {
+      waiter.cancel();
+      syncFromWebview();
+      throw error;
+    }
+    syncFromWebview();
+    return { ok: true, type: action.type, url: readWebviewUrl(webview) };
+  }
+
+  if (action.type === "back" || action.type === "forward") {
+    if (!canWebviewGo(webview, action.type)) {
+      throw new Error(`Cannot go ${action.type}: no ${action.type} history entry is available.`);
+    }
+    const waiter = waitForWebviewLoad(webview, action.timeoutMs ?? 15000);
+    try {
+      if (action.type === "back") webview.goBack?.();
+      else webview.goForward?.();
+      await waiter.promise;
+    } catch (error) {
+      waiter.cancel();
+      syncFromWebview();
+      throw error;
+    }
+    syncFromWebview();
+    return { ok: true, type: action.type, url: readWebviewUrl(webview) };
+  }
+
+  if (action.type === "resize") {
+    const size = await applyAgentViewport(action.width, action.height, action.reset);
+    return { ok: true, type: action.type, width: size.width, height: size.height };
+  }
+
+  if (action.type === "emulate") {
+    return await runEmulationAction(action);
+  }
+
+  let fallbackNote: string | undefined;
+
+  if (action.type === "click" || action.type === "hover") {
+    if (webview.sendInputEvent) {
+      const rect = await withTimeout(prepareRealTarget(action), PAGE_ACTION_TIMEOUT_MS, `${action.type} action`);
+      if (action.type === "hover") {
+        return await dispatchRealPointerAction(webview, action, rect);
+      }
+      const navigation = watchForNavigation(webview, 15000);
+      try {
+        const result = await dispatchRealPointerAction(webview, action, rect);
+        const outcome = await navigation.start();
+        return withNavigationOutcome(result, outcome);
+      } catch (error) {
+        navigation.cancel();
+        throw error;
+      }
+    }
+    fallbackNote = "Used synthetic DOM events because native pointer input is unavailable on this page surface.";
+  }
+
+  if (action.type === "press_key") {
+    if (!action.key) throw new Error("press_key requires a non-empty key.");
+    const webContentsId = getWebContentsId();
+    const dispatchKey = window.electronAPI?.dispatchBrowserPageKey;
+    if (webContentsId && dispatchKey) {
+      focusWebviewForInput(webview);
+      if (action.selector || action.ref) {
+        await withTimeout(executeInPage(`
+          ${PAGE_SCRIPT_HELPERS}
+          const element = resolveTarget(payload.target);
+          element.focus({ preventScroll: true });
+          return true;
+        `, { target: action }), PAGE_ACTION_TIMEOUT_MS, "press_key action");
+      }
+      const selectKey = selectNavigationKeyFor(action.key);
+      let selectState: FocusedSelectState | null = null;
+      if (selectKey) {
+        try {
+          selectState = await withTimeout(executeInPage<FocusedSelectState | null>(`
+            const select = document.activeElement;
+            if (!(select instanceof HTMLSelectElement)) {
+              try { delete window.__worldbaseSelectNavigationTarget; } catch {}
+              return null;
+            }
+            try { window.__worldbaseSelectNavigationTarget = select; } catch {}
+            return {
+              value: select.value,
+              selectedIndex: select.selectedIndex,
+              optionCount: select.options.length,
+            };
+          `), PAGE_ACTION_TIMEOUT_MS, "press_key select state");
+        } catch {}
+      }
+      const navigation = watchForNavigation(webview, 15000);
+      try {
+        let dispatchError: unknown = null;
+        try {
+          await dispatchKey({ webContentsId, key: action.key, modifiers: action.modifiers });
+        } catch (error) {
+          dispatchError = error;
+        }
+        let selectFallbackHandled = false;
+        if (selectKey && selectState) {
+          try {
+            const fallback = await withTimeout(executeInPage<{ handled: boolean; applied: boolean }>(`
+              const select = window.__worldbaseSelectNavigationTarget;
+              const before = payload.before;
+              const active = document.activeElement;
+              const clearTarget = () => {
+                try { delete window.__worldbaseSelectNavigationTarget; } catch {}
+              };
+              if (!select || active !== select || !select.isConnected) {
+                clearTarget();
+                return { handled: false, applied: false };
+              }
+              if (select.value !== before.value || select.selectedIndex !== before.selectedIndex) {
+                clearTarget();
+                return { handled: true, applied: false };
+              }
+              const optionCount = select.options.length;
+              if (optionCount === 0) {
+                clearTarget();
+                return { handled: true, applied: false };
+              }
+              let nextIndex = before.selectedIndex;
+              if (payload.key === 'Home') nextIndex = 0;
+              else if (payload.key === 'End') nextIndex = optionCount - 1;
+              else if (payload.key === 'ArrowUp') nextIndex = Math.max(0, before.selectedIndex - 1);
+              else if (payload.key === 'ArrowDown') nextIndex = Math.min(optionCount - 1, before.selectedIndex + 1);
+              if (nextIndex === select.selectedIndex) {
+                clearTarget();
+                return { handled: true, applied: false };
+              }
+              select.selectedIndex = nextIndex;
+              select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              select.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+              clearTarget();
+              return { handled: true, applied: true };
+            `, { key: selectKey, before: selectState }), PAGE_ACTION_TIMEOUT_MS, "press_key select fallback");
+            selectFallbackHandled = Boolean(fallback?.handled);
+          } catch {}
+        }
+        if (dispatchError && !selectFallbackHandled) throw dispatchError;
+        const outcome = await navigation.start();
+        return withNavigationOutcome(
+          {
+            ok: true,
+            type: action.type,
+            selector: action.selector,
+            ref: action.ref,
+            key: action.key,
+            ...(dispatchError && selectFallbackHandled
+              ? { note: `Native key dispatch failed; applied the focused select fallback (${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}).` }
+              : {}),
+          },
+          outcome,
+        );
+      } catch (error) {
+        navigation.cancel();
+        throw error;
+      }
+    }
+    if (webview.sendInputEvent) {
+      focusWebviewForInput(webview);
+      if (action.selector || action.ref) {
+        await withTimeout(executeInPage(`
+          ${PAGE_SCRIPT_HELPERS}
+          const element = resolveTarget(payload.target);
+          element.focus({ preventScroll: true });
+          return true;
+        `, { target: action }), PAGE_ACTION_TIMEOUT_MS, "press_key action");
+      }
+      const navigation = watchForNavigation(webview, 15000);
+      try {
+        await sendRealKey(webview, action.key, action.modifiers);
+        const outcome = await navigation.start();
+        return withNavigationOutcome(
+          { ok: true, type: action.type, selector: action.selector, ref: action.ref, key: action.key },
+          outcome,
+        );
+      } catch (error) {
+        navigation.cancel();
+        throw error;
+      }
+    }
+    fallbackNote = "Used synthetic keyboard events because native keyboard input is unavailable on this page surface.";
+  }
+
+  const navigation = action.type === "click" || action.type === "press_key"
+    ? watchForNavigation(webview, 15000)
+    : null;
+  let result: BrowserAutomationActionResult;
+  try {
+    const pageAction = executeInPage<BrowserAutomationActionResult>(`
+    ${PAGE_SCRIPT_HELPERS}
+
+    const setNativeValue = (element, value) => {
+      const prototype = Object.getPrototypeOf(element);
+      const prototypeDescriptor = prototype ? Object.getOwnPropertyDescriptor(prototype, 'value') : null;
+      const ownDescriptor = Object.getOwnPropertyDescriptor(element, 'value');
+      const descriptor = prototypeDescriptor && prototypeDescriptor.set ? prototypeDescriptor : ownDescriptor;
+      if (descriptor && descriptor.set) descriptor.set.call(element, value);
+      else element.value = value;
+    };
+
+    const dispatchInput = (element, data, inputType) => {
+      element.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        composed: true,
+        data: data,
+        inputType: inputType || 'insertText',
+      }));
+    };
+
+    const setContentEditableValue = (element, text, append) => {
+      element.focus();
+      const selection = window.getSelection();
+      if (!selection) throw new Error('The page did not expose a text selection.');
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      if (append) range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      let inserted = false;
+      try {
+        inserted = document.execCommand('insertText', false, text);
+      } catch {
+        inserted = false;
+      }
+      if (!inserted) {
+        element.textContent = (append ? String(element.textContent || '') : '') + text;
+        dispatchInput(element, text, 'insertText');
+      }
+      return String(element.textContent || '').length;
     };
 
     const setInputValue = (element, text, append) => {
+      if (element.isContentEditable) {
+        return setContentEditableValue(element, text, append);
+      }
       if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
         throw new Error('Selected element does not accept text input: ' + element.outerHTML.slice(0, 120));
       }
       element.focus();
-      const nextValue = append ? (element.value + text) : text;
-      element.value = nextValue;
-      element.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+      const nextValue = append ? ((element.value || '') + text) : text;
+      setNativeValue(element, nextValue);
+      dispatchInput(element, text, 'insertText');
       element.dispatchEvent(new Event('change', { bubbles: true }));
       return nextValue.length;
     };
 
+    const setSelectValue = (element, value) => {
+      setNativeValue(element, String(value));
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+
+    const dispatchMouseEvent = (element, type) => {
+      const rect = element.getBoundingClientRect();
+      const clientX = rect.x + rect.width / 2;
+      const clientY = rect.y + rect.height / 2;
+      const base = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX: clientX,
+        clientY: clientY,
+        screenX: window.screenX + clientX,
+        screenY: window.screenY + clientY,
+        button: 0,
+        buttons: type === 'mousedown' || type === 'pointerdown' ? 1 : 0,
+      };
+      if (type.startsWith('pointer')) {
+        element.dispatchEvent(new PointerEvent(type, {
+          ...base,
+          pointerId: 1,
+          pointerType: 'mouse',
+          isPrimary: true,
+        }));
+      } else {
+        element.dispatchEvent(new MouseEvent(type, {
+          ...base,
+          detail: type === 'click' ? 1 : 0,
+        }));
+      }
+    };
+
+    const dispatchSyntheticClick = (element) => {
+      element.scrollIntoView({ block: 'center', inline: 'center' });
+      if (typeof element.focus === 'function') element.focus({ preventScroll: true });
+      const checkable = element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio');
+      dispatchMouseEvent(element, 'pointerover');
+      dispatchMouseEvent(element, 'pointerenter');
+      dispatchMouseEvent(element, 'pointermove');
+      dispatchMouseEvent(element, 'pointerdown');
+      dispatchMouseEvent(element, 'mousedown');
+      dispatchMouseEvent(element, 'pointerup');
+      dispatchMouseEvent(element, 'mouseup');
+      if (checkable) {
+        element.checked = element.type === 'radio' ? true : !element.checked;
+      }
+      dispatchMouseEvent(element, 'click');
+      if (checkable) {
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    };
+
+    const dispatchSyntheticHover = (element) => {
+      element.scrollIntoView({ block: 'center', inline: 'center' });
+      dispatchMouseEvent(element, 'pointerover');
+      dispatchMouseEvent(element, 'pointerenter');
+      dispatchMouseEvent(element, 'pointermove');
+      dispatchMouseEvent(element, 'mouseover');
+      dispatchMouseEvent(element, 'mouseenter');
+      dispatchMouseEvent(element, 'mousemove');
+    };
+
+    const keyModifierState = (modifiers) => {
+      const values = new Set((modifiers || []).map((value) => String(value).toLowerCase()));
+      return {
+        altKey: values.has('alt') || values.has('option'),
+        ctrlKey: values.has('control') || values.has('ctrl'),
+        metaKey: values.has('meta') || values.has('cmd') || values.has('command'),
+        shiftKey: values.has('shift'),
+      };
+    };
+
+    const keyCharacter = (key, shiftKey) => {
+      if (key === 'Space' || key === 'space' || key === ' ') return ' ';
+      if (Array.from(key).length !== 1) return null;
+      return shiftKey && /^[a-z]$/.test(key) ? key.toUpperCase() : key;
+    };
+
+    const dispatchSyntheticKey = (target, key, modifiers) => {
+      if (!target) throw new Error('press_key requires a focused element.');
+      const normalizedKey = key === 'Space' || key === 'space' ? ' ' : key === 'Esc' ? 'Escape' : key === 'Return' ? 'Enter' : key;
+      const modifierState = keyModifierState(modifiers);
+      const singleChar = Array.from(normalizedKey).length === 1;
+      const code = singleChar
+        ? (/[a-zA-Z]/.test(normalizedKey) ? 'Key' + normalizedKey.toUpperCase() : /[0-9]/.test(normalizedKey) ? 'Digit' + normalizedKey : normalizedKey)
+        : normalizedKey === ' ' ? 'Space' : normalizedKey;
+      const init = {
+        key: normalizedKey,
+        code: code,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        ...modifierState,
+      };
+      const proceed = target.dispatchEvent(new KeyboardEvent('keydown', init));
+      const keypressProceed = target.dispatchEvent(new KeyboardEvent('keypress', init));
+      const printable = !modifierState.ctrlKey && !modifierState.metaKey && !modifierState.altKey;
+      const char = printable ? keyCharacter(normalizedKey, modifierState.shiftKey) : null;
+
+      if (proceed && keypressProceed && printable) {
+        if (target.isContentEditable) {
+          try {
+            if (normalizedKey === 'Backspace') document.execCommand('delete');
+            else if (normalizedKey === 'Delete') document.execCommand('forwardDelete');
+            else if (normalizedKey === 'Enter') document.execCommand('insertLineBreak');
+            else if (char) document.execCommand('insertText', false, char);
+          } catch {
+            // Best-effort: the synthetic key events still reached listeners.
+          }
+        } else if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+          const start = target.selectionStart ?? target.value.length;
+          const end = target.selectionEnd ?? start;
+          let nextValue = null;
+          let nextCaret = start;
+          let inputType = 'insertText';
+          if (normalizedKey === 'Backspace') {
+            const from = start === end ? Math.max(0, start - 1) : start;
+            nextValue = target.value.slice(0, from) + target.value.slice(end);
+            nextCaret = from;
+            inputType = 'deleteContentBackward';
+          } else if (normalizedKey === 'Delete') {
+            const to = start === end ? Math.min(target.value.length, end + 1) : end;
+            nextValue = target.value.slice(0, start) + target.value.slice(to);
+            nextCaret = start;
+            inputType = 'deleteContentForward';
+          } else if (normalizedKey === 'Enter' && target instanceof HTMLTextAreaElement) {
+            nextValue = target.value.slice(0, start) + '\\n' + target.value.slice(end);
+            nextCaret = start + 1;
+            inputType = 'insertLineBreak';
+          } else if (char) {
+            nextValue = target.value.slice(0, start) + char + target.value.slice(end);
+            nextCaret = start + char.length;
+          }
+          if (nextValue !== null) {
+            const beforeInput = new InputEvent('beforeinput', {
+              bubbles: true,
+              cancelable: true,
+              inputType: inputType,
+              data: char,
+            });
+            if (target.dispatchEvent(beforeInput)) {
+              setNativeValue(target, nextValue);
+              target.setSelectionRange?.(nextCaret, nextCaret);
+              dispatchInput(target, char, inputType);
+            }
+          }
+        }
+      }
+
+      target.dispatchEvent(new KeyboardEvent('keyup', init));
+      return { key: normalizedKey };
+    };
+
     switch (payload?.type) {
       case 'click': {
-        const element = ensureElement(payload.selector);
-        element.scrollIntoView({ block: 'center', inline: 'center' });
-        element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-        element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-        element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-        element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        return { ok: true, type: payload.type, selector: payload.selector };
+        const element = resolveTarget(payload);
+        dispatchSyntheticClick(element);
+        return { ok: true, type: payload.type, selector: payload.selector, ref: payload.ref };
       }
 
       case 'input': {
-        const element = ensureElement(payload.selector);
+        const element = resolveTarget(payload);
         const textLength = setInputValue(element, payload.text, Boolean(payload.append));
-        return { ok: true, type: payload.type, selector: payload.selector, textLength };
+        return { ok: true, type: payload.type, selector: payload.selector, ref: payload.ref, textLength };
       }
 
       case 'select': {
-        const element = ensureElement(payload.selector);
+        const element = resolveTarget(payload);
         if (!(element instanceof HTMLSelectElement)) {
-          throw new Error('Selected element is not a <select>: ' + payload.selector);
+          throw new Error('Selected element is not a <select>: ' + (payload.selector || payload.ref));
         }
         if (typeof payload.value === 'string') {
-          element.value = payload.value;
+          setSelectValue(element, payload.value);
         } else if (typeof payload.label === 'string') {
           const match = Array.from(element.options).find((opt) =>
             normalizeText(opt.textContent || '') === payload.label || opt.value === payload.label
           );
           if (!match) throw new Error('No option matched label: ' + payload.label);
-          element.value = match.value;
+          setSelectValue(element, match.value);
         } else if (typeof payload.index === 'number') {
           if (payload.index < 0 || payload.index >= element.options.length) {
             throw new Error('Option index out of range: ' + payload.index);
           }
-          element.value = element.options[payload.index].value;
+          setSelectValue(element, element.options[payload.index].value);
         } else {
           throw new Error('select requires value, label, or index');
         }
-        element.dispatchEvent(new Event('change', { bubbles: true }));
-        return { ok: true, type: payload.type, selector: payload.selector };
+        return { ok: true, type: payload.type, selector: payload.selector, ref: payload.ref };
       }
 
       case 'batch_input': {
@@ -609,20 +3217,18 @@ async function runAutomationAction(action: BrowserAutomationAction): Promise<Bro
         let filled = 0;
         let skipped = 0;
         for (const field of payload.fields) {
-          const element = document.querySelector(field?.selector);
-          if (!element) {
+          let element = null;
+          try {
+            element = resolveTarget(field);
+          } catch {
             skipped++;
             continue;
           }
           try {
             if (element instanceof HTMLSelectElement) {
-              element.value = field.text;
-              element.dispatchEvent(new Event('change', { bubbles: true }));
-            } else if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-              setInputValue(element, field.text, Boolean(field.append));
+              setSelectValue(element, field.text);
             } else {
-              skipped++;
-              continue;
+              setInputValue(element, field.text, Boolean(field.append));
             }
             filled++;
           } catch {
@@ -634,24 +3240,22 @@ async function runAutomationAction(action: BrowserAutomationAction): Promise<Bro
 
       case 'extract': {
         let text = '';
-        if (typeof payload.selector === 'string' && payload.selector.trim()) {
-          const element = document.querySelector(payload.selector);
-          if (!element) {
-            throw new Error('Element not found for extract selector: ' + payload.selector);
-          }
-          text = normalizeText(element.innerText || '');
+        if ((payload.selector && String(payload.selector).trim()) || payload.ref) {
+          const element = resolveTarget(payload);
+          text = normalizeReadableText(element.innerText || element.textContent || '');
         } else {
-          text = normalizeText(document.body?.innerText || '');
+          text = normalizeReadableText(document.body?.innerText || document.body?.textContent || '');
         }
         const offset = Math.max(0, Number(payload.offset) || 0);
-        const maxChars = Number(payload.maxChars) || 0;
-        const limit = maxChars > 0 ? maxChars : 60000;
+        const rawMaxChars = typeof payload.maxChars === 'number' ? payload.maxChars : null;
+        const limit = rawMaxChars === 0 ? 1000000 : rawMaxChars !== null && rawMaxChars > 0 ? Math.min(rawMaxChars, 200000) : 60000;
         const slice = text.slice(offset, offset + limit);
         const truncated = offset + slice.length < text.length;
         return {
           ok: true,
           type: payload.type,
           selector: payload.selector,
+          ref: payload.ref,
           text: slice,
           offset,
           truncated,
@@ -659,64 +3263,146 @@ async function runAutomationAction(action: BrowserAutomationAction): Promise<Bro
         };
       }
 
-      case 'evaluate': {
-        if (typeof payload.script !== 'string' || !payload.script.trim()) {
-          throw new Error('evaluate requires a non-empty script string');
-        }
-        // eslint-disable-next-line no-eval
-        const result = eval(payload.script);
-        return { ok: true, type: payload.type, result };
-      }
-
       case 'hover': {
-        const element = ensureElement(payload.selector);
-        element.scrollIntoView({ block: 'center', inline: 'center' });
-        element.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-        element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-        return { ok: true, type: payload.type, selector: payload.selector };
+        const element = resolveTarget(payload);
+        dispatchSyntheticHover(element);
+        return { ok: true, type: payload.type, selector: payload.selector, ref: payload.ref };
       }
 
       case 'focus': {
-        const element = ensureElement(payload.selector);
-        element.focus();
-        return { ok: true, type: payload.type, selector: payload.selector };
+        const element = resolveTarget(payload);
+        element.focus({ preventScroll: true });
+        return { ok: true, type: payload.type, selector: payload.selector, ref: payload.ref };
       }
 
       case 'press_key': {
-        const target = payload.selector ? ensureElement(payload.selector) : document.activeElement || document.body;
-        target.focus();
-        target.dispatchEvent(new KeyboardEvent('keydown', { key: payload.key, bubbles: true }));
-        target.dispatchEvent(new KeyboardEvent('keypress', { key: payload.key, bubbles: true }));
-        if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-          if (payload.key.length === 1) {
-            target.value += payload.key;
-            target.dispatchEvent(new InputEvent('input', { data: payload.key, bubbles: true }));
-          } else if (payload.key === 'Backspace') {
-            target.value = target.value.slice(0, -1);
-            target.dispatchEvent(new InputEvent('input', { bubbles: true }));
-          }
-        }
-        target.dispatchEvent(new KeyboardEvent('keyup', { key: payload.key, bubbles: true }));
-        return { ok: true, type: payload.type, selector: payload.selector, key: payload.key };
+        if (!payload.key) throw new Error('press_key requires a non-empty key.');
+        const target = (payload.selector || payload.ref) ? resolveTarget(payload) : (document.activeElement || document.body);
+        if (!target) throw new Error('press_key requires an active element.');
+        target.focus?.();
+        const keyResult = dispatchSyntheticKey(target, payload.key, payload.modifiers);
+        return { ok: true, type: payload.type, selector: payload.selector, ref: payload.ref, key: keyResult.key };
       }
 
       case 'scroll': {
-        window.scrollTo({ top: payload.top || 0, left: payload.left || 0, behavior: 'auto' });
+        window.scrollTo({ top: Number(payload.top) || 0, left: Number(payload.left) || 0, behavior: 'auto' });
         return { ok: true, type: payload.type, top: window.scrollY, left: window.scrollX };
       }
 
       case 'wait': {
+        const waitMs = Math.max(0, Math.min(Number(payload.timeoutMs) || 0, ${PAGE_WAIT_TIMEOUT_MAX_MS}));
         return new Promise((resolve) => {
           setTimeout(() => {
-            resolve({ ok: true, type: payload.type, timeoutMs: payload.timeoutMs });
-          }, Math.max(0, Number(payload.timeoutMs) || 0));
+            resolve({ ok: true, type: payload.type, timeoutMs: waitMs });
+          }, waitMs);
         });
+      }
+
+      case 'wait_for': {
+        const startedAt = Date.now();
+        const timeoutMs = Math.max(100, Math.min(Number(payload.timeoutMs) || 10000, ${PAGE_WAIT_TIMEOUT_MAX_MS}));
+        const matches = () => {
+          if (payload.ref) {
+            if (!document.querySelector('[data-worldbase-ref="' + CSS.escape(String(payload.ref)) + '"]')) return false;
+          } else if (payload.selector) {
+            if (!document.querySelector(payload.selector)) return false;
+          }
+          const texts = waitTextValues(payload.text);
+          if (texts.length > 0) {
+            const haystack = String(document.body?.innerText || document.body?.textContent || '');
+            if (!texts.some((text) => haystack.includes(text))) return false;
+          }
+          if (payload.url && !location.href.includes(payload.url)) return false;
+          if (payload.state === 'load' && document.readyState !== 'complete') return false;
+          if (payload.state === 'domcontentloaded' && document.readyState === 'loading') return false;
+          return true;
+        };
+        while (!matches()) {
+          if (Date.now() - startedAt > timeoutMs) {
+            throw new Error(waitTimeoutMessage(payload, timeoutMs));
+          }
+          await new Promise((resolve) => setTimeout(resolve, 120));
+        }
+        return { ok: true, type: payload.type, timeoutMs: Date.now() - startedAt, url: location.href };
+      }
+
+      case 'find': {
+        const limit = Math.max(1, Math.min(Number(payload.limit) || 20, 50));
+        const nodes = payload.selector
+          ? Array.from(document.querySelectorAll(payload.selector))
+          : Array.from(document.querySelectorAll('a[href], area[href], button, input:not([type="hidden"]), textarea, select, summary, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="option"], [role="textbox"], [role="searchbox"], [role="slider"], [role="spinbutton"], [role="treeitem"], [contenteditable]:not([contenteditable="false"]), [onclick]'));
+        const role = payload.role ? String(payload.role).toLowerCase() : '';
+        const name = payload.name ? String(payload.name).toLowerCase() : '';
+        const text = payload.text ? String(payload.text).toLowerCase() : '';
+        const matches = [];
+        for (const element of nodes) {
+          if (role && String(inferredRole(element) || '').toLowerCase() !== role) continue;
+          if (name && !accessibleName(element).toLowerCase().includes(name)) continue;
+          if (text && !normalizeText(element.textContent || element.getAttribute('value') || '').toLowerCase().includes(text)) continue;
+          if (!isElementVisible(element)) continue;
+          const tag = element.tagName.toLowerCase();
+          const ariaChecked = element.getAttribute('aria-checked');
+          matches.push({
+            ref: refFor(element),
+            selector: buildSelector(element),
+            tag,
+            text: normalizeText(element.textContent || element.getAttribute('value') || '').slice(0, 240),
+            role: inferredRole(element),
+            name: accessibleName(element).slice(0, 240),
+            type: element instanceof HTMLInputElement
+              ? (element.getAttribute('type') || 'text')
+              : element instanceof HTMLButtonElement
+                ? (element.getAttribute('type') || 'button')
+                : element.isContentEditable ? 'contenteditable' : null,
+            value: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement
+              ? String(element.value || '').slice(0, 2000)
+              : element.isContentEditable
+                ? normalizeText(element.innerText || element.textContent || '').slice(0, 2000)
+                : null,
+            href: elementHref(element),
+            placeholder: element.getAttribute('placeholder') || null,
+            title: element.getAttribute('title') || null,
+            checked: element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')
+              ? Boolean(element.checked)
+              : ariaChecked === 'true' ? true : ariaChecked === 'false' ? false : null,
+            disabled: 'disabled' in element ? Boolean(element.disabled) : element.getAttribute('aria-disabled') === 'true',
+            visible: true,
+            bounds: elementBounds(element),
+          });
+          if (matches.length >= limit) break;
+        }
+        return { ok: true, type: payload.type, matches };
       }
 
       default:
         throw new Error('Unsupported browser automation action.');
     }
   `, action);
+    result = action.type === "wait"
+      ? await pageAction
+      : await withTimeout(pageAction, PAGE_ACTION_TIMEOUT_MS, `${action.type} action`);
+  } catch (error) {
+    navigation?.cancel();
+    throw error;
+  }
+
+  if (navigation) {
+    const outcome = await navigation.start();
+    const withOutcome = withNavigationOutcome(result, outcome);
+    return fallbackNote
+      ? { ...withOutcome, note: [withOutcome.note, fallbackNote].filter(Boolean).join(" ") }
+      : withOutcome;
+  }
+
+  return fallbackNote ? { ...result, note: fallbackNote } : result;
+}
+
+function readWebviewUrl (webview: WebviewLikeElement): string | undefined {
+  try {
+    return webview.getURL() || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function reloadPage() {
@@ -928,8 +3614,14 @@ function requestAiOperate() {
 defineExpose({
   captureAutomationSnapshot,
   captureArticleSnapshot,
+  captureSearchResults,
+  captureScreenshot,
+  captureDiagnostics,
   runAutomationAction,
   getWebContentsId,
+  getURL,
+  isLoading,
+  waitForReady,
   reload: reloadPage,
 });
 
@@ -941,6 +3633,43 @@ function getWebContentsId(): number | null {
     return webview.getWebContentsId();
   } catch {
     return null;
+  }
+}
+
+/** Current guest URL, or null before the webview attaches. */
+function getURL(): string | null {
+  const webview = webviewRef.value;
+  if (!webview || typeof webview.getURL !== "function") return null;
+  try {
+    return webview.getURL() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the guest main frame is currently loading. */
+function isLoading(): boolean {
+  const webview = webviewRef.value;
+  if (!webview || typeof webview.isLoading !== "function") return false;
+  try {
+    return Boolean(webview.isLoading());
+  } catch {
+    return false;
+  }
+}
+
+/** Resolves once the guest is no longer loading (or rejects on timeout). */
+async function waitForReady(timeoutMs = 15000): Promise<void> {
+  const effectiveTimeout = Math.max(100, Math.min(Number(timeoutMs) || 15000, 25000));
+  const deadline = Date.now() + effectiveTimeout;
+  if (!webviewRef.value) {
+    throw new Error("Browser readiness is unavailable before the page surface attaches.");
+  }
+  while (isLoading()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out after ${effectiveTimeout}ms waiting for the page to become ready.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 
@@ -988,6 +3717,7 @@ function syncFromWebview() {
 function attachWebviewListeners() {
   const webview = webviewRef.value;
   if (!webview) return () => {};
+  applyBackgroundHostMediaPolicy(webview);
 
   const handleTitleUpdated = (event: Event) => {
     const payload = event as Event & { title?: string };
@@ -1015,6 +3745,47 @@ function attachWebviewListeners() {
     syncFromWebview();
   };
 
+  const handleDomReady = () => {
+    applyBackgroundHostMediaPolicy(webview);
+    void installDiagnosticsHooks();
+  };
+
+  const handleDidStartNavigation = (event: Event) => {
+    const payload = event as Event & { isMainFrame?: boolean };
+    if (payload.isMainFrame === false) return;
+    diagnosticsNavigationId += 1;
+    consoleBuffer.length = 0;
+    pageErrorBuffer.length = 0;
+  };
+
+  const handleConsoleMessage = (event: Event) => {
+    const payload = event as Event & {
+      level?: number | string;
+      message?: string;
+      line?: number;
+      sourceId?: string;
+    };
+    const level = String(payload.level ?? "info");
+    const normalizedLevel: BrowserAutomationConsoleEntry["level"] =
+      level === "error" || level === "3"
+        ? "error"
+        : level === "warning" || level === "warn" || level === "2"
+          ? "warning"
+          : level === "debug" || level === "0"
+            ? "debug"
+            : "info";
+    consoleBuffer.push({
+      level: normalizedLevel,
+      message: String(payload.message ?? "").slice(0, 4000),
+      source: payload.sourceId ? String(payload.sourceId).slice(0, 2000) : null,
+      line: typeof payload.line === "number" ? payload.line : null,
+      timestamp: Date.now(),
+    });
+    if (consoleBuffer.length > MAX_DIAGNOSTICS_ENTRIES) {
+      consoleBuffer.splice(0, consoleBuffer.length - MAX_DIAGNOSTICS_ENTRIES);
+    }
+  };
+
   const handleDidFailLoad = (event: Event) => {
     const payload = event as Event & {
       errorCode?: number;
@@ -1030,6 +3801,30 @@ function attachWebviewListeners() {
       errorDescription: payload.errorDescription,
       isMainFrame: payload.isMainFrame,
     });
+
+    if (payload.isMainFrame === false) return;
+    if (Number(payload.errorCode) === -3) return;
+    pageErrorBuffer.push({
+      kind: "load",
+      message: String(payload.errorDescription || `Page load failed (${payload.errorCode ?? "unknown"})`).slice(0, 4000),
+      source: payload.validatedURL || currentUrl.value,
+      timestamp: Date.now(),
+    });
+    if (pageErrorBuffer.length > MAX_DIAGNOSTICS_ENTRIES) {
+      pageErrorBuffer.splice(0, pageErrorBuffer.length - MAX_DIAGNOSTICS_ENTRIES);
+    }
+  };
+
+  const handleRenderProcessGone = (event: Event) => {
+    const payload = event as Event & { details?: { reason?: string; exitCode?: number } };
+    pageErrorBuffer.push({
+      kind: "crash",
+      message: `Renderer process exited (${payload.details?.reason || "unknown"}, code ${payload.details?.exitCode ?? "?"})`,
+      timestamp: Date.now(),
+    });
+    if (pageErrorBuffer.length > MAX_DIAGNOSTICS_ENTRIES) {
+      pageErrorBuffer.splice(0, pageErrorBuffer.length - MAX_DIAGNOSTICS_ENTRIES);
+    }
   };
 
   webview.addEventListener(
@@ -1039,6 +3834,10 @@ function attachWebviewListeners() {
   webview.addEventListener(
     "page-favicon-updated",
     handleFaviconUpdated as EventListener,
+  );
+  webview.addEventListener(
+    "did-start-navigation",
+    handleDidStartNavigation as EventListener,
   );
   webview.addEventListener("did-navigate", handleNavigation as EventListener);
   webview.addEventListener(
@@ -1054,6 +3853,9 @@ function attachWebviewListeners() {
     handleDidFinishLoad as EventListener,
   );
   webview.addEventListener("did-fail-load", handleDidFailLoad as EventListener);
+  webview.addEventListener("dom-ready", handleDomReady as EventListener);
+  webview.addEventListener("console-message", handleConsoleMessage as EventListener);
+  webview.addEventListener("render-process-gone", handleRenderProcessGone as EventListener);
 
   return () => {
     webview.removeEventListener(
@@ -1063,6 +3865,10 @@ function attachWebviewListeners() {
     webview.removeEventListener(
       "page-favicon-updated",
       handleFaviconUpdated as EventListener,
+    );
+    webview.removeEventListener(
+      "did-start-navigation",
+      handleDidStartNavigation as EventListener,
     );
     webview.removeEventListener(
       "did-navigate",
@@ -1084,6 +3890,9 @@ function attachWebviewListeners() {
       "did-fail-load",
       handleDidFailLoad as EventListener,
     );
+    webview.removeEventListener("dom-ready", handleDomReady as EventListener);
+    webview.removeEventListener("console-message", handleConsoleMessage as EventListener);
+    webview.removeEventListener("render-process-gone", handleRenderProcessGone as EventListener);
   };
 }
 
@@ -1156,6 +3965,7 @@ onUnmounted(() => {
     @contextmenu.prevent="emitShellContextMenu($event)"
   >
     <div
+      v-if="!props.hideBar"
       class="browser-view-bar"
       @contextmenu.prevent="emitShellContextMenu($event)"
     >
@@ -1191,14 +4001,19 @@ onUnmounted(() => {
         </form>
       </div>
     </div>
-    <webview
-      ref="webviewRef"
-      class="browser-view-webview"
-      :src="props.url"
-      partition="persist:the-world-browser"
-      allowpopups
-      @contextmenu.stop
-    ></webview>
+    <div class="browser-view-stage">
+      <webview
+        ref="webviewRef"
+        :key="webviewGeneration"
+        class="browser-view-webview"
+        :style="agentViewport ? { width: `${agentViewport.width}px`, height: `${agentViewport.height}px`, flex: '0 0 auto' } : undefined"
+        :src="currentUrl"
+        partition="persist:the-world-browser"
+        :allowpopups="props.allowPopups === false ? undefined : ''"
+        webpreferences="backgroundThrottling=no"
+        @contextmenu.stop
+      ></webview>
+    </div>
     <Teleport to="body">
       <div
         v-if="addressContextMenu.visible"
@@ -1409,9 +4224,20 @@ onUnmounted(() => {
   background: rgba(148, 163, 184, 0.28);
 }
 
+.browser-view-stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
+}
+
 .browser-view-webview {
   flex: 1;
   width: 100%;
+  height: 100%;
   border: none;
 }
 </style>

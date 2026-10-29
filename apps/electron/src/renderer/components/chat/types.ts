@@ -68,7 +68,7 @@ export interface WebFetchResultEntry {
 }
 
 export type ChatMessageBlock =
-  | { id: string; kind: 'content'; content: MessageContent }
+  | { id: string; kind: 'content'; content: MessageContent; startedAt?: number }
   | { id: string; kind: 'error'; message: string }
   | { id: string; kind: 'thinking'; text: string; startedAt?: number; endedAt?: number }
   | { id: string; kind: 'tool'; toolRun: ToolRun }

@@ -639,6 +639,8 @@ onMounted(() => {
   }
 })
 
+defineExpose({ scrollToBottom })
+
 onUnmounted(() => {
   document.removeEventListener('click', hideSelectionCopyMenu)
   document.removeEventListener('selectionchange', handleDocumentSelectionChange)
@@ -778,6 +780,8 @@ onUnmounted(() => {
 }
 
 .chat-messages {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -787,7 +791,7 @@ onUnmounted(() => {
      list into a horizontal scroll container; `hidden` is the fallback. */
   overflow-x: hidden;
   overflow-x: clip;
-  padding: 17px var(--chat-message-gutter, 27px) 24px;
+  padding: 17px var(--chat-message-gutter, 27px) calc(var(--chat-input-card-inset, 0px) + 60px);
   scrollbar-gutter: stable;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
@@ -796,6 +800,8 @@ onUnmounted(() => {
 }
 
 .message-date-divider {
+  flex: 0 0 auto;
+  margin-top: auto;
   display: flex;
   align-items: center;
   gap: 8px;

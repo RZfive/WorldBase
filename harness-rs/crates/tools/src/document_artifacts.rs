@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 const DEFAULT_CHUNK_CHARS: usize = 12_000;
@@ -1113,6 +1114,25 @@ fn draft_dir(workspace: &Path) -> PathBuf {
     workspace.join(".worldbase").join("document-drafts")
 }
 
+/// Process-local monotonic counter used to keep same-tick draft stagings from
+/// choosing the same filename. The existence check also protects against a
+/// filename left by an earlier process run.
+static DRAFT_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn unique_draft_path(directory: &Path, artifact_id: &str, extension: &str) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    loop {
+        let sequence = DRAFT_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = directory.join(format!("{artifact_id}-{stamp}-{sequence}.{extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+}
+
 fn document_backup_dir(workspace: &Path) -> PathBuf {
     workspace.join(".worldbase").join("document-backups")
 }
@@ -1294,11 +1314,7 @@ pub fn stage_document_draft(
         }
     }
 
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    let draft_path = directory.join(format!("{}-{}.{}", artifact.id, stamp, draft_extension));
+    let draft_path = unique_draft_path(&directory, &artifact.id, draft_extension);
 
     // Fidelity-preserving path: copy the source package and apply ops, so
     // media/untouched styling survive verbatim.
@@ -1797,7 +1813,7 @@ pub fn ensure_document_write_allowed(workspace: &Path, absolute_path: &Path) -> 
             .and_then(|value| value.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("docx" | "doc" | "pptx" | "ppt" | "xlsx" | "xls")
+        Some("docx" | "doc" | "pptx" | "ppt" | "xlsx" | "xls" | "pdf")
     );
 
     // 已导入的文档：无论扩展名（含用户改名的场景）都拒绝直写。
@@ -1815,7 +1831,7 @@ pub fn ensure_document_write_allowed(workspace: &Path, absolute_path: &Path) -> 
     // 已存在的 Office 文件：重建必然破坏内容，同样拒绝。
     if office_extension && absolute_path.is_file() {
         anyhow::bail!(
-            "「{}」是已存在的 Office 文档，直接覆写会丢失图片与样式；请使用 doc_draft 生成修改草稿",
+            "「{}」是已存在的 Office/PDF 文档，直接覆写会丢失图片与样式；请使用 doc_draft 生成修改草稿",
             absolute_path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -2600,6 +2616,62 @@ mod tests {
         assert!(cleared.draft.is_none());
         assert!(get_document_draft(root.path(), source.to_str().unwrap()).unwrap().is_null());
         assert_eq!(std::fs::read_to_string(&source).unwrap(), "v1", "source untouched");
+    }
+
+    #[test]
+    fn rapid_draft_restages_use_unique_paths_and_keep_only_the_latest_file() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("rapid.md");
+        std::fs::write(&source, "v0").unwrap();
+        let artifact =
+            import_parsed_document(root.path(), &source, &json!({ "kind": "md", "text": "v0" }))
+                .unwrap();
+
+        let mut draft_paths = Vec::new();
+        for index in 1..=20 {
+            let staged = stage_document_draft(
+                root.path(),
+                Some(artifact.id.as_str()),
+                None,
+                DraftContent::Text {
+                    kind: "md",
+                    body: format!("v{index}"),
+                },
+                None,
+            )
+            .unwrap();
+            let draft_path = PathBuf::from(staged["draftPath"].as_str().unwrap());
+            let file_name = draft_path.file_name().unwrap().to_string_lossy();
+
+            assert!(
+                file_name.starts_with(&format!("{}-", artifact.id)),
+                "draft filename keeps the artifact-id prefix: {file_name}"
+            );
+            assert_eq!(
+                draft_path.extension().and_then(|value| value.to_str()),
+                Some("md")
+            );
+            assert!(draft_path.is_file());
+            assert!(
+                !draft_paths.contains(&draft_path),
+                "draft path reused within the same millisecond: {}",
+                draft_path.display()
+            );
+            for previous in &draft_paths {
+                assert!(
+                    !previous.is_file(),
+                    "older draft was not pruned: {}",
+                    previous.display()
+                );
+            }
+            draft_paths.push(draft_path);
+        }
+
+        let latest = draft_paths.last().unwrap();
+        assert!(latest.is_file());
+        let stored = get_document(root.path(), &artifact.id).unwrap().unwrap();
+        let stored_path = stored.draft.as_ref().unwrap()["path"].as_str().unwrap();
+        assert_eq!(Path::new(stored_path), latest);
     }
 
     #[test]

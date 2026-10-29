@@ -40,6 +40,7 @@ import {
   activateWorkspaceTab,
   applyWorkspaceControlToSnapshot,
   buildCurrentFolderWorkspaceState,
+  buildSnapshotTabSummary,
   buildWorkspaceTabSummaries,
   buildWorkspaceTabSummary,
   ensureWorkspaceTab,
@@ -56,7 +57,8 @@ import {
   workspaceStore,
   workspaceTerminalSurfaces
 } from '../../workspace/workspace-store'
-import { getWorkspaceTabDefinition, type WorkspaceTabInstance } from '../../workspace/tab-registry'
+import { createWorkspaceTabId, getWorkspaceTabDefinition, type WorkspaceTabInstance } from '../../workspace/tab-registry'
+import { resolveWorkRunContext } from './work-run-context'
 import type {
   WorkspaceTabControlRequest,
   WorkspaceTabControlRequestEnvelope,
@@ -67,6 +69,8 @@ import type {
 const props = defineProps<ChatPanelProps>()
 const emit = defineEmits<ChatPanelEmit>()
 const { t } = useI18n()
+
+const autoFocusedCodingDiffAt = new Map<string, number>()
 
 const DEFAULT_APP_WINDOW_MIN_WIDTH = 800
 const CONVERSATION_SIDEBAR_WIDTH = 224
@@ -96,9 +100,12 @@ const {
   currentAskUserRequest,
   currentAssistantIcon,
   currentAssistantName,
+  currentCodingDiff,
+  currentCodingStatus,
   currentContextDetail,
   currentContextLabel,
   currentConversationId,
+  targetProjectId,
   currentLongTermGoal,
   currentPendingAuthCount,
   currentPendingAuthRequest,
@@ -185,6 +192,7 @@ const {
   shouldUseConversationProviderOverride,
   showSkillPicker,
   stopCurrentStream,
+  retryLastUserMessage,
   togglePlanMode,
   toggleComputerUse,
   toggleSkill,
@@ -357,6 +365,10 @@ const CONVERSATION_SIDEBAR_COLLAPSE_STORAGE_KEY = 'chat-conversation-sidebar-col
 // The composer ref is also used by the shell to focus the textarea when a
 // workspace surface asks for input. Keep the ref at the component boundary;
 // layout sizing is intentionally handled by normal flex flow below.
+const messageListRef = ref<{ scrollToBottom?: () => void } | null>(null)
+const bottomDockRef = ref<HTMLElement | null>(null)
+const inputCardInset = ref(0)
+let bottomDockObserver: ResizeObserver | null = null
 const chatInputRef = ref<{ $el?: HTMLElement } | null>(null)
 let offPlanModeChanged: (() => void) | null = null
 
@@ -398,7 +410,31 @@ const { expandedPanel: expandedAttentionPanel, togglePanel: toggleAttentionPanel
     () => attentionSignature.value
   )
 
+
+
+watch(
+  bottomDockRef,
+  (element) => {
+    bottomDockObserver?.disconnect()
+    bottomDockObserver = null
+    if (!element || typeof ResizeObserver === 'undefined') return
+    const measureInset = (): void => {
+      const dockRect = element.getBoundingClientRect()
+      const card = chatInputRef.value?.$el?.querySelector<HTMLElement>('.input-container')
+      inputCardInset.value = card
+        ? Math.max(0, Math.round(dockRect.bottom - card.getBoundingClientRect().top))
+        : Math.round(dockRect.height)
+    }
+    measureInset()
+    bottomDockObserver = new ResizeObserver(() => measureInset())
+    bottomDockObserver.observe(element)
+  },
+  { flush: 'post' }
+)
+
 onBeforeUnmount(() => {
+  bottomDockObserver?.disconnect()
+  bottomDockObserver = null
   window.removeEventListener('keydown', onSidebarShortcut)
   offPlanModeChanged?.()
   offPlanModeChanged = null
@@ -1030,7 +1066,77 @@ async function revealWorkspaceTab (result: ReturnType<typeof ensureWorkspaceTab>
  * Entry point for both the add-tab menu and AI `open_workspace_tab` calls;
  * a payload-less document open routes through the file picker.
  */
+function openCodingDiff (): void {
+  const conversationId = currentConversationId.value
+  if (!conversationId) return
+  void openCodingWorkspaceTab(conversationId)
+}
+
+async function openCodingWorkspaceTab (conversationId: string): Promise<void> {
+  if (!conversationId) return
+
+  const existingTab = findWorkspaceTabs('coding-diff', { conversationId })[0]
+  const emptyTab = existingTab
+    ? null
+    : workspaceStore.tabs.value.find(tab => {
+        if (tab.kind !== 'coding-diff') return false
+        const tabConversationId = tab.state?.conversationId
+        return typeof tabConversationId !== 'string' || !tabConversationId.trim()
+      }) || null
+  const tabToActivate = existingTab || emptyTab
+
+  if (tabToActivate) {
+    if (emptyTab) {
+      tabToActivate.state = { ...(tabToActivate.state || {}), conversationId }
+    }
+    activateWorkspaceTab(tabToActivate.id)
+    if (emptyTab) updateWorkspaceTabState()
+    await openWorkspace()
+  } else {
+    await revealWorkspaceTab(ensureWorkspaceTab('coding-diff', { conversationId }))
+  }
+}
+
+function ensureCodingDiffTab (conversationId: string): void {
+  if (!conversationId || findWorkspaceTabs('coding-diff', { conversationId }).length > 0) return
+  const emptyTab = workspaceStore.tabs.value.find(tab => (
+    tab.kind === 'coding-diff' && !tab.state?.conversationId
+  ))
+  if (emptyTab) {
+    emptyTab.state = { ...(emptyTab.state || {}), conversationId }
+    updateWorkspaceTabState()
+    return
+  }
+  workspaceStore.tabs.value = [
+    ...workspaceStore.tabs.value,
+    {
+      id: createWorkspaceTabId('coding-diff'),
+      kind: 'coding-diff',
+      state: { conversationId }
+    }
+  ]
+}
+
+function handleWorkspaceAddTab (kind: string): void {
+  if (kind === 'coding-diff') {
+    void openWorkspaceTab(kind, { conversationId: currentConversationId.value })
+    return
+  }
+
+  void openWorkspaceTab(kind)
+}
+
 async function openWorkspaceTab (kind: string, payload?: Record<string, unknown>): Promise<void> {
+  if (kind === 'coding-diff') {
+    const payloadConversationId = typeof payload?.conversationId === 'string'
+      ? payload.conversationId.trim()
+      : ''
+    const conversationId = payloadConversationId || currentConversationId.value
+    if (!conversationId) return
+    await openCodingWorkspaceTab(conversationId)
+    return
+  }
+
   if (kind === 'folder') {
     if (payload && typeof payload.rootPath === 'string' && payload.rootPath.trim()) {
       updateFolderWorkspaceState({
@@ -1175,11 +1281,18 @@ const projectPicker = reactive({
   visible: false,
   loading: false,
   error: '',
+  purpose: 'open' as 'open' | 'coding',
   entries: [] as ProjectPickerEntry[]
 })
 
-async function openProjectPicker (): Promise<void> {
+function closeProjectPicker (): void {
+  projectPicker.visible = false
+  projectPicker.purpose = 'open'
+}
+
+async function openProjectPicker (purpose: 'open' | 'coding' = 'open'): Promise<void> {
   projectPicker.visible = true
+  projectPicker.purpose = purpose
   projectPicker.error = ''
   if (projectPicker.entries.length > 0) return
 
@@ -1204,8 +1317,61 @@ async function openProjectPicker (): Promise<void> {
 }
 
 function pickProject (entry: ProjectPickerEntry): void {
+  const purpose = projectPicker.purpose
   projectPicker.visible = false
+  projectPicker.purpose = 'open'
+  if (purpose === 'coding') {
+    targetProjectId.value = entry.id
+    void openWorkspaceTab('project', { projectId: entry.id, name: entry.name })
+    void sendMessage()
+    return
+  }
   void openWorkspaceTab('project', { projectId: entry.id, name: entry.name })
+}
+
+function getDocumentTabsForRunContext (): WorkspaceTabInstance[] {
+  const tabs = getDocumentTabs()
+  const activeTab = getActiveWorkspaceTab()
+  if (activeTab?.kind !== 'document') return tabs
+  const activeIndex = tabs.findIndex(tab => tab.id === activeTab.id)
+  if (activeIndex <= 0) return tabs
+  return [tabs[activeIndex], ...tabs.slice(0, activeIndex), ...tabs.slice(activeIndex + 1)]
+}
+
+function resolveChatRunContext () {
+  const documentTabs = getDocumentTabsForRunContext().flatMap(tab => {
+    const filePath = getDocumentTabFilePath(tab)
+    if (!filePath) return []
+    const fileName = typeof tab.state?.fileName === 'string' ? tab.state.fileName : undefined
+    return [{ filePath, ...(fileName ? { fileName } : {}) }]
+  })
+
+  const activeTabKind = getActiveWorkspaceTab()?.kind ?? null
+  return resolveWorkRunContext({
+    text: inputText.value,
+    targetProjectId: targetProjectId.value,
+    folderRoot: buildCurrentFolderWorkspaceState()?.rootPath ?? null,
+    activeFolderFilePath: activeTabKind === 'folder' ? workspaceStore.folderActiveFilePath.value : null,
+    activeTabKind,
+    documentTabs,
+    attachmentPaths: pendingFiles.value
+      .map(file => file.filePath)
+      .filter((filePath): filePath is string => Boolean(filePath))
+  })
+}
+
+function handleChatSend (): void {
+  if (isLoading.value || isUploadingFiles.value) return
+
+  const runContext = resolveChatRunContext()
+  const folderRoot = buildCurrentFolderWorkspaceState()?.rootPath
+  // The renderer only supplies a root hint for document-project coding. The
+  // mode itself is chosen by the model through select_work_mode (or the
+  // create_project/coding-tool fallback), never by this regex prefill.
+  const codingWorkspaceRoot = !targetProjectId.value && !folderRoot
+    ? runContext.coding.root
+    : null
+  void sendMessage(undefined, codingWorkspaceRoot ? { codingWorkspaceRoot } : undefined)
 }
 
 function closeWorkspaceTab (tabId: string): void {
@@ -1232,12 +1398,13 @@ function handleWorkspaceTabActivate (tabId: string): void {
   activateWorkspaceTab(tabId)
 }
 
-// The active browser tab doubles as the AI's "current page": its surface is
-// forwarded to the app shell, which prefers embedded app pages over it.
+// The active browser/project tab doubles as the AI's "current page": its
+// surface is forwarded to the app shell, which prefers embedded app pages
+// over it. Project tabs share the same webview automation surface.
 const workspaceBrowserSurface = computed(() => {
   if (!workspaceStore.visible.value) return null
   const tab = getActiveWorkspaceTab()
-  if (!tab || tab.kind !== 'browser') return null
+  if (!tab || (tab.kind !== 'browser' && tab.kind !== 'project')) return null
   return workspaceBrowserSurfaces.get(tab.id) || null
 })
 
@@ -1245,7 +1412,9 @@ watch(workspaceBrowserSurface, (surface) => {
   const tab = getActiveWorkspaceTab()
   if (surface && tab) {
     emit('pageSurfaceChange', {
+      conversationId: currentConversationId.value,
       appId: `wsb-${tab.id}`,
+      kind: surface.kind,
       title: surface.title || surface.url,
       url: surface.url,
       handle: surface.handle
@@ -1311,18 +1480,54 @@ function applyBackgroundWorkspaceChange (
   return normalized
 }
 
+/**
+ * Tells the app shell which page tab a background conversation just opened or
+ * activated, so it can attach (or recreate) that tab's hidden page host. Only
+ * browser/project tabs carry a page surface; other kinds are ignored.
+ */
+function emitBackgroundWorkspaceTabOpened (
+  conversationId: string,
+  state: ConversationWorkspaceState | undefined | null
+): void {
+  if (!state || !state.activeTabId) return
+  const entry = state.tabs?.find(tab => tab.id === state.activeTabId)
+  if (!entry) return
+  if (entry.kind !== 'browser' && entry.kind !== 'project') return
+  const summary = buildSnapshotTabSummary(entry, state.activeTabId)
+  emit('backgroundWorkspaceTabOpened', {
+    conversationId,
+    tabId: summary.id,
+    kind: summary.kind,
+    title: summary.title,
+    ...(summary.url ? { url: summary.url } : {}),
+    ...(summary.projectId ? { projectId: summary.projectId } : {})
+  })
+}
+
 function handleBackgroundWorkspaceTabRequest (conversationId: string, kind: string, payload?: Record<string, unknown>): void {
-  applyBackgroundWorkspaceChange(conversationId, state => {
+  const state = applyBackgroundWorkspaceChange(conversationId, state => {
     openWorkspaceTabInSnapshot(state, kind, payload)
     return state
   })
+  emitBackgroundWorkspaceTabOpened(conversationId, state)
 }
 
 function handleBackgroundWorkspaceControl (conversationId: string, request: WorkspaceTabControlRequest): WorkspaceTabControlResult {
   let result: WorkspaceTabControlResult | null = null
+  const closedTab: { value: { id: string; kind: string } | null } = { value: null }
   const outcome = applyBackgroundWorkspaceChange(conversationId, state => {
+    const beforeTabs = request.action === 'close' && Array.isArray(state.tabs)
+      ? state.tabs.map(tab => buildSnapshotTabSummary(tab, state.activeTabId))
+      : []
     const applied = applyWorkspaceControlToSnapshot(state, request)
     result = applied.result
+    if (request.action === 'close') {
+      // Closing the last tab clears result.tab; diff the strip so the closed
+      // tab is still reported to the app shell for host cleanup.
+      const remainingIds = new Set((applied.result.tabs || []).map(tab => tab.id))
+      const closed = applied.result.tab || beforeTabs.find(tab => !remainingIds.has(tab.id))
+      if (closed) closedTab.value = { id: closed.id, kind: closed.kind }
+    }
     return applied.state
   })
   if (!result) {
@@ -1331,6 +1536,15 @@ function handleBackgroundWorkspaceControl (conversationId: string, request: Work
         ? `This window no longer holds conversation ${conversationId}'s workspace, so the tab action cannot be applied.`
         : `Workspace tab action "${request.action}" produced no result.`
     )
+  }
+  if (request.action === 'activate') {
+    emitBackgroundWorkspaceTabOpened(conversationId, outcome)
+  } else if (request.action === 'close' && closedTab.value) {
+    emit('backgroundWorkspaceTabClosed', {
+      conversationId,
+      tabId: closedTab.value.id,
+      kind: closedTab.value.kind
+    })
   }
   return result
 }
@@ -1433,6 +1647,26 @@ watch(
 watch(currentConversationId, (conversationId) => {
   emit('currentConversationChange', conversationId)
 }, { immediate: true })
+
+watch(isLoading, (loading, previous) => {
+  if (!loading || previous) return
+  const conversationId = currentConversationId.value
+  if (!conversationId) return
+  autoFocusedCodingDiffAt.delete(conversationId)
+})
+
+// The first diff of a run opens and focuses the bound diff tab; later diffs
+// keep the user's current tab.
+watch(currentCodingDiff, (diff) => {
+  const conversationId = currentConversationId.value
+  if (!isLoading.value || !conversationId || !diff?.files.length) return
+  if (autoFocusedCodingDiffAt.has(conversationId)) return
+  autoFocusedCodingDiffAt.set(conversationId, diff.updatedAt)
+  ensureCodingDiffTab(conversationId)
+  const diffTab = findWorkspaceTabs('coding-diff', { conversationId })[0]
+  if (diffTab) activateWorkspaceTab(diffTab.id)
+  void openWorkspace()
+}, { flush: 'post' })
 
 // A staged draft opens (or focuses) its document tab, which switches the tab
 // into live draft preview via the workspace store mirror.
@@ -1611,7 +1845,10 @@ watch(
       :class="['chat-panel', { 'chat-panel-with-workspace': workspaceStore.visible.value }]"
       :style="{ '--chat-main-protected-min-width': `${MIN_CHAT_MAIN_WIDTH}px` }"
     >
-      <div class="chat-main">
+      <div
+        class="chat-main"
+        :style="{ '--chat-input-card-inset': `${inputCardInset}px` }"
+      >
         <LongTermGoalPanel
           v-if="currentLongTermGoal || longTermGoalWorkspaceActive"
           :goal="currentLongTermGoal"
@@ -1668,11 +1905,17 @@ watch(
             :show-agent-selector="!currentConversationId"
             :available-agents="nonDefaultAgents"
             :selected-agent-id="agentSelectorValue"
+            :coding-status="currentCodingStatus"
+            :coding-diff-file-count="currentCodingDiff?.files.length || 0"
+            :coding-loading="isLoading"
             @update:selected-channel-binding-id="handleChannelBindingSelectionChange"
             @select-provider-model="handleProviderModelSelectionChange"
             @update:reasoning-strength="handleReasoningStrengthChange"
             @update:temperature="handleTemperatureChange"
             @update:selected-agent-id="handleAgentSelectionChange"
+            @open-coding-diff="openCodingDiff"
+            @cancel-coding="stopCurrentStream"
+            @retry-coding="retryLastUserMessage"
           />
 
           <div v-if="conversationDetailState === 'loading'" class="conversation-detail-state">
@@ -1685,6 +1928,7 @@ watch(
           </div>
           <MessageList
             v-else
+            ref="messageListRef"
             :key="currentConversationId || 'draft'"
             :messages="messages"
             :is-loading="isLoading"
@@ -1725,7 +1969,8 @@ watch(
             </template>
           </MessageList>
 
-          <div class="chat-attention-zone" aria-live="polite">
+          <div ref="bottomDockRef" class="chat-bottom-dock">
+            <div class="chat-attention-zone" aria-live="polite">
             <!-- design v1.7 stacking priority: auth > ask > todo (auth on top). -->
             <AuthPermissionPanel
               v-if="currentPendingAuthRequest"
@@ -1784,7 +2029,7 @@ watch(
             :active-group-session-id="activeGroupSessionId"
             :group-mention-hints="groupMentionHints"
             :is-group-conversation="isGroupConversation"
-            @send="sendMessage"
+            @send="handleChatSend"
             @stop="stopCurrentStream"
             @add-attachments="addAttachments"
             @remove-image="removeImage"
@@ -1798,6 +2043,7 @@ watch(
             @clear-skills="clearSkills"
             @toggle-skill="toggleSkill"
           />
+          </div>
 
           <QuickAskPopover
             :state="quickAskState"
@@ -1806,9 +2052,13 @@ watch(
           />
 
           <Teleport to="body">
-            <div v-if="projectPicker.visible" class="project-picker-backdrop" @click="projectPicker.visible = false">
+            <div v-if="projectPicker.visible" class="project-picker-backdrop" @click="closeProjectPicker">
               <div class="project-picker" role="dialog" @click.stop>
-                <p class="project-picker-title">{{ $t('chatUi.projectPickerTitle') }}</p>
+                <p class="project-picker-title">
+                  {{ projectPicker.purpose === 'coding'
+                    ? $t('chatUi.projectPickerCodingTitle')
+                    : $t('chatUi.projectPickerTitle') }}
+                </p>
                 <div v-if="projectPicker.loading" class="project-picker-hint">{{ $t('chatUi.projectPickerLoading') }}</div>
                 <div v-else-if="projectPicker.error" class="project-picker-hint project-picker-error">{{ projectPicker.error }}</div>
                 <div v-else class="project-picker-list">
@@ -1823,7 +2073,7 @@ watch(
                     <span class="project-picker-name">{{ entry.name }}</span>
                   </button>
                 </div>
-                <button class="project-picker-close" type="button" @click="projectPicker.visible = false">
+                <button class="project-picker-close" type="button" @click="closeProjectPicker">
                   {{ $t('common.cancel') }}
                 </button>
               </div>
@@ -1840,7 +2090,7 @@ watch(
         @close="closeWorkspace"
         @close-tab="closeWorkspaceTab"
         @activate-tab="handleWorkspaceTabActivate"
-        @add-tab="kind => openWorkspaceTab(kind)"
+        @add-tab="handleWorkspaceAddTab"
         @update-width="handleWorkspaceWidthUpdate"
         @insert-selection-tag="insertDocumentTag"
         @update-tab-state="handleWorkspaceTabStateUpdate"
@@ -2242,6 +2492,23 @@ watch(
 }
 
 
+.chat-bottom-dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  pointer-events: none;
+}
+
+.chat-bottom-dock > * {
+  pointer-events: auto;
+}
+
 .chat-attention-zone {
   /*
    * Attention panels used to be absolutely positioned above the composer.
@@ -2250,20 +2517,28 @@ watch(
    * Keep the zone in normal flow so an expanded request always consumes real
    * vertical space.
    */
-  flex: 0 0 auto;
+  /* Attached to the composer: the whole bottom dock floats over the message
+     list, and the list reserves the dock height as bottom padding. */
+  position: relative;
   width: calc(100% - (var(--chat-input-gutter, 16px) * 2));
-  margin: 0 auto;
-  padding: 0 0 6px;
+  max-height: min(42vh, 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-scrollbar) transparent;
+  margin: 0 auto 8px;
+  padding: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .chat-attention-zone > * {
   flex: 0 0 auto;
   width: 100%;
+  pointer-events: auto;
 }
 
 .conversation-detail-state {

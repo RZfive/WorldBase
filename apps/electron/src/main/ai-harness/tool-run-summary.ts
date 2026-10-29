@@ -119,6 +119,11 @@ export function buildToolRunSummary (name: string, args: unknown): string {
       const first = clamp(urls[0])
       return urls.length > 1 ? `${first} +${urls.length - 1}` : first
     }
+    case 'read_current_page': {
+      const mode = argString(a, 'mode') || 'interactive'
+      const tabId = argString(a, 'tab_id')
+      return joinParts([mode, tabId])
+    }
     case 'interact_current_page': {
       const action = argString(a, 'action')
       return joinParts([action, interactTarget(a)])

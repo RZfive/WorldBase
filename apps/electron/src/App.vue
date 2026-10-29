@@ -14,22 +14,27 @@ import BrowserWebView, { type BrowserContextAddPayload } from './renderer/compon
 import FloatingTaskBubble from './renderer/components/app/FloatingTaskBubble.vue'
 import ProjectWindowShell from './renderer/components/app/ProjectWindowShell.vue'
 import ScheduledTaskReportDialog from './renderer/components/settings/ScheduledTaskReportDialog.vue'
-import type { ChatSurfaceStatusSummary, WorkspacePageSurfaceSummary, WorkspaceTerminalSurfaceSummary } from './renderer/components/chat/panel/types'
+import type { BackgroundWorkspaceTabClosedPayload, BackgroundWorkspaceTabOpenedPayload, ChatSurfaceStatusSummary, WorkspacePageSurfaceSummary, WorkspaceTerminalSurfaceSummary } from './renderer/components/chat/panel/types'
 import { sharedChatPanelState } from './renderer/components/chat/panel/shared-state'
 import { addWebQuote } from './renderer/components/chat/panel/web-quote-state'
 import { workspaceBrowserSurfaces } from './renderer/components/workspace/workspace-store'
 import type { ActiveTerminalContext } from './shared/terminal-types'
-import type { WorkspaceTabControlRequestEnvelope, WorkspaceTabControlResponseEnvelope } from './shared/workspace-control-types'
+import type { WorkspaceTabControlRequest, WorkspaceTabControlRequestEnvelope, WorkspaceTabControlResponseEnvelope, WorkspaceTabSummary } from './shared/workspace-control-types'
 import type {
   ActivePageAutomationContext,
   BrowserAutomationAction,
   BrowserAutomationArticle,
   BrowserAutomationActionResult,
+  BrowserAutomationDiagnostics,
+  BrowserAutomationScreenshot,
+  BrowserAutomationSearchResults,
   BrowserAutomationSnapshot,
+  PageAutomationRendererRequest,
   PageAutomationRendererResult,
   PageAutomationRequestEnvelope,
   PageAutomationResponseEnvelope
 } from './shared/page-automation-types'
+import { validateAiBrowserTarget } from './shared/web-target-validation'
 import { applyThemePreference, getAppliedThemePreference, watchSystemThemeChange } from './renderer/utils/theme'
 import { applyChatFontPreferences, loadChatFontPreferences } from './renderer/utils/chat-font-preferences'
 import { createWebAppId, getWebAppNameFromUrl, normalizeWebUrlInput, type SavedWebApp } from './renderer/utils/web-app'
@@ -84,7 +89,6 @@ interface EmbeddedAppState {
   url: string
   loading: boolean
   kind: 'project' | 'browser'
-  sandbox: string
   projectPort?: number
 }
 
@@ -101,7 +105,13 @@ interface ActivePageSurfaceSummary {
 interface BrowserAutomationViewHandle {
   captureAutomationSnapshot: () => Promise<BrowserAutomationSnapshot>
   captureArticleSnapshot?: () => Promise<BrowserAutomationArticle>
+  captureSearchResults?: () => Promise<BrowserAutomationSearchResults>
+  captureScreenshot?: (options?: { fullPage?: boolean; maxWidth?: number; format?: 'png' | 'jpeg'; quality?: number; timeoutMs?: number }) => Promise<BrowserAutomationScreenshot>
+  captureDiagnostics?: (options?: { clear?: boolean }) => Promise<BrowserAutomationDiagnostics>
   runAutomationAction: (action: BrowserAutomationAction) => Promise<BrowserAutomationActionResult>
+  getURL?: () => string | null
+  isLoading?: () => boolean
+  waitForReady?: (timeoutMs?: number) => Promise<void>
 }
 
 /** Maximum seconds to wait for a project's port to become available after starting. */
@@ -112,9 +122,13 @@ const QR_CODE_WIDTH = 220
 const QR_CODE_MARGIN = 2
 /** Duration in ms for the "copied" feedback after copying a LAN URL. */
 const COPY_FEEDBACK_MS = 2000
-const PROJECT_IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals'
-const PROJECT_IFRAME_ALLOW = 'clipboard-read; clipboard-write; fullscreen'
-const BROWSER_IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-modals'
+/** Maximum time to wait for an embedded page surface to mount before giving up. */
+const PAGE_AUTOMATION_HANDLE_WAIT_MS = 20000
+/** Maximum time to wait for the mounted page to finish loading. */
+const PAGE_AUTOMATION_READY_WAIT_MS = 10000
+/** Whole-request budget: queue wait + handle resolution + readiness + action. */
+const PAGE_AUTOMATION_QUEUE_TIMEOUT_MS = 50000
+const PROJECT_SURFACE_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 
 function logWebAppsSnapshot (label: string, webApps: SavedWebApp[]) {
   console.info(`[web-apps] ${label}`, webApps.map(app => ({
@@ -157,6 +171,49 @@ const chatSurfaceStatus = ref<ChatSurfaceStatusSummary>({
   primaryTaskTitle: null
 })
 const browserAutomationHandles = new Map<string, BrowserAutomationViewHandle>()
+/** Bumped when embedded handles mount/unmount or report a navigation. */
+const embeddedAutomationRevision = ref(0)
+
+type BackgroundHostKind = 'browser' | 'project'
+
+interface BackgroundHostSpec {
+  key: string
+  id: string
+  conversationId: string
+  kind: BackgroundHostKind
+  title: string
+  url: string
+  projectId?: string
+  tabId?: string
+  createdAt: number
+}
+
+interface BackgroundHost extends BackgroundHostSpec {
+  handle: BrowserAutomationViewHandle | null
+  error: string | null
+}
+
+interface BackgroundAutomationTarget {
+  spec: BackgroundHostSpec
+  host: BackgroundHost
+}
+
+interface LastPageSurface {
+  kind: BackgroundHostKind
+  url: string
+  title: string
+  projectId?: string
+  tabId?: string
+}
+
+const BACKGROUND_HOST_LIMIT = 4
+const backgroundHosts = ref(new Map<string, BackgroundHost>())
+const backgroundHostSpecs = ref(new Map<string, BackgroundHostSpec>())
+const lastPageSurfaceByConversation = ref(new Map<string, LastPageSurface>())
+const backgroundProjectStartups = new Map<string, Promise<void>>()
+let embeddedPageSurfaceConversationId: string | null = null
+let backgroundHostSeq = 0
+const backgroundHostRenderList = computed(() => [...backgroundHosts.value.values()].filter(host => Boolean(host.url)))
 
 const runningApps = ref(new Map<string, RunningApp>())
 const browserApps = ref(new Map<string, RunningApp>())
@@ -218,6 +275,26 @@ function resolveUrlOrigin (value: string | null | undefined): string | null {
   }
 }
 
+/** Project pages may only be automated while they stay on a loopback app URL. */
+function isLoopbackProjectUrl (value: string | null | undefined): boolean {
+  if (!value) return false
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+    return PROJECT_SURFACE_HOSTS.has(parsed.hostname)
+  } catch {
+    return false
+  }
+}
+
+/** Live URL of an embedded page handle, or null before it attaches. */
+function readEmbeddedHandleUrl (appId: string): string | null {
+  // Track the revision so computed callers refresh after mount/navigation.
+  void embeddedAutomationRevision.value
+  const url = browserAutomationHandles.get(appId)?.getURL?.()
+  return url && url !== 'about:blank' ? url : null
+}
+
 const activePageSurface = computed<ActivePageSurfaceSummary | null>(() => {
   const appId = activeEmbeddedProjectId.value
   if (!appId) return null
@@ -240,7 +317,7 @@ const activePageSurface = computed<ActivePageSurfaceSummary | null>(() => {
   }
 
   const runningApp = runningApps.value.get(appId)
-  const url = appState.url || null
+  const url = readEmbeddedHandleUrl(appId) || appState.url || null
   return {
     appId,
     kind: 'project',
@@ -263,11 +340,12 @@ const showAppChatBubble = computed(() => (
   currentView.value === 'app'
   && !showLaunchpad.value
   && appChatPresentation.value === 'bubble'
-  && Boolean(activeBrowserPageSurface.value)
+  && Boolean(activeEmbeddedPageSurface.value)
 ))
 
-const activeBrowserPageSurface = computed(() => {
-  return activePageSurface.value?.kind === 'browser' ? activePageSurface.value : null
+/** The visible app-view page (project or browser), which both own page tools. */
+const activeEmbeddedPageSurface = computed(() => {
+  return activePageSurface.value
 })
 
 const shouldMountChatShell = computed(() => {
@@ -275,20 +353,22 @@ const shouldMountChatShell = computed(() => {
 })
 
 const activePageAutomationContext = computed<ActivePageAutomationContext | null>(() => {
-  // Mirrors getActiveBrowserAutomationHandle: the launchpad page is only the
-  // AI's page while explicitly requested (or with no workspace tab at all);
-  // otherwise the workspace browser tab is the pinned context.
-  if (currentView.value === 'app' && (launchpadPageChatActive.value || !workspacePageSurface.value)) {
-    const browserSurface = activeBrowserPageSurface.value
-    if (browserSurface) {
+  // Mirrors getActiveBrowserAutomationHandle: while the app view shows an
+  // embedded project or browser page, that page wins over any workspace tab.
+  if (currentView.value === 'app') {
+    const embeddedSurface = activeEmbeddedPageSurface.value
+    if (embeddedSurface) {
       return {
-        appId: browserSurface.appId,
-        kind: 'browser',
-        title: browserSurface.title,
-        url: browserSurface.url,
-        origin: browserSurface.origin || browserSurface.url || null
+        appId: embeddedSurface.appId,
+        kind: embeddedSurface.kind,
+        title: embeddedSurface.title,
+        url: embeddedSurface.url,
+        origin: embeddedSurface.origin || embeddedSurface.url || null
       }
     }
+    // The AI just opened an app but its surface is still mounting; do not
+    // report a background workspace tab as the active page meanwhile.
+    if (launchpadPageChatActive.value) return null
   }
   // No embedded app page: the active workspace browser tab becomes the page
   // the AI can read and operate, regardless of the current view.
@@ -296,7 +376,7 @@ const activePageAutomationContext = computed<ActivePageAutomationContext | null>
   if (workspaceSurface) {
     return {
       appId: workspaceSurface.appId,
-      kind: 'browser',
+      kind: workspaceSurface.kind,
       title: workspaceSurface.title,
       url: workspaceSurface.url,
       origin: resolveUrlOrigin(workspaceSurface.url)
@@ -338,6 +418,8 @@ let schedulerReportRequestedCleanup: (() => void) | null = null
 let pageAutomationRequestCleanup: (() => void) | null = null
 /** Bumped on every AI-originated workspace tab request; consumed by the chat shell once. */
 let workspaceTabRequestSeq = 0
+/** Timestamp of the latest AI tab open/activate, used to wait for its page surface. */
+let lastWorkspaceTabRequestAt = 0
 const workspaceTabRequest = ref<{ kind: string; payload?: Record<string, unknown>; conversationId?: string; seq: number } | null>(null)
 /** Bumped on every AI workspace tab list/activate/close request; resolved through the chat shell. */
 let workspaceTabControlSeq = 0
@@ -384,17 +466,21 @@ function clearEmbeddedApp (appId?: string) {
 function setBrowserAutomationHandle (appId: string, instance: unknown) {
   const handle = instance as BrowserAutomationViewHandle | null
   if (handle) {
+    // Inline template refs re-fire on every parent patch; only bump the
+    // revision when the mount actually changes.
+    if (browserAutomationHandles.get(appId) === handle) return
     browserAutomationHandles.set(appId, handle)
-    return
+  } else {
+    if (!browserAutomationHandles.has(appId)) return
+    browserAutomationHandles.delete(appId)
   }
-  browserAutomationHandles.delete(appId)
+  embeddedAutomationRevision.value += 1
 }
 
 /**
- * Whether the docked (launchpad) page should own AI page automation. Only the
- * user's explicit "AI operate" request on that page sets this; otherwise the
- * workspace browser tab stays the pinned automation target so AI operations
- * never silently jump into the launchpad (docs/web-capability-router-design.md §3).
+ * Whether the AI should target the visible app page. Set by the explicit
+ * "AI operate" action and when a project is opened in the shell; the app view
+ * itself also owns automation whenever an embedded page is active.
  */
 const launchpadPageChatActive = ref(false)
 
@@ -407,17 +493,18 @@ watch(currentView, (view) => {
 function resolveEmbeddedBrowserHandle (): BrowserAutomationViewHandle | null {
   if (currentView.value !== 'app' || !activeEmbeddedProjectId.value) return null
   const appState = embeddedApps.value.get(activeEmbeddedProjectId.value)
-  if (!appState || appState.kind !== 'browser') return null
+  if (!appState) return null
   return browserAutomationHandles.get(activeEmbeddedProjectId.value) || null
 }
 
 function getActiveBrowserAutomationHandle (): BrowserAutomationViewHandle | null {
-  // The launchpad page only wins while the user explicitly asked the AI about
-  // it, or when there is no workspace browser tab at all. In every other state
-  // the workspace browser tab is the page the tools hit.
-  if (currentView.value === 'app' && (launchpadPageChatActive.value || !workspacePageSurface.value)) {
-    const embeddedHandle = resolveEmbeddedBrowserHandle()
-    if (embeddedHandle) return embeddedHandle
+  // The app view is a first-class automation surface: while an embedded
+  // project or browser page is active it owns the page tools, even if a
+  // workspace tab still reports itself as active in the background. Returning
+  // null while the embedded view mounts lets the caller wait for its handle
+  // instead of silently operating the workspace tab.
+  if (currentView.value === 'app' && (activePageSurface.value || launchpadPageChatActive.value)) {
+    return resolveEmbeddedBrowserHandle()
   }
 
   const workspaceHandle = workspacePageSurface.value?.handle
@@ -433,25 +520,752 @@ function findWorkspaceTabIdByWebContentsId (webContentsId: number): string | nul
   return null
 }
 
-async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelope) {
-  const respond = window.electronAPI?.respondPageAutomationRequest
-  if (!respond) return
+function resolveWorkspaceAutomationHandle (tabId: string): BrowserAutomationViewHandle | null {
+  const surface = workspaceBrowserSurfaces.get(tabId)
+  return (surface?.handle as unknown as BrowserAutomationViewHandle | null) || null
+}
 
+/** Per-tab promise chains keep two AI runs from interleaving page actions. */
+const pageAutomationQueues = new Map<string, Promise<unknown>>()
+
+function withTimeout<T> (promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
+
+interface PageAutomationQueueBudget {
+  deadline: number
+  remainingMs: () => number
+}
+
+function enqueuePageAutomation<T> (
+  key: string,
+  enqueuedAt: number,
+  userTimeoutMs: number | undefined,
+  task: (budget: PageAutomationQueueBudget) => Promise<T>
+): Promise<T> {
+  // Use user-provided timeout or default to PAGE_AUTOMATION_QUEUE_TIMEOUT_MS
+  const effectiveTimeoutMs = userTimeoutMs ?? PAGE_AUTOMATION_QUEUE_TIMEOUT_MS
+  const deadline = enqueuedAt + effectiveTimeoutMs
+  const budget: PageAutomationQueueBudget = {
+    deadline,
+    remainingMs: () => Math.max(0, deadline - Date.now())
+  }
+  const previous = pageAutomationQueues.get(key) ?? Promise.resolve()
+  const run = previous.catch(() => undefined).then(() => {
+    if (budget.remainingMs() <= 0) {
+      throw new Error(`Page automation request spent its ${effectiveTimeoutMs}ms budget waiting in the queue.`)
+    }
+    return task(budget)
+  })
+  // The timer starts at enqueue time, so queue wait, handle resolution,
+  // readiness, and the action all share one whole-request budget. The queue
+  // advances when this settles (including timeout), so a hung action cannot
+  // block every later page tool call.
+  const next = withTimeout(
+    run,
+    budget.remainingMs(),
+    `Page automation request timed out after ${effectiveTimeoutMs}ms.`
+  )
+  pageAutomationQueues.set(key, next)
+  const cleanup = () => {
+    if (pageAutomationQueues.get(key) === next) pageAutomationQueues.delete(key)
+  }
+  void next.then(cleanup, cleanup)
+  return next
+}
+
+const PAGE_SCREENSHOT_RECOVERY_BUDGET_MS = 20000
+
+function extractUserTimeoutMs (request: PageAutomationRendererRequest): number | undefined {
+  if (request.type === 'screenshot') {
+    if (typeof request.timeoutMs !== 'number' || !Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0) {
+      return PAGE_AUTOMATION_QUEUE_TIMEOUT_MS
+    }
+    return Math.min(PAGE_AUTOMATION_QUEUE_TIMEOUT_MS, request.timeoutMs + PAGE_SCREENSHOT_RECOVERY_BUDGET_MS)
+  }
+  if (request.type === 'action') {
+    const action = request.action
+    if ('timeoutMs' in action && typeof action.timeoutMs === 'number') {
+      return action.timeoutMs
+    }
+    if ('timeout_ms' in action && typeof action.timeout_ms === 'number') {
+      return action.timeout_ms
+    }
+  }
+  return undefined
+}
+
+
+function comparablePageUrl (value: string | null | undefined): string | null {
+  if (!value) return null
+  try {
+    const parsed = new URL(value)
+    return `${parsed.origin}${parsed.pathname}${parsed.search}`
+  } catch {
+    return value
+  }
+}
+
+function pageUrlsMatch (current: string | null, expected: string | null): boolean {
+  if (!current) return false
+  if (!expected) return true
+  return comparablePageUrl(current) === comparablePageUrl(expected)
+}
+
+async function waitForPageReady (
+  handle: BrowserAutomationViewHandle,
+  readExpectedUrl: () => string | null,
+  timeoutMs: number
+): Promise<void> {
+  // One shared deadline bounds both the load wait and the URL-match wait.
+  const deadline = Date.now() + timeoutMs
+  if (handle.waitForReady) {
+    await handle.waitForReady(Math.max(100, deadline - Date.now()))
+  }
+  if (!handle.getURL) return
+
+  while (true) {
+    const current = handle.getURL()
+    const expected = readExpectedUrl()
+    if (pageUrlsMatch(current, expected)) return
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out after ${timeoutMs}ms waiting for the page to load${expected ? ` (expected ${expected}, current ${current || 'unknown'})` : ''}.`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
+
+async function resolvePageAutomationHandle (
+  tabId?: string,
+  maxWaitMs = PAGE_AUTOMATION_HANDLE_WAIT_MS
+): Promise<BrowserAutomationViewHandle | null> {
+  // A tab open/activate request is asynchronous: the webview mounts after the
+  // panel animation and state restoration. Wait instead of failing the first
+  // page tool call and letting the model fall back to an external MCP.
+  // Explicit tab targets, recent open/activate requests, and a visible app view
+  // all cover project startup (up to ~20s), so use the longer bound there.
+  const recentlyRequested = Date.now() - lastWorkspaceTabRequestAt < 10000
+  const waitingForEmbeddedApp = currentView.value === 'app'
+    && (Boolean(activePageSurface.value) || launchpadPageChatActive.value)
+  const preferredWaitMs = tabId || recentlyRequested || waitingForEmbeddedApp
+    ? PAGE_AUTOMATION_HANDLE_WAIT_MS
+    : 1500
+  const waitMs = Math.max(0, Math.min(preferredWaitMs, maxWaitMs))
+  const deadline = Date.now() + waitMs
+  while (true) {
+    const handle = tabId ? resolveWorkspaceAutomationHandle(tabId) : getActiveBrowserAutomationHandle()
+    if (handle) return handle
+    if (Date.now() >= deadline) return null
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
+
+function describeAutomationTargets (): string {
+  const entries = [...workspaceBrowserSurfaces]
+    .map(([tabId, surface]) => `${surface.kind} tab_id=${tabId} "${surface.title || surface.url}"`)
+  const embeddedSurface = currentView.value === 'app' ? activePageSurface.value : null
+  if (embeddedSurface) {
+    entries.unshift(`${embeddedSurface.kind} app "${embeddedSurface.title || embeddedSurface.url || embeddedSurface.appId}"`)
+  }
+  return entries.length > 0 ? entries.join('; ') : 'none'
+}
+
+function latestBackgroundHost (hosts: BackgroundHost[]): BackgroundHost | null {
+  let latest: BackgroundHost | null = null
+  for (const host of hosts) {
+    if (!latest || host.createdAt > latest.createdAt) latest = host
+  }
+  return latest
+}
+
+function latestBackgroundSpec (specs: BackgroundHostSpec[]): BackgroundHostSpec | null {
+  let latest: BackgroundHostSpec | null = null
+  for (const spec of specs) {
+    if (!latest || spec.createdAt > latest.createdAt) latest = spec
+  }
+  return latest
+}
+
+function removeBackgroundHostsForConversation (conversationId: string) {
+  for (const [hostId, host] of backgroundHosts.value) {
+    if (host.conversationId === conversationId) backgroundHosts.value.delete(hostId)
+  }
+  for (const [key, spec] of backgroundHostSpecs.value) {
+    if (spec.conversationId === conversationId) backgroundHostSpecs.value.delete(key)
+  }
+}
+
+function enforceBackgroundHostLimit () {
+  while (backgroundHosts.value.size > BACKGROUND_HOST_LIMIT) {
+    let oldest: BackgroundHost | null = null
+    for (const host of backgroundHosts.value.values()) {
+      if (!oldest || host.createdAt < oldest.createdAt) oldest = host
+    }
+    if (!oldest) return
+    backgroundHosts.value.delete(oldest.id)
+  }
+}
+
+function normalizeBackgroundBrowserUrl (rawUrl: unknown): string | null {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return null
+  const validation = validateAiBrowserTarget(rawUrl)
+  return validation.ok ? validation.url : null
+}
+
+function normalizeBackgroundProjectUrl (rawUrl: unknown): string {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return ''
+  const trimmed = rawUrl.trim()
+  if (!isLoopbackProjectUrl(trimmed)) return ''
+  try {
+    return new URL(trimmed).toString()
+  } catch {
+    return ''
+  }
+}
+
+function normalizeComparablePageUrl (rawUrl: unknown): string | null {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return null
+  try {
+    return new URL(rawUrl.trim()).toString()
+  } catch {
+    return null
+  }
+}
+
+function backgroundPageTargetMatchesControl (
+  entry: Pick<BackgroundHostSpec, 'kind' | 'url' | 'projectId' | 'tabId'>,
+  request: WorkspaceTabControlRequest
+): boolean {
+  const tabId = typeof request.tabId === 'string' ? request.tabId.trim() : ''
+  if (tabId) return entry.tabId === tabId
+
+  const kind = request.kind === 'browser' || request.kind === 'project' ? request.kind : null
+  if (!kind || entry.kind !== kind) return false
+
+  const requestWithProject = request as unknown as { projectId?: unknown }
+  const projectId = typeof requestWithProject.projectId === 'string'
+    ? requestWithProject.projectId.trim()
+    : ''
+  if (projectId) return entry.projectId === projectId
+
+  const url = normalizeComparablePageUrl(request.url)
+  if (url) return normalizeComparablePageUrl(entry.url) === url
+  return false
+}
+
+function pruneBackgroundPageTargets (conversationId: string, request: WorkspaceTabControlRequest) {
+  const removedSpecKeys = new Set<string>()
+  const removeSpec = (spec: BackgroundHostSpec) => {
+    backgroundHostSpecs.value.delete(spec.key)
+    removedSpecKeys.add(spec.key)
+  }
+  const removeHost = (host: BackgroundHost) => {
+    backgroundHosts.value.delete(host.id)
+    const spec = findBackgroundHostSpecFor(host)
+    if (spec) removeSpec(spec)
+  }
+
+  for (const [, spec] of [...backgroundHostSpecs.value]) {
+    if (spec.conversationId === conversationId && backgroundPageTargetMatchesControl(spec, request)) {
+      removeSpec(spec)
+    }
+  }
+  for (const [, host] of [...backgroundHosts.value]) {
+    if (host.conversationId !== conversationId) continue
+    if (removedSpecKeys.has(host.key) || backgroundPageTargetMatchesControl(host, request)) {
+      removeHost(host)
+    }
+  }
+
+  const last = lastPageSurfaceByConversation.value.get(conversationId)
+  if (last && backgroundPageTargetMatchesControl(last, request)) {
+    lastPageSurfaceByConversation.value.delete(conversationId)
+  }
+}
+
+function findBackgroundHostSpecFor (host: BackgroundHost): BackgroundHostSpec | null {
+  const direct = backgroundHostSpecs.value.get(host.key)
+  if (direct) return direct
+  for (const spec of backgroundHostSpecs.value.values()) {
+    if (spec.id === host.id) return spec
+  }
+  return null
+}
+
+function getOrCreateBackgroundHostSpec (input: {
+  conversationId: string
+  kind: BackgroundHostKind
+  title?: unknown
+  url?: unknown
+  projectId?: unknown
+  tabId?: string
+}): BackgroundHostSpec | null {
+  const title = cleanOptionalString(input.title)
+  let identity = ''
+  let normalizedUrl = ''
+  let projectId: string | undefined
+  if (input.kind === 'browser') {
+    const url = normalizeBackgroundBrowserUrl(input.url)
+    if (!url) return null
+    normalizedUrl = url
+    identity = url
+  } else {
+    projectId = cleanOptionalString(input.projectId)
+    normalizedUrl = normalizeBackgroundProjectUrl(input.url)
+    if (!projectId && !normalizedUrl) return null
+    identity = projectId || normalizedUrl
+  }
+
+  const key = `${input.conversationId}\u0000${input.kind}\u0000${identity}`
+  const existing = backgroundHostSpecs.value.get(key)
+  if (existing) {
+    if (title) existing.title = title
+    if (input.tabId) existing.tabId = input.tabId
+    if (normalizedUrl && !existing.url) existing.url = normalizedUrl
+    return existing
+  }
+
+  backgroundHostSeq += 1
+  const spec: BackgroundHostSpec = {
+    key,
+    id: `bg-host-${backgroundHostSeq}`,
+    conversationId: input.conversationId,
+    kind: input.kind,
+    title: title || (input.kind === 'browser' ? getWebAppNameFromUrl(normalizedUrl) : identity),
+    url: normalizedUrl,
+    projectId,
+    tabId: input.tabId,
+    createdAt: Date.now()
+  }
+  backgroundHostSpecs.value.set(key, spec)
+  return spec
+}
+
+function startBackgroundProjectHost (hostId: string): Promise<void> {
+  const pending = backgroundProjectStartups.get(hostId)
+  if (pending) return pending
+
+  const task = (async () => {
+    const initialHost = backgroundHosts.value.get(hostId)
+    if (!initialHost || initialHost.kind !== 'project') return
+    const projectId = initialHost.projectId
+    if (!projectId) return
+    initialHost.error = null
+
+    try {
+      let status = await getRuntimeStatus(projectId)
+      if (status.status !== 'running' || !status.port) {
+        const result = await window.electronAPI?.startProject(projectId)
+        const runtime = result as { status?: string; port?: number } | undefined
+        if (runtime?.port && (runtime.status === 'running' || runtime.status === 'already_running')) {
+          status = { status: 'running', port: runtime.port }
+        }
+      }
+
+      const deadline = Date.now() + START_TIMEOUT_SECONDS * 1000
+      while ((status.status !== 'running' || !status.port) && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        if (!backgroundHosts.value.has(hostId)) return
+        status = await getRuntimeStatus(projectId)
+      }
+
+      const host = backgroundHosts.value.get(hostId)
+      if (!host) return
+      if (status.status === 'running' && status.port) {
+        host.url = buildProjectFrameUrl(status.port)
+        host.error = null
+        const spec = backgroundHostSpecs.value.get(host.key)
+        if (spec) spec.url = host.url
+        const projectName = runningApps.value.get(projectId)?.name || projectCatalog.value.get(projectId)?.name
+        if (projectName) {
+          host.title = projectName
+          if (spec) spec.title = projectName
+        }
+      } else {
+        host.error = `page_tools_background_project_unavailable: Project "${projectId}" did not start. Call open_workspace_tab(kind="project") or open_project_app in this conversation again. Do not use chrome/playwright MCP as a workaround.`
+      }
+    } catch (error) {
+      const host = backgroundHosts.value.get(hostId)
+      if (host && !host.url) {
+        const detail = error instanceof Error ? error.message : String(error)
+        host.error = `page_tools_background_project_unavailable: Project "${projectId}" could not be started (${detail}). Call open_workspace_tab(kind="project") or open_project_app in this conversation again. Do not use chrome/playwright MCP as a workaround.`
+      }
+    } finally {
+      backgroundProjectStartups.delete(hostId)
+    }
+  })()
+
+  backgroundProjectStartups.set(hostId, task)
+  return task
+}
+
+function materializeBackgroundHost (spec: BackgroundHostSpec): BackgroundHost {
+  const existing = backgroundHosts.value.get(spec.id)
+  if (existing) {
+    if (!existing.tabId && spec.tabId) existing.tabId = spec.tabId
+    return existing
+  }
+
+  const host: BackgroundHost = {
+    ...spec,
+    handle: null,
+    error: null,
+    createdAt: Date.now()
+  }
+  backgroundHosts.value.set(host.id, host)
+  enforceBackgroundHostLimit()
+  // A project spec hydrated from a tab list may already carry its live URL;
+  // use it directly instead of starting the project again.
+  if (host.kind === 'project' && host.projectId && !host.url) void startBackgroundProjectHost(host.id)
+  return host
+}
+
+function handleBackgroundWorkspaceOpenRequest (
+  conversationId: string,
+  kind: string,
+  payload?: Record<string, unknown>
+) {
+  if (kind !== 'browser' && kind !== 'project') return
+  const spec = getOrCreateBackgroundHostSpec({
+    conversationId,
+    kind,
+    title: payload?.title,
+    url: payload?.url,
+    projectId: payload?.projectId
+  })
+  if (!spec) return
+  const host = materializeBackgroundHost(spec)
+  if (host.kind === 'project' && !host.url && host.error) {
+    host.error = null
+    void startBackgroundProjectHost(host.id)
+  }
+}
+
+function setBackgroundHostHandle (hostId: string, instance: unknown) {
+  const host = backgroundHosts.value.get(hostId)
+  if (!host) return
+  const handle = (instance as BrowserAutomationViewHandle | null) || null
+  if (host.handle === handle) return
+  host.handle = handle
+}
+
+function handleBackgroundHostStateChange (hostId: string, payload: { url: string; title: string }) {
+  const host = backgroundHosts.value.get(hostId)
+  if (!host) return
+  if (payload.url && payload.url !== 'about:blank' && payload.url !== host.url) {
+    host.url = payload.url
+  }
+  const title = typeof payload.title === 'string' ? payload.title.trim() : ''
+  if (title && title !== host.title) {
+    host.title = title
+    const spec = backgroundHostSpecs.value.get(host.key)
+    if (spec) spec.title = title
+  }
+}
+
+function recordLastPageSurface () {
+  const conversationId = chatCurrentConversationId.value
+  if (!conversationId) return
+
+  const workspaceSurface = workspacePageSurface.value
+  let surface: ActivePageSurfaceSummary | WorkspacePageSurfaceSummary | null = null
+  let fromEmbedded = false
+  if (
+    currentView.value === 'app'
+    && activePageSurface.value
+    && embeddedPageSurfaceConversationId === conversationId
+  ) {
+    surface = activePageSurface.value
+    fromEmbedded = true
+  } else if (workspaceSurface?.conversationId === chatCurrentConversationId.value) {
+    surface = workspaceSurface
+  }
+  if (!surface?.url) {
+    lastPageSurfaceByConversation.value.delete(conversationId)
+    return
+  }
+
+  const entry: LastPageSurface = {
+    kind: surface.kind,
+    url: surface.url,
+    title: cleanOptionalString(surface.title) || surface.url
+  }
+  if (fromEmbedded) {
+    if (surface.kind === 'project' && activeEmbeddedProjectId.value) {
+      entry.projectId = activeEmbeddedProjectId.value
+    }
+  } else if (surface.appId?.startsWith('wsb-')) {
+    entry.tabId = surface.appId.slice(4)
+  }
+  lastPageSurfaceByConversation.value.set(conversationId, entry)
+}
+
+function getOrCreateBackgroundHostSpecFromLastSurface (
+  conversationId: string,
+  tabId: string
+): BackgroundHostSpec | null {
+  const last = lastPageSurfaceByConversation.value.get(conversationId)
+  if (!last) return null
+  if (tabId && last.tabId !== tabId) return null
+  return getOrCreateBackgroundHostSpec({
+    conversationId,
+    kind: last.kind,
+    title: last.title,
+    url: last.url,
+    projectId: last.projectId,
+    tabId: last.tabId
+  })
+}
+
+function resolveBackgroundAutomationTarget (
+  conversationId: string,
+  tabId: string
+): BackgroundAutomationTarget | null {
+  const hosts = [...backgroundHosts.value.values()].filter(host => host.conversationId === conversationId)
+  const specs = [...backgroundHostSpecs.value.values()].filter(spec => spec.conversationId === conversationId)
+
+  if (tabId) {
+    const host = latestBackgroundHost(hosts.filter(entry => entry.tabId === tabId))
+    if (host) {
+      const spec = findBackgroundHostSpecFor(host)
+      return spec ? { spec, host } : null
+    }
+    const spec = latestBackgroundSpec(specs.filter(entry => entry.tabId === tabId))
+    if (spec) return { spec, host: materializeBackgroundHost(spec) }
+    return null
+  }
+
+  const host = latestBackgroundHost(hosts)
+  if (host) {
+    const spec = findBackgroundHostSpecFor(host)
+    return spec ? { spec, host } : null
+  }
+
+  const spec = latestBackgroundSpec(specs)
+  return spec ? { spec, host: materializeBackgroundHost(spec) } : null
+}
+
+async function waitForBackgroundHostHandle (
+  hostId: string,
+  timeoutMs: number
+): Promise<BrowserAutomationViewHandle> {
+  const deadline = Date.now() + Math.max(0, Math.min(PAGE_AUTOMATION_HANDLE_WAIT_MS, timeoutMs))
+  while (true) {
+    const host = backgroundHosts.value.get(hostId)
+    if (!host) {
+      throw new Error('page_tools_background_host_missing: The background page host was removed before the page action could run. Call open_workspace_tab or open_project_app in this conversation first.')
+    }
+    if (host.error) throw new Error(host.error)
+    if (host.url && host.handle) return host.handle
+    if (Date.now() >= deadline) {
+      throw new Error('page_tools_background_host_unavailable: The background page host did not become ready in time. Call open_workspace_tab or open_project_app in this conversation again. Do not use chrome/playwright MCP as a workaround.')
+    }
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+}
+
+function handleBackgroundWorkspaceTabOpened (payload: BackgroundWorkspaceTabOpenedPayload) {
+  const conversationId = typeof payload.conversationId === 'string' ? payload.conversationId.trim() : ''
+  const tabId = typeof payload.tabId === 'string' ? payload.tabId.trim() : ''
+  const kind: BackgroundHostKind | null = payload.kind === 'browser' || payload.kind === 'project'
+    ? payload.kind
+    : null
+  if (!conversationId || !tabId || !kind) return
+
+  const specs = [...backgroundHostSpecs.value.values()]
+    .filter(spec => spec.conversationId === conversationId && spec.kind === kind)
+  const hosts = [...backgroundHosts.value.values()]
+    .filter(host => host.conversationId === conversationId && host.kind === kind)
+  const title = cleanOptionalString(payload.title)
+  const projectId = cleanOptionalString(payload.projectId)
+  const comparableUrl = normalizeComparablePageUrl(payload.url)
+
+  let spec: BackgroundHostSpec | null = null
+  const hostByTab = hosts.find(entry => entry.tabId === tabId)
+  if (hostByTab) spec = findBackgroundHostSpecFor(hostByTab)
+  if (!spec) spec = specs.find(entry => entry.tabId === tabId) || null
+
+  if (!spec && projectId) {
+    const host = hosts.find(entry => entry.projectId === projectId)
+    spec = host ? findBackgroundHostSpecFor(host) : null
+    if (!spec) spec = specs.find(entry => entry.projectId === projectId) || null
+  }
+
+  if (!spec && comparableUrl) {
+    const host = hosts.find(entry => normalizeComparablePageUrl(entry.url) === comparableUrl)
+    spec = host ? findBackgroundHostSpecFor(host) : null
+    if (!spec) {
+      spec = specs.find(entry => normalizeComparablePageUrl(entry.url) === comparableUrl) || null
+    }
+  }
+
+  if (!spec) {
+    spec = getOrCreateBackgroundHostSpec({
+      conversationId,
+      kind,
+      title: payload.title,
+      url: payload.url,
+      projectId: payload.projectId,
+      tabId
+    })
+  }
+  if (!spec) return
+
+  spec.tabId = tabId
+  if (title) spec.title = title
+
+  if (conversationId === chatCurrentConversationId.value) {
+    removeBackgroundHostsForConversation(conversationId)
+    return
+  }
+
+  const host = materializeBackgroundHost(spec)
+  host.tabId = tabId
+  if (title) host.title = title
+  if (host.kind === 'project' && !host.url && host.error) {
+    host.error = null
+    void startBackgroundProjectHost(host.id)
+  }
+}
+
+function handleBackgroundWorkspaceTabClosed (payload: BackgroundWorkspaceTabClosedPayload) {
+  const conversationId = cleanOptionalString(payload.conversationId)
+  const tabId = cleanOptionalString(payload.tabId)
+  if (!conversationId || !tabId) return
+  const kind = payload.kind === 'browser' || payload.kind === 'project' ? payload.kind : undefined
+  pruneBackgroundPageTargets(conversationId, { action: 'close', tabId, ...(kind ? { kind } : {}) })
+}
+
+watch(chatCurrentConversationId, (conversationId) => {
+  if (conversationId) removeBackgroundHostsForConversation(conversationId)
+})
+
+watch(
+  [chatCurrentConversationId, workspacePageSurface, activePageSurface, currentView],
+  recordLastPageSurface,
+  { immediate: true }
+)
+
+async function executePageAutomationOnHandle (
+  handle: BrowserAutomationViewHandle,
+  request: PageAutomationRequestEnvelope['request']
+): Promise<PageAutomationRendererResult> {
+  if (request.type === 'snapshot') {
+    if (request.mode === 'article') {
+      if (!handle.captureArticleSnapshot) throw new Error('Article extraction is unavailable for this page surface.')
+      return await handle.captureArticleSnapshot()
+    }
+    if (request.mode === 'search_results') {
+      if (!handle.captureSearchResults) throw new Error('Search-result extraction is unavailable for this page surface.')
+      return await handle.captureSearchResults()
+    }
+    return await handle.captureAutomationSnapshot()
+  }
+
+  if (request.type === 'screenshot') {
+    if (!handle.captureScreenshot) throw new Error('Page screenshots are unavailable for this page surface.')
+    return await handle.captureScreenshot({
+      fullPage: request.fullPage,
+      maxWidth: request.maxWidth,
+      format: request.format,
+      quality: request.quality,
+      timeoutMs: request.timeoutMs
+    })
+  }
+
+  if (request.type === 'diagnostics') {
+    if (!handle.captureDiagnostics) throw new Error('Page diagnostics are unavailable for this page surface.')
+    return await handle.captureDiagnostics({ clear: request.clear })
+  }
+
+  return await handle.runAutomationAction(request.action)
+}
+
+async function handleBackgroundPageAutomationRequest (
+  payload: PageAutomationRequestEnvelope,
+  conversationId: string,
+  respond: (response: PageAutomationResponseEnvelope) => void
+) {
   let response: PageAutomationResponseEnvelope
   try {
-    const handle = getActiveBrowserAutomationHandle()
-    if (!handle) {
-      throw new Error(t('appShell.pageAutomationNoActivePage'))
+    const enqueuedAt = Date.now()
+    const requestedTabId = typeof payload.tabId === 'string' ? payload.tabId.trim() : ''
+    let target = resolveBackgroundAutomationTarget(conversationId, requestedTabId)
+    if (!target) {
+      const lastSurfaceSpec = getOrCreateBackgroundHostSpecFromLastSurface(conversationId, requestedTabId)
+      if (lastSurfaceSpec) {
+        target = { spec: lastSurfaceSpec, host: materializeBackgroundHost(lastSurfaceSpec) }
+      }
+    }
+    if (!target) {
+      if (requestedTabId) {
+        throw new Error(`page_tools_background_tab_missing: No background page host matches tab_id "${requestedTabId}" in this conversation. Call manage_workspace_tabs(action="list") for current tab ids, or reopen the page with open_workspace_tab / open_project_app in this conversation. Do not use chrome/playwright MCP as a workaround.`)
+      }
+      throw new Error('page_tools_background_host_missing: No background page host is open for this conversation. Call open_workspace_tab(kind="browser") or open_workspace_tab(kind="project") / open_project_app in this conversation first. Do not use chrome/playwright MCP as a workaround.')
     }
 
-    let result: PageAutomationRendererResult
-    if (payload.request.type === 'snapshot') {
-      result = payload.request.mode === 'article' && handle.captureArticleSnapshot
-        ? await handle.captureArticleSnapshot()
-        : await handle.captureAutomationSnapshot()
-    } else {
-      result = await handle.runAutomationAction(payload.request.action)
-    }
+    const backgroundTarget = target
+    const queueKey = `bg:${conversationId}:${backgroundTarget.host.id}`
+    const userTimeoutMs = extractUserTimeoutMs(payload.request)
+    const result = await enqueuePageAutomation(
+      queueKey,
+      enqueuedAt,
+      userTimeoutMs,
+      async (budget) => {
+      let host = backgroundHosts.value.get(backgroundTarget.host.id)
+      if (!host) host = materializeBackgroundHost(backgroundTarget.spec)
+      if (host.error) throw new Error(host.error)
+
+      const handle = await waitForBackgroundHostHandle(host.id, budget.remainingMs())
+      const currentHost = backgroundHosts.value.get(host.id)
+      if (!currentHost) {
+        throw new Error('page_tools_background_host_missing: The background page host was removed before the page action could run. Call open_workspace_tab or open_project_app in this conversation first.')
+      }
+      if (currentHost.error) throw new Error(currentHost.error)
+
+      const recentlyRequested = Date.now() - lastWorkspaceTabRequestAt < 10000
+      const readyTimeoutMs = Math.min(
+        currentHost.kind === 'project' || recentlyRequested ? PAGE_AUTOMATION_READY_WAIT_MS : 6000,
+        budget.remainingMs()
+      )
+      const readSurfaceUrl = () => backgroundHosts.value.get(currentHost.id)?.url || null
+      const readExpectedUrl = () => {
+        if (currentHost.kind !== 'project') return readSurfaceUrl()
+        const liveUrl = handle.getURL?.()
+        return liveUrl && liveUrl !== 'about:blank' ? liveUrl : readSurfaceUrl()
+      }
+
+      await waitForPageReady(handle, readExpectedUrl, readyTimeoutMs)
+
+      const finalUrl = handle.getURL?.() || readExpectedUrl() || null
+      if (currentHost.kind === 'project') {
+        if (!isLoopbackProjectUrl(finalUrl)) {
+          throw new Error(`AI page tools can only operate a project page while it stays on the project's loopback URL (http(s)://localhost, 127.0.0.1, or [::1]). The project page navigated to ${finalUrl || 'an unknown URL'}. Use a project surface for local apps and do not operate a project tab after it navigated elsewhere.`)
+        }
+      } else if (finalUrl && finalUrl !== 'about:blank') {
+        const validation = validateAiBrowserTarget(finalUrl)
+        if (!validation.ok) {
+          throw new Error(`AI page tools cannot read or operate local/private or unsupported pages in a general browser tab (${validation.reason}) Use open_workspace_tab(kind="project") for local app pages.`)
+        }
+      }
+
+      return await executePageAutomationOnHandle(handle, payload.request)
+    })
+
+
+
 
     response = {
       requestId: payload.requestId,
@@ -469,12 +1283,189 @@ async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelo
   respond(response)
 }
 
+async function handlePageAutomationRequest (payload: PageAutomationRequestEnvelope) {
+  const respond = window.electronAPI?.respondPageAutomationRequest
+  if (!respond) return
+
+  const requestedConversationId = typeof payload.conversationId === 'string'
+    ? payload.conversationId.trim()
+    : ''
+  if (requestedConversationId && requestedConversationId !== chatCurrentConversationId.value) {
+    await handleBackgroundPageAutomationRequest(payload, requestedConversationId, respond)
+    return
+  }
+  if (!requestedConversationId || requestedConversationId !== chatCurrentConversationId.value) {
+    respond({
+      requestId: payload.requestId,
+      ok: false,
+      error: 'page_tools_foreground_required: Page tools are unavailable for background or unknown-conversation runs. This is a foreground/focus restriction, not a missing browser capability. Do not use chrome/playwright MCP as a workaround. Bring this conversation to the foreground (or open a page in the current foreground conversation) and retry.'
+    })
+    return
+  }
+
+  let response: PageAutomationResponseEnvelope
+  try {
+    const requestedTabId = typeof payload.tabId === 'string' ? payload.tabId.trim() : ''
+    // Capture the active workspace tab id at request time so an implicit
+    // request and an explicit request for the same tab share one queue. While
+    // the app view shows an embedded page, that page wins over any workspace
+    // tab that still reports itself as active behind it.
+    const embeddedPageActive = currentView.value === 'app'
+      && (Boolean(activePageSurface.value) || launchpadPageChatActive.value)
+    const activeWorkspaceTabId = !embeddedPageActive && workspacePageSurface.value?.appId?.startsWith('wsb-')
+      ? workspacePageSurface.value.appId.slice(4)
+      : ''
+    const targetTabId = requestedTabId || activeWorkspaceTabId
+    const foregroundHandle = targetTabId
+      ? resolveWorkspaceAutomationHandle(targetTabId)
+      : getActiveBrowserAutomationHandle()
+    if (!foregroundHandle && (Boolean(targetTabId) || !embeddedPageActive)) {
+      const backgroundTarget = resolveBackgroundAutomationTarget(requestedConversationId, targetTabId)
+      const lastSurfaceSpec = backgroundTarget
+        ? null
+        : getOrCreateBackgroundHostSpecFromLastSurface(requestedConversationId, targetTabId)
+      if (backgroundTarget || lastSurfaceSpec) {
+        await handleBackgroundPageAutomationRequest(payload, requestedConversationId, respond)
+        return
+      }
+    }
+    const queueKey = targetTabId || 'active'
+    const enqueuedAt = Date.now()
+    const userTimeoutMs = extractUserTimeoutMs(payload.request)
+    const result = await enqueuePageAutomation(
+      queueKey,
+      enqueuedAt,
+      userTimeoutMs,
+      async (budget) => {
+      const handle = await resolvePageAutomationHandle(targetTabId || undefined, budget.remainingMs())
+      if (!handle) {
+        throw new Error(`${t('appShell.pageAutomationNoActivePage')} Open page surfaces: ${describeAutomationTargets()}. Use open_workspace_tab or manage_workspace_tabs to activate one first.`)
+      }
+
+      if (targetTabId) {
+        const surface = workspaceBrowserSurfaces.get(targetTabId)
+        if (!surface?.handle || (surface.handle as unknown as BrowserAutomationViewHandle) !== handle) {
+          throw new Error(`The requested tab_id "${targetTabId}" is no longer the mounted automation surface. Call manage_workspace_tabs(action="list") and retry with a current tab_id.`)
+        }
+      }
+
+      const embeddedSurface = targetTabId || currentView.value !== 'app'
+        ? null
+        : activeEmbeddedPageSurface.value
+      const targetSurface = targetTabId
+        ? workspaceBrowserSurfaces.get(targetTabId)
+        : embeddedSurface || workspacePageSurface.value
+      const isProject = targetSurface?.kind === 'project'
+      const recentlyRequested = Date.now() - lastWorkspaceTabRequestAt < 10000
+      const preferredReadyTimeoutMs = isProject || recentlyRequested ? PAGE_AUTOMATION_READY_WAIT_MS : 6000
+      const readyTimeoutMs = Math.min(preferredReadyTimeoutMs, budget.remainingMs())
+      const readSurfaceUrl = () => {
+        if (targetTabId) return workspaceBrowserSurfaces.get(targetTabId)?.url || null
+        const embeddedTarget = currentView.value === 'app' ? activeEmbeddedPageSurface.value : null
+        if (embeddedTarget) return embeddedTarget.url || null
+        return workspacePageSurface.value?.url || activePageAutomationContext.value?.url || null
+      }
+      const readExpectedUrl = () => {
+        // Project tabs may redirect to /login or an in-app route. Matching the
+        // pinned root URL would wait out the readiness budget even though the
+        // page is healthy; treat the live URL as ready and let the loopback
+        // guard below decide whether the final page is still safe.
+        if (!isProject) return readSurfaceUrl()
+        const liveUrl = handle.getURL?.()
+        return liveUrl && liveUrl !== 'about:blank' ? liveUrl : readSurfaceUrl()
+      }
+
+      await waitForPageReady(handle, readExpectedUrl, readyTimeoutMs)
+
+      // Re-check the final URL after readiness. General browser tabs must stay
+      // on public targets; project tabs may use loopback, but only while they
+      // still point at the project's local app.
+      const targetKind = targetSurface?.kind || activePageAutomationContext.value?.kind
+      const finalUrl = handle.getURL?.() || readExpectedUrl() || null
+      if (targetKind === 'project') {
+        if (!isLoopbackProjectUrl(finalUrl)) {
+          throw new Error(`AI page tools can only operate a project page while it stays on the project's loopback URL (http(s)://localhost, 127.0.0.1, or [::1]). The project page navigated to ${finalUrl || 'an unknown URL'}. Use a project surface for local apps and do not operate a project tab after it navigated elsewhere.`)
+        }
+      } else if (finalUrl && finalUrl !== 'about:blank') {
+        const validation = validateAiBrowserTarget(finalUrl)
+        if (!validation.ok) {
+          throw new Error(`AI page tools cannot read or operate local/private or unsupported pages in a general browser tab (${validation.reason}) Use open_workspace_tab(kind="project") for local app pages.`)
+        }
+      }
+
+      return await executePageAutomationOnHandle(handle, payload.request)
+
+    })
+
+
+
+
+    response = {
+      requestId: payload.requestId,
+      ok: true,
+      result
+    }
+  } catch (error) {
+    response = {
+      requestId: payload.requestId,
+      ok: false,
+      error: error instanceof Error ? error.message : t('appShell.pageAutomationFailed')
+    }
+  }
+
+  respond(response)
+}
+
+/**
+ * Hydrates page host specs from a conversation's tab list. Tabs created before
+ * the background host feature (or before this window started tracking them)
+ * still appear in `manage_workspace_tabs`; listing them must create the specs
+ * the page tools resolve against. The active page tab is materialized eagerly
+ * unless the current conversation already has a mounted workspace surface.
+ */
+function hydrateBackgroundHostsFromTabList (
+  conversationId: string,
+  tabs: WorkspaceTabSummary[]
+): void {
+  const isCurrentConversation = conversationId === chatCurrentConversationId.value
+  const visibleWorkspaceSurface = workspacePageSurface.value
+  const hasVisibleWorkspaceSurface = Boolean(
+    visibleWorkspaceSurface
+    && visibleWorkspaceSurface.conversationId === conversationId
+    && visibleWorkspaceSurface.handle
+  )
+  for (const tab of tabs) {
+    if (tab.kind !== 'browser' && tab.kind !== 'project') continue
+    const spec = getOrCreateBackgroundHostSpec({
+      conversationId,
+      kind: tab.kind,
+      title: tab.title,
+      url: tab.url,
+      projectId: tab.projectId,
+      tabId: tab.id
+    })
+    if (!spec) continue
+    if (tab.active && (!isCurrentConversation || !hasVisibleWorkspaceSurface)) {
+      materializeBackgroundHost(spec)
+    }
+  }
+}
+
 /** Chat shell answered an AI tab control request; ship it back to the main process. */
 function handleWorkspaceTabControlResult (response: WorkspaceTabControlResponseEnvelope) {
+  // Capture the request context before clearing the seq-bumped request.
+  const requestedConversationId = cleanOptionalString(
+    workspaceTabControlRequest.value?.envelope.request.conversationId
+  )
+  const conversationId = requestedConversationId || chatCurrentConversationId.value
+  const tabs = response.result?.tabs
   window.electronAPI?.resolveWorkspaceTabControl(response)
   // The result doubles as the consumed signal for the seq-bumped request.
   if (workspaceTabControlRequest.value?.envelope.requestId === response.requestId) {
     workspaceTabControlRequest.value = null
+  }
+  if (conversationId && Array.isArray(tabs)) {
+    hydrateBackgroundHostsFromTabList(conversationId, tabs)
   }
 }
 
@@ -671,7 +1662,7 @@ function optimizeProjectInChat (project: Record<string, unknown>) {
 }
 
 function openPageChatOverlay () {
-  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value || !activeBrowserPageSurface.value) return
+  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value || !activeEmbeddedPageSurface.value) return
   // Explicit user intent: AI requests should target this launchpad page.
   launchpadPageChatActive.value = true
   appChatPresentation.value = 'overlay'
@@ -679,7 +1670,7 @@ function openPageChatOverlay () {
 }
 
 function collapsePageChatToBubble () {
-  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value || !activeBrowserPageSurface.value) return
+  if (currentView.value !== 'app' || !activeEmbeddedProjectId.value || !activeEmbeddedPageSurface.value) return
   appChatPresentation.value = 'bubble'
 }
 
@@ -723,6 +1714,7 @@ function toggleLaunchpad () {
 async function openEmbeddedProject (projectId: string) {
   if (!window.electronAPI) return
 
+  embeddedPageSurfaceConversationId = chatCurrentConversationId.value
   showLaunchpad.value = false
   appChatPresentation.value = 'bubble'
   currentView.value = 'app'
@@ -748,7 +1740,6 @@ async function openEmbeddedProject (projectId: string) {
       url: '',
       loading: true,
       kind: 'project',
-      sandbox: PROJECT_IFRAME_SANDBOX,
       projectPort: undefined
     })
   }
@@ -804,6 +1795,7 @@ function openWebLinkInApp (rawUrl: string, options: BrowserAppOpenOptions = {}) 
   const normalizedUrl = normalizeWebUrlInput(rawUrl)
   if (!normalizedUrl) return
 
+  embeddedPageSurfaceConversationId = chatCurrentConversationId.value
   const appId = options.appId || createWebAppId(normalizedUrl)
   const existingBrowserApp = browserApps.value.get(appId)
   const reuseExistingMetadata = normalizeWebUrlInput(existingBrowserApp?.url || '') === normalizedUrl
@@ -827,8 +1819,7 @@ function openWebLinkInApp (rawUrl: string, options: BrowserAppOpenOptions = {}) 
   embeddedApps.value.set(appId, {
     url: normalizedUrl,
     loading: false,
-    kind: 'browser',
-    sandbox: BROWSER_IFRAME_SANDBOX
+    kind: 'browser'
   })
   activeEmbeddedProjectId.value = appId
   appChatPresentation.value = 'bubble'
@@ -838,6 +1829,8 @@ function openWebLinkInApp (rawUrl: string, options: BrowserAppOpenOptions = {}) 
 }
 
 function handleBrowserAppStateChange (payload: { appId: string; url: string; title: string; icon?: string }) {
+  // Also fires for embedded project pages; refresh their live surface URL.
+  embeddedAutomationRevision.value += 1
   const existingApp = browserApps.value.get(payload.appId)
   if (!existingApp) return
 
@@ -966,6 +1959,10 @@ async function openProjectInShell (projectId: string, mode: 'embed' | 'window' =
     return
   }
 
+  // This app page is now the AI's target: make an immediate read_current_page
+  // wait for the embedded surface to mount instead of hitting a workspace tab.
+  lastWorkspaceTabRequestAt = Date.now()
+  launchpadPageChatActive.value = true
   await openEmbeddedProject(projectId)
 }
 
@@ -973,6 +1970,7 @@ async function switchToApp (app: RunningApp) {
   if (app.kind === 'browser') {
     // Already open — just focus it. Otherwise launch the pinned shortcut.
     if (embeddedApps.value.has(app.id)) {
+      embeddedPageSurfaceConversationId = chatCurrentConversationId.value
       showLaunchpad.value = false
       appChatPresentation.value = 'bubble'
       currentView.value = 'app'
@@ -1382,8 +2380,15 @@ onMounted(async () => {
   }
 
   if (window.electronAPI?.onProjectOpenInShell) {
-    projectOpenInShellCleanup = window.electronAPI.onProjectOpenInShell(({ projectId, mode }) => {
-      void openProjectInShell(projectId, mode === 'window' ? 'window' : 'embed')
+    projectOpenInShellCleanup = window.electronAPI.onProjectOpenInShell((event) => {
+      const openEvent = event as { projectId: string; mode?: 'embed' | 'window'; conversationId?: string }
+      const conversationId = typeof openEvent.conversationId === 'string' ? openEvent.conversationId.trim() : ''
+      if (conversationId && conversationId !== chatCurrentConversationId.value) {
+        lastWorkspaceTabRequestAt = Date.now()
+        handleBackgroundWorkspaceOpenRequest(conversationId, 'project', { projectId: openEvent.projectId })
+        return
+      }
+      void openProjectInShell(openEvent.projectId, openEvent.mode === 'window' ? 'window' : 'embed')
     })
   }
 
@@ -1404,6 +2409,9 @@ onMounted(async () => {
 
   if (window.electronAPI?.onWorkspaceOpenTab) {
     workspaceOpenTabCleanup = window.electronAPI.onWorkspaceOpenTab(({ kind, payload, conversationId }) => {
+      if (conversationId && conversationId !== chatCurrentConversationId.value) {
+        handleBackgroundWorkspaceOpenRequest(conversationId, kind, payload)
+      }
       // Only a request for the displayed conversation may yank the user into
       // the chat view; background conversations get their tab stashed into
       // their own workspace instead (handled by the chat shell).
@@ -1414,6 +2422,7 @@ onMounted(async () => {
         launchpadPageChatActive.value = false
       }
       workspaceTabRequestSeq += 1
+      lastWorkspaceTabRequestAt = Date.now()
       workspaceTabRequest.value = { kind, payload, conversationId, seq: workspaceTabRequestSeq }
     })
   }
@@ -1424,6 +2433,7 @@ onMounted(async () => {
       // yank the user out of the current view. Background-conversation
       // requests neither switch views nor steal focus.
       const conversationId = envelope.request.conversationId
+      if (envelope.request.action !== 'list') lastWorkspaceTabRequestAt = Date.now()
       if (envelope.request.action !== 'list' && (!conversationId || conversationId === chatCurrentConversationId.value)) {
         if (currentView.value !== 'chat') openChat()
         launchpadPageChatActive.value = false
@@ -1482,6 +2492,21 @@ onUnmounted(() => {
     <ProjectWindowShell v-if="standaloneProjectId" :project-id="standaloneProjectId" />
 
     <template v-else>
+      <div class="background-page-hosts" aria-hidden="true" inert>
+        <div v-for="host in backgroundHostRenderList" :key="host.id" class="background-page-host">
+          <BrowserWebView
+            :ref="(instance) => setBackgroundHostHandle(host.id, instance)"
+            :app-id="host.id"
+            :url="host.url"
+            :title="host.title"
+            :hide-bar="true"
+            :allow-popups="false"
+            :background-host="true"
+            @state-change="handleBackgroundHostStateChange(host.id, $event)"
+          />
+        </div>
+      </div>
+
       <TitleBar
         :view-label="titleViewLabel"
         :context-title="titleContextTitle"
@@ -1515,21 +2540,14 @@ onUnmounted(() => {
                   <span class="embedded-spinner">⏳</span>
                   <p>{{ $t('appShell.embeddedAppStarting') }}</p>
                 </div>
-                <iframe
-                  v-else-if="appState.kind === 'project' && appState.url"
-                  :src="appState.url"
-                  class="embedded-frame"
-                  :sandbox="appState.sandbox"
-                  :allow="PROJECT_IFRAME_ALLOW"
-                  allowfullscreen
-                ></iframe>
                 <BrowserWebView
                   :ref="(instance) => setBrowserAutomationHandle(appId, instance)"
-                  v-else-if="appState.kind === 'browser' && appState.url"
+                  v-else-if="appState.url"
                   :app-id="appId"
                   :url="appState.url"
-                  :title="browserApps.get(appId)?.name || appId"
-                  :icon="browserApps.get(appId)?.icon"
+                  :title="appState.kind === 'project' ? (runningApps.get(appId)?.name || appId) : (browserApps.get(appId)?.name || appId)"
+                  :icon="appState.kind === 'project' ? runningApps.get(appId)?.icon : browserApps.get(appId)?.icon"
+                  :hide-bar="appState.kind === 'project'"
                   class="embedded-browser-view"
                   @state-change="handleBrowserAppStateChange"
                   @context-menu="showBrowserAppCtx"
@@ -1547,11 +2565,11 @@ onUnmounted(() => {
 
           <div v-show="shouldMountChatShell" :class="['chat-shell', `chat-shell-${chatShellMode}`]">
             <div class="chat-shell-body">
-              <div v-if="chatShellMode === 'overlay' && activeBrowserPageSurface" class="chat-overlay-banner">
+              <div v-if="chatShellMode === 'overlay' && activeEmbeddedPageSurface" class="chat-overlay-banner">
                 <div class="chat-overlay-banner-copy">
                   <span class="chat-overlay-kicker">{{ $t('appShell.pageOperationChat') }}</span>
-                  <span class="chat-overlay-title">{{ activeBrowserPageSurface.title }}</span>
-                  <span class="chat-overlay-subtitle">{{ activeBrowserPageSurface.origin || activeBrowserPageSurface.url || $t('appShell.currentAppPage') }}</span>
+                  <span class="chat-overlay-title">{{ activeEmbeddedPageSurface.title }}</span>
+                  <span class="chat-overlay-subtitle">{{ activeEmbeddedPageSurface.origin || activeEmbeddedPageSurface.url || $t('appShell.currentAppPage') }}</span>
                 </div>
                 <button class="chat-overlay-collapse-btn" type="button" @click="collapsePageChatToBubble">{{ $t('appShell.collapseToBubble') }}</button>
               </div>
@@ -1566,6 +2584,8 @@ onUnmounted(() => {
                   :workspace-draft-request="workspaceDraftRequest"
                   @contextConsumed="chatProjectContext = null"
                   @current-conversation-change="chatCurrentConversationId = $event"
+                  @background-workspace-tab-opened="handleBackgroundWorkspaceTabOpened"
+                  @background-workspace-tab-closed="handleBackgroundWorkspaceTabClosed"
                   @workspace-tab-request-consumed="workspaceTabRequest = null"
                   @workspace-tab-control-result="handleWorkspaceTabControlResult"
                   @workspace-draft-request-consumed="workspaceDraftRequest = null"
@@ -1580,8 +2600,8 @@ onUnmounted(() => {
           </div>
 
           <FloatingTaskBubble
-            v-if="showAppChatBubble && activeBrowserPageSurface"
-            :is-loading="chatSurfaceStatus.isLoading || activeBrowserPageSurface.loading"
+            v-if="showAppChatBubble && activeEmbeddedPageSurface"
+            :is-loading="chatSurfaceStatus.isLoading || activeEmbeddedPageSurface.loading"
             :pending-auth-count="chatSurfaceStatus.pendingAuthCount"
             :active-todo-count="chatSurfaceStatus.activeTodoCount"
             @open="openPageChatOverlay"
@@ -1693,6 +2713,22 @@ onUnmounted(() => {
 
 .app-root-standalone {
   border-radius: 0;
+}
+
+.background-page-hosts {
+  position: fixed;
+  left: -20000px;
+  top: 0;
+  width: 1280px;
+  height: 800px;
+  opacity: 0.01;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.background-page-host {
+  width: 1280px;
+  height: 800px;
 }
 
 .app-layout {
@@ -1889,13 +2925,6 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.embedded-frame {
-  width: 100%;
-  height: 100%;
-  border: none;
-  background: #fff;
 }
 
 .embedded-loading {

@@ -1,0 +1,2 @@
+[!] RollupError: Could not resolve "../components/Missing" from "src/app/App.tsx"
+file: /workspace/src/app/App.tsx

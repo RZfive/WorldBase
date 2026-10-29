@@ -57,3 +57,6 @@ apps/mobile/android/app/src/main/jniLibs/
 # Runtime data (user projects)
 projects/
 snapshots/
+
+# fangyang (放羊) task files and manifests
+.fangyang/

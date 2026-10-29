@@ -1,0 +1,2 @@
+src/App.tsx:3:10  error  'formatCount' is defined but never used  no-unused-vars
+src/components/Counter.tsx:2:1  error  Unable to resolve path to module './Button'  import/no-unresolved

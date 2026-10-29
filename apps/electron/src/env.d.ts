@@ -10,6 +10,47 @@ type AppUpdateState = import('./shared/app-update-types.js').AppUpdateState
 type AppUpdateWebsiteKind = import('./shared/app-update-types.js').AppUpdateWebsiteKind
 type PageAutomationRequestEnvelope = import('./shared/page-automation-types.js').PageAutomationRequestEnvelope
 type PageAutomationResponseEnvelope = import('./shared/page-automation-types.js').PageAutomationResponseEnvelope
+type BrowserPageScreenshotRequest = import('./shared/page-automation-types.js').BrowserPageScreenshotRequest
+type BrowserPageScreenshotResult = import('./shared/page-automation-types.js').BrowserPageScreenshotResult
+type BrowserPageKeyDispatchRequest = import('./shared/page-automation-types.js').BrowserPageKeyDispatchRequest
+type BrowserPageKeyDispatchResult = import('./shared/page-automation-types.js').BrowserPageKeyDispatchResult
+type BrowserAutomationNetworkEntry = import('./shared/page-automation-types.js').BrowserAutomationNetworkEntry
+
+interface BrowserPageEmulationViewportRequest {
+  width: number
+  height: number
+  deviceScaleFactor?: number
+  mobile?: boolean
+}
+
+interface BrowserPageEmulationRequest {
+  webContentsId: number
+  media?: 'screen' | 'print'
+  colorScheme?: 'light' | 'dark' | 'no-preference'
+  reducedMotion?: 'reduce' | 'no-preference'
+  userAgent?: string
+  viewport?: BrowserPageEmulationViewportRequest
+  reset?: boolean
+  timeoutMs?: number
+}
+
+
+interface BrowserPageEmulationResult {
+  ok: true
+  emulated: {
+    media?: string
+    colorScheme?: string
+    reducedMotion?: string
+    userAgent?: string | null
+    viewport?: {
+      width: number
+      height: number
+      deviceScaleFactor: number
+      mobile: boolean
+    }
+  }
+}
+
 type WorkspaceTabControlRequest = import('./shared/workspace-control-types.js').WorkspaceTabControlRequest
 type WorkspaceTabControlRequestEnvelope = import('./shared/workspace-control-types.js').WorkspaceTabControlRequestEnvelope
 type WorkspaceTabControlResponseEnvelope = import('./shared/workspace-control-types.js').WorkspaceTabControlResponseEnvelope
@@ -68,7 +109,7 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_session_state' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'group_board' | 'group_direct_reply' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_session_state' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'group_board' | 'group_direct_reply' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'coding_status' | 'coding_diff' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
   /** Compact argument summary for tool_start rows (built host-side). */
@@ -76,6 +117,8 @@ interface StreamEvent {
   message?: { role: string; content: MessageContent }
   thinking?: string
   error?: string
+  codingStatus?: import('./shared/coding-status-types.js').CodingStatus
+  codingDiff?: import('./shared/coding-status-types.js').CodingDiffState
   stage?: string
   detail?: string
   items?: TodoItem[]
@@ -1130,7 +1173,7 @@ interface DocumentFileChangedDTO {
 interface ElectronAPI {
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext) => Promise<{ ok: boolean }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext, codingWorkspaceRoot?: string) => Promise<{ ok: boolean }>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
@@ -1138,6 +1181,10 @@ interface ElectronAPI {
   onPageAutomationRequest: (callback: (payload: PageAutomationRequestEnvelope) => void) => () => void
   onBrowserPageContextMenu: (callback: (payload: BrowserPageContextMenuPayload) => void) => () => void
   respondPageAutomationRequest: (payload: PageAutomationResponseEnvelope) => void
+  captureBrowserPageScreenshot: (request: BrowserPageScreenshotRequest) => Promise<BrowserPageScreenshotResult>
+  dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => Promise<BrowserPageKeyDispatchResult>
+  getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => Promise<BrowserAutomationNetworkEntry[]>
+  emulateBrowserPage: (request: BrowserPageEmulationRequest) => Promise<BrowserPageEmulationResult>
   getAboutInfo: () => Promise<AppAboutInfo>
   getAppUpdateState: () => Promise<AppUpdateState>
   getAppUpdateConfig: () => Promise<AppUpdateConfig>

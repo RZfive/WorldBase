@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell, systemPreferences, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, nativeTheme, session, shell, systemPreferences, webContents, type Debugger as ElectronDebugger, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { validateConversationMetadata, type ConversationMetadataPatch } from '../../src/shared/conversation-metadata.js'
 import { createComputerUsePermissionService } from './permissions/computer-use.js'
@@ -29,7 +29,7 @@ import type { UsageRecord, UsageSummary } from '../../src/main/settings/usage-st
 import type { LongTermGoalSaveInput, LongTermGoalStreamEvent } from '../../src/shared/long-term-goal-types.js'
 import type { MCPServerConfig } from '../../src/main/settings/settings-store.js'
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateWebsiteKind } from '../../src/shared/app-update-types.js'
-import type { ActivePageAutomationContext, PageAutomationResponseEnvelope } from '../../src/shared/page-automation-types.js'
+import type { ActivePageAutomationContext, BrowserAutomationNetworkEntry, BrowserPageKeyDispatchRequest, BrowserPageKeyDispatchResult, BrowserPageScreenshotRequest, BrowserPageScreenshotResult, PageAutomationResponseEnvelope } from '../../src/shared/page-automation-types.js'
 import type { WorkspaceTabControlResponseEnvelope } from '../../src/shared/workspace-control-types.js'
 import type { ActiveTerminalContext } from '../../src/shared/terminal-types.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, ChannelEvent, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
@@ -39,11 +39,12 @@ import { assertFolderWorkspaceRoot, getFolderWorkspaceRootName, listFolderWorksp
 import { calculateDocumentSha256, exportDocumentCopy, readDocumentEditImage } from '../../src/main/document-edit/document-edit-service.js'
 import { LAN_SERVER_PORT } from '../../src/main/constants.js'
 import { mainState, activeChatSessions, pendingPageAutomationRequests, pendingWorkspaceTabControlRequests, projectWindows, type EnsureWindowWidthOptions } from './state.js'
-import { MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES, MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES, MAX_UPLOADED_OFFICE_CONTENT_LENGTH } from './constants.js'
+import { MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES, MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES, MAX_UPLOADED_OFFICE_CONTENT_LENGTH, PAGE_SCREENSHOT_MAX_DIMENSION } from './constants.js'
 import { readUploadedAttachmentFromBuffer, readUploadedAttachmentFromPath, type UploadedAttachmentBufferPayload } from './media/attachments.js'
 import { ensureDocumentRenderPreview } from './media/document-preview.js'
 import { DocumentFileWatcher } from './document-file-watcher.js'
 import { applyActiveProviderToAiEngine, notifyAgentWorkspaceChanged, notifyAiTaskStatus, refreshProviderReasoningMetadata, resolveAgentRuntimeContext, resolveMemoryEmbeddingRuntimeConfig, resolveProviderConfig } from './ai/agent-context.js'
+import { toRendererStreamEvent } from './ai/stream-event-contract.js'
 import { startSelectedRustHarness } from './ai/selected-execution-engine.js'
 import type { JsonRpcResult } from './rust-harness-client.js'
 import { getConversationTitleFromMessages, getLastUserMessageText, getMessageText } from './chat-message-utils.js'
@@ -100,6 +101,25 @@ function buildFolderWorkspacePromptSection (workspaceRoot: string | null): strin
   ].join('\n')
 }
 
+/**
+ * Neutral workspace context for AI-decided work modes. It deliberately does
+ * not prescribe code-edit tools: the model first calls select_work_mode, then
+ * the activated mode's prompt supplies the concrete tool rules.
+ */
+function buildWorkspaceRootPromptSection (workspaceRoot: string | null): string | null {
+  if (!workspaceRoot) return null
+  const rootName = getFolderWorkspaceRootName(workspaceRoot)
+  return [
+    '## Conversation workspace',
+    `The user selected a local workspace for this conversation: ${rootName}`,
+    `Absolute workspace path: ${workspaceRoot}`,
+    '- Inspect with list_workspace_files, read_workspace_file, grep_workspace, and glob_workspace.',
+    '- Use relative paths inside the selected workspace. Do not use absolute paths as tool arguments.',
+    '- Before the first file/project mutation, choose a work mode with `select_work_mode`.',
+    '- Coding edits use coding tools; Office/PDF documents go through doc_draft. Never write Office/PDF directly.'
+  ].join('\n')
+}
+
 async function resolveFolderWorkspaceRootForRequest (workspaceRoot?: string | null): Promise<string | null> {
   const requestedRoot = typeof workspaceRoot === 'string' ? workspaceRoot.trim() : ''
   if (!requestedRoot) return null
@@ -113,6 +133,744 @@ async function resolveFolderWorkspaceRootForRequest (workspaceRoot?: string | nu
 
 function stringFromUnknown (value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
+}
+
+interface PageScreenshotLayoutMetrics {
+  cssLayoutViewport?: { clientWidth?: number; clientHeight?: number }
+  layoutViewport?: { clientWidth?: number; clientHeight?: number }
+  cssContentSize?: { width?: number; height?: number }
+  contentSize?: { width?: number; height?: number }
+}
+
+function positivePixelValue (value: unknown): number | null {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return null
+  return Math.max(1, Math.round(numeric))
+}
+
+function resolveDevicePixelRatio (value: unknown): number {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return 1
+  return Math.min(Math.max(numeric, 0.1), 8)
+}
+
+const PAGE_SCREENSHOT_MAX_PIXELS = 16_000_000
+const PAGE_DEBUGGER_ATTACH_TIMEOUT_MS = 5_000
+const PAGE_LAYOUT_METRICS_TIMEOUT_MS = 5_000
+const PAGE_DEVICE_PIXEL_RATIO_TIMEOUT_MS = 5_000
+const PAGE_SCREENSHOT_CAPTURE_TIMEOUT_MS = 15_000
+const PAGE_SCREENSHOT_DEFAULT_OPERATION_TIMEOUT_MS = 15_000
+const PAGE_SCREENSHOT_MIN_OPERATION_TIMEOUT_MS = 3_000
+const PAGE_SCREENSHOT_MAX_OPERATION_TIMEOUT_MS = 30_000
+const PAGE_SCREENSHOT_OPERATION_TIMEOUT_MS = 24_000
+const PAGE_EMULATION_COMMAND_TIMEOUT_MS = 5_000
+const PAGE_EMULATION_VERIFY_TIMEOUT_MS = 1_500
+const PAGE_EMULATION_VERIFY_SETTLE_MS = 50
+const PAGE_KEY_COMMAND_TIMEOUT_MS = 5_000
+const PAGE_KEY_OPERATION_TIMEOUT_MS = 12_000
+const PAGE_KEY_MODIFIER_ALT = 1
+const PAGE_KEY_MODIFIER_CTRL = 2
+const PAGE_KEY_MODIFIER_META = 4
+const PAGE_KEY_MODIFIER_SHIFT = 8
+const BROWSER_NETWORK_LOG_LIMIT = 200
+const BROWSER_NETWORK_LOG_MAX_GUESTS = 50
+
+interface PageCdpKeyParams {
+  key: string
+  code: string
+  windowsVirtualKeyCode: number
+  nativeVirtualKeyCode: number
+  text?: string
+  unmodifiedText?: string
+}
+
+const PAGE_CDP_KEY_ALIASES: Record<string, string> = {
+  esc: 'Escape',
+  escape: 'Escape',
+  enter: 'Enter',
+  return: 'Enter',
+  tab: 'Tab',
+  space: 'Space',
+  spacebar: 'Space',
+  backspace: 'Backspace',
+  delete: 'Delete',
+  del: 'Delete',
+  arrowdown: 'ArrowDown',
+  down: 'ArrowDown',
+  arrowup: 'ArrowUp',
+  up: 'ArrowUp',
+  arrowleft: 'ArrowLeft',
+  left: 'ArrowLeft',
+  arrowright: 'ArrowRight',
+  right: 'ArrowRight'
+}
+
+const PAGE_CDP_SPECIAL_KEYS: Record<string, Omit<PageCdpKeyParams, 'nativeVirtualKeyCode'>> = {
+  Escape: { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 },
+  Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r', unmodifiedText: '\r' },
+  Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
+  Space: { key: ' ', code: 'Space', windowsVirtualKeyCode: 32, text: ' ' },
+  Backspace: { key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 },
+  Delete: { key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 },
+  ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 },
+  ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', windowsVirtualKeyCode: 38 },
+  ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 },
+  ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 }
+}
+
+const PAGE_CDP_DIGIT_TEXT: Record<string, string> = {
+  '0': ')', '1': '!', '2': '@', '3': '#', '4': '$',
+  '5': '%', '6': '^', '7': '&', '8': '*', '9': '('
+}
+
+function pageKeyModifierMask (modifiers: unknown): number {
+  if (!Array.isArray(modifiers)) return 0
+  let mask = 0
+  for (const rawModifier of modifiers) {
+    const modifier = typeof rawModifier === 'string' ? rawModifier.trim().toLowerCase() : ''
+    if (modifier === 'alt' || modifier === 'option') mask |= PAGE_KEY_MODIFIER_ALT
+    else if (modifier === 'ctrl' || modifier === 'control') mask |= PAGE_KEY_MODIFIER_CTRL
+    else if (modifier === 'meta' || modifier === 'cmd' || modifier === 'command' || modifier === 'super' || modifier === 'win') mask |= PAGE_KEY_MODIFIER_META
+    else if (modifier === 'shift') mask |= PAGE_KEY_MODIFIER_SHIFT
+  }
+  return mask
+}
+
+function resolveCdpKeyParams (rawKey: string, modifiers: unknown): { params: PageCdpKeyParams; modifiers: number } {
+  const trimmed = rawKey.trim() || (rawKey === ' ' ? ' ' : '')
+  if (!trimmed) throw new Error('A page key is required.')
+  const modifierMask = pageKeyModifierMask(modifiers)
+  const normalized = trimmed === ' ' ? 'Space' : PAGE_CDP_KEY_ALIASES[trimmed.toLowerCase()] || trimmed
+  const special = PAGE_CDP_SPECIAL_KEYS[normalized]
+  if (special) {
+    const text = modifierMask & (PAGE_KEY_MODIFIER_ALT | PAGE_KEY_MODIFIER_CTRL | PAGE_KEY_MODIFIER_META) ? undefined : special.text
+    return {
+      modifiers: modifierMask,
+      params: {
+        key: special.key,
+        code: special.code,
+        windowsVirtualKeyCode: special.windowsVirtualKeyCode,
+        nativeVirtualKeyCode: special.windowsVirtualKeyCode,
+        ...(text ? { text } : {}),
+        ...(text && special.unmodifiedText ? { unmodifiedText: special.unmodifiedText } : {})
+      }
+    }
+  }
+
+  if (Array.from(trimmed).length !== 1) {
+    throw new Error(`Unsupported page key: ${rawKey}`)
+  }
+
+  const shift = (modifierMask & PAGE_KEY_MODIFIER_SHIFT) !== 0
+  let key = trimmed
+  let code = ''
+  let virtualKeyCode = 0
+  let text: string | undefined
+  if (/^[a-z]$/i.test(trimmed)) {
+    const upper = trimmed.toUpperCase()
+    key = shift ? upper : trimmed.toLowerCase()
+    code = `Key${upper}`
+    virtualKeyCode = upper.charCodeAt(0)
+    text = key
+  } else if (/^[0-9]$/.test(trimmed)) {
+    key = shift ? PAGE_CDP_DIGIT_TEXT[trimmed] : trimmed
+    code = `Digit${trimmed}`
+    virtualKeyCode = trimmed.charCodeAt(0)
+    text = key
+  } else {
+    virtualKeyCode = trimmed.toUpperCase().charCodeAt(0)
+    text = trimmed
+  }
+  if (modifierMask & (PAGE_KEY_MODIFIER_ALT | PAGE_KEY_MODIFIER_CTRL | PAGE_KEY_MODIFIER_META)) text = undefined
+  return {
+    modifiers: modifierMask,
+    params: {
+      key,
+      code,
+      windowsVirtualKeyCode: virtualKeyCode,
+      nativeVirtualKeyCode: virtualKeyCode,
+      ...(text ? { text } : {})
+    }
+  }
+}
+
+const browserNetworkLogs = new Map<number, BrowserAutomationNetworkEntry[]>()
+let browserNetworkRecorderRegistered = false
+
+/** Per-request start timestamps (webRequest `timestamp`, in seconds) keyed by `${guestId}:${requestId}`. */
+const browserNetworkRequestStarts = new Map<string, number>()
+const BROWSER_NETWORK_STARTS_LIMIT = 2000
+
+function recordBrowserNetworkRequestStart (guestId: number, requestId: number, timestamp: number): void {
+  const key = `${guestId}:${requestId}`
+  if (browserNetworkRequestStarts.has(key)) return
+  browserNetworkRequestStarts.set(key, timestamp)
+  while (browserNetworkRequestStarts.size > BROWSER_NETWORK_STARTS_LIMIT) {
+    const oldestKey = browserNetworkRequestStarts.keys().next().value
+    if (typeof oldestKey !== 'string') break
+    browserNetworkRequestStarts.delete(oldestKey)
+  }
+}
+
+function takeBrowserNetworkRequestDurationMs (guestId: number, requestId: number, completedAt: number): number | null {
+  const key = `${guestId}:${requestId}`
+  const startedAt = browserNetworkRequestStarts.get(key)
+  browserNetworkRequestStarts.delete(key)
+  if (typeof startedAt !== 'number' || !Number.isFinite(startedAt)) return null
+  const durationMs = Math.round((completedAt - startedAt) * 1000)
+  return Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : null
+}
+
+function appendBrowserNetworkEntry (webContentsId: number, entry: BrowserAutomationNetworkEntry): void {
+  let log = browserNetworkLogs.get(webContentsId)
+  if (!log) {
+    log = []
+    browserNetworkLogs.set(webContentsId, log)
+    while (browserNetworkLogs.size > BROWSER_NETWORK_LOG_MAX_GUESTS) {
+      const oldestId = browserNetworkLogs.keys().next().value
+      if (typeof oldestId !== 'number') break
+      browserNetworkLogs.delete(oldestId)
+    }
+  }
+  log.push(entry)
+  if (log.length > BROWSER_NETWORK_LOG_LIMIT) {
+    log.splice(0, log.length - BROWSER_NETWORK_LOG_LIMIT)
+  }
+}
+
+function readResponseHeaderValue (headers: Record<string, string[]> | undefined, name: string): string | null {
+  if (!headers) return null
+  const key = Object.keys(headers).find(header => header.toLowerCase() === name)
+  const value = key ? headers[key]?.[0] : null
+  return typeof value === 'string' ? value : null
+}
+
+function webRequestGuestId (details: { webContentsId?: number; webContents?: WebContents | null }): number | null {
+  if (typeof details.webContentsId === 'number' && details.webContentsId > 0) return details.webContentsId
+  const id = details.webContents?.id
+  return typeof id === 'number' && id > 0 ? id : null
+}
+
+function registerBrowserNetworkRecorder (): void {
+  if (browserNetworkRecorderRegistered) return
+  browserNetworkRecorderRegistered = true
+  const browserSession = session.fromPartition('persist:the-world-browser')
+  const filter = { urls: ['http://*/*', 'https://*/*'] }
+
+  browserSession.webRequest.onBeforeRequest(filter, (details, callback) => {
+    const webContentsId = webRequestGuestId(details)
+    if (webContentsId) {
+      recordBrowserNetworkRequestStart(webContentsId, details.id, details.timestamp)
+    }
+    callback({})
+  })
+
+  browserSession.webRequest.onCompleted(filter, (details) => {
+    const webContentsId = webRequestGuestId(details)
+    if (!webContentsId) return
+    const status = typeof details.statusCode === 'number' ? details.statusCode : null
+    const contentLength = readResponseHeaderValue(details.responseHeaders, 'content-length')
+    const transferSize = contentLength && /^\d+$/.test(contentLength) ? Number(contentLength) : null
+    appendBrowserNetworkEntry(webContentsId, {
+      url: details.url,
+      method: details.method || null,
+      status,
+      ok: status == null ? null : status >= 200 && status < 300,
+      type: String(details.resourceType || 'other'),
+      durationMs: takeBrowserNetworkRequestDurationMs(webContentsId, details.id, details.timestamp),
+      transferSize,
+      error: null,
+      timestamp: Date.now()
+    })
+  })
+
+  browserSession.webRequest.onErrorOccurred(filter, (details) => {
+    const webContentsId = webRequestGuestId(details)
+    if (!webContentsId) return
+    appendBrowserNetworkEntry(webContentsId, {
+      url: details.url,
+      method: details.method || null,
+      status: null,
+      ok: false,
+      type: String(details.resourceType || 'other'),
+      durationMs: takeBrowserNetworkRequestDurationMs(webContentsId, details.id, details.timestamp),
+      transferSize: null,
+      error: String(details.error || 'Request failed'),
+      timestamp: Date.now()
+    })
+  })
+}
+
+function withTimeout<T> (promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new Error(message))
+    }, timeoutMs)
+    promise.then(
+      value => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      },
+      error => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
+
+function assertPageSurfaceOwnedBySender (target: WebContents, sender: WebContents): void {
+  try {
+    if (target !== sender && target.hostWebContents === sender) return
+  } catch {
+    // Fall through to the ownership error below.
+  }
+  throw new Error('The requested page surface is not owned by this window.')
+}
+
+interface BrowserPageEmulationViewport {
+  width: number
+  height: number
+  deviceScaleFactor: number
+  mobile: boolean
+}
+
+interface BrowserPageEmulationRequest {
+  webContentsId: number
+  media?: 'screen' | 'print'
+  colorScheme?: 'light' | 'dark' | 'no-preference'
+  reducedMotion?: 'reduce' | 'no-preference'
+  userAgent?: string
+  viewport?: {
+    width: number
+    height: number
+    deviceScaleFactor?: number
+    mobile?: boolean
+  }
+  reset?: boolean
+  timeoutMs?: number
+}
+
+
+interface BrowserPageEmulationResult {
+  ok: true
+  emulated: {
+    media?: string
+    colorScheme?: string
+    reducedMotion?: string
+    userAgent?: string | null
+    viewport?: BrowserPageEmulationViewport
+  }
+}
+
+interface PageEmulationState {
+  media?: 'screen' | 'print'
+  colorScheme?: 'light' | 'dark' | 'no-preference'
+  reducedMotion?: 'reduce' | 'no-preference'
+  userAgent?: string
+  viewport?: BrowserPageEmulationViewport
+}
+
+interface PageEmulationSession {
+  debugger: ElectronDebugger
+  refs: number
+  emulation: PageEmulationState | null
+  emulationActive: boolean
+  cleanup: () => void
+}
+
+// One ref for active emulation plus one per in-flight screenshot. The debugger
+// is detached only when the last ref is released.
+const pageEmulationSessions = new Map<number, PageEmulationSession>()
+
+interface PageEmulationTargetOperations {
+  queue: Promise<unknown>
+  generation: number
+}
+
+// Emulation, reset and state queries for one page surface must run in order.
+// A generation token lets a reset invalidate an older emulate that is still
+// waiting on a CDP timeout, so its late state commit or rollback cannot win.
+const pageEmulationTargetOperations = new Map<number, PageEmulationTargetOperations>()
+
+class PageEmulationSupersededError extends Error {
+  constructor () {
+    super('Page emulation was superseded by a newer request.')
+    this.name = 'PageEmulationSupersededError'
+  }
+}
+
+function getPageEmulationTargetOperations (webContentsId: number): PageEmulationTargetOperations {
+  let operations = pageEmulationTargetOperations.get(webContentsId)
+  if (!operations) {
+    operations = { queue: Promise.resolve(), generation: 0 }
+    pageEmulationTargetOperations.set(webContentsId, operations)
+  }
+  return operations
+}
+
+function invalidatePageEmulationOperations (webContentsId: number): void {
+  getPageEmulationTargetOperations(webContentsId).generation += 1
+}
+
+function enqueuePageEmulationOperation<T> (
+  webContentsId: number,
+  task: (isCurrent: () => boolean) => Promise<T>
+): Promise<T> {
+  const operations = getPageEmulationTargetOperations(webContentsId)
+  const run = operations.queue.then(() => {
+    const generation = ++operations.generation
+    return task(() => operations.generation === generation)
+  })
+  operations.queue = run.then(() => undefined, () => undefined)
+  return run
+}
+
+function assertPageEmulationCurrent (isCurrent: () => boolean): void {
+  if (!isCurrent()) throw new PageEmulationSupersededError()
+}
+
+function pageDebuggerIsAttached (session: PageEmulationSession): boolean {
+  try {
+    return session.debugger.isAttached()
+  } catch {
+    return false
+  }
+}
+
+function getPageEmulationSession (webContentsId: number): PageEmulationSession | null {
+  const session = pageEmulationSessions.get(webContentsId)
+  if (!session) return null
+  if (pageDebuggerIsAttached(session)) return session
+  pageEmulationSessions.delete(webContentsId)
+  session.cleanup()
+  return null
+}
+
+function acquirePageEmulationSession (target: WebContents): { session: PageEmulationSession; created: boolean } {
+  const webContentsId = target.id
+  const existing = getPageEmulationSession(webContentsId)
+  if (existing) return { session: existing, created: false }
+
+  const debuggerSession = target.debugger
+  let alreadyAttached = false
+  try {
+    alreadyAttached = debuggerSession.isAttached()
+  } catch {
+    alreadyAttached = false
+  }
+  if (alreadyAttached) {
+    throw new Error('The page debugger is already in use (DevTools may be attached).')
+  }
+  try {
+    debuggerSession.attach('1.3')
+  } catch (error) {
+    const detail = error instanceof Error && error.message ? `: ${error.message}` : ''
+    throw new Error(`The page debugger is unavailable (DevTools may already be attached)${detail}`)
+  }
+
+  const session: PageEmulationSession = {
+    debugger: debuggerSession,
+    refs: 0,
+    emulation: null,
+    emulationActive: false,
+    cleanup: () => {}
+  }
+
+  const forget = () => {
+    if (pageEmulationSessions.get(webContentsId) === session) {
+      pageEmulationSessions.delete(webContentsId)
+    }
+  }
+  const onDestroyed = () => {
+    forget()
+    debuggerSession.removeListener('detach', onDetached)
+    try {
+      if (debuggerSession.isAttached()) debuggerSession.detach()
+    } catch { /* best effort */ }
+  }
+  const onDetached = () => {
+    forget()
+    target.removeListener('destroyed', onDestroyed)
+  }
+  session.cleanup = () => {
+    target.removeListener('destroyed', onDestroyed)
+    debuggerSession.removeListener('detach', onDetached)
+    forget()
+  }
+  target.once('destroyed', onDestroyed)
+  debuggerSession.once('detach', onDetached)
+  pageEmulationSessions.set(webContentsId, session)
+  if (target.isDestroyed()) {
+    session.cleanup()
+    try {
+      if (debuggerSession.isAttached()) debuggerSession.detach()
+    } catch { /* best effort */ }
+    throw new Error('The requested page surface is not available.')
+  }
+  return { session, created: true }
+}
+
+function closePageEmulationSession (webContentsId: number, session: PageEmulationSession): void {
+  if (pageEmulationSessions.get(webContentsId) === session) {
+    pageEmulationSessions.delete(webContentsId)
+  }
+  session.cleanup()
+  try {
+    if (session.debugger.isAttached()) session.debugger.detach()
+  } catch { /* best effort */ }
+}
+
+function releasePageEmulationSessionRef (webContentsId: number, session: PageEmulationSession): void {
+  if (pageEmulationSessions.get(webContentsId) !== session) {
+    session.cleanup()
+    return
+  }
+  session.refs = Math.max(0, session.refs - 1)
+  if (session.refs > 0) return
+  closePageEmulationSession(webContentsId, session)
+}
+
+function rebuildPageEmulationSession (target: WebContents, session: PageEmulationSession): PageEmulationSession | null {
+  closePageEmulationSession(target.id, session)
+  if (target.isDestroyed()) return null
+  try {
+    return acquirePageEmulationSession(target).session
+  } catch {
+    return null
+  }
+}
+
+interface PageDebuggerLease {
+  debugger: ElectronDebugger
+  release: () => void
+}
+
+async function acquirePageDebuggerForScreenshot (target: WebContents): Promise<PageDebuggerLease> {
+  const webContentsId = target.id
+  const emulationSession = getPageEmulationSession(webContentsId)
+  if (emulationSession) {
+    emulationSession.refs += 1
+    let released = false
+    return {
+      debugger: emulationSession.debugger,
+      release: () => {
+        if (released) return
+        released = true
+        releasePageEmulationSessionRef(webContentsId, emulationSession)
+      }
+    }
+  }
+
+  const debuggerSession = target.debugger
+  let attachedByScreenshot = false
+  try {
+    if (!debuggerSession.isAttached()) {
+      await withTimeout(
+        Promise.resolve().then(() => { debuggerSession.attach('1.3') }),
+        PAGE_DEBUGGER_ATTACH_TIMEOUT_MS,
+        'Timed out attaching the page debugger.'
+      )
+      attachedByScreenshot = true
+    }
+  } catch (error) {
+    const detail = error instanceof Error && error.message ? `: ${error.message}` : ''
+    throw new Error(`The page debugger is unavailable (DevTools may already be attached)${detail}`)
+  }
+
+  let released = false
+  return {
+    debugger: debuggerSession,
+    release: () => {
+      if (released) return
+      released = true
+      if (!attachedByScreenshot) return
+      try {
+        if (debuggerSession.isAttached()) debuggerSession.detach()
+      } catch { /* best effort */ }
+    }
+  }
+}
+
+interface PageEmulationApplyOptions {
+  clearNamedMediaFeatures?: boolean
+  isCurrent?: () => boolean
+}
+
+async function applyPageEmulation (
+  debuggerSession: ElectronDebugger,
+  state: PageEmulationState,
+  timeoutMs?: number,
+  options: PageEmulationApplyOptions = {}
+): Promise<void> {
+  const effectiveTimeout = timeoutMs ?? PAGE_EMULATION_COMMAND_TIMEOUT_MS
+  const sendCommand = (method: string, params?: Record<string, unknown>): Promise<unknown> => withTimeout(
+    debuggerSession.sendCommand(method, params),
+    effectiveTimeout,
+    `Timed out applying page emulation (${method}).`
+  )
+  const checkCurrent = (): void => {
+    if (options.isCurrent && !options.isCurrent()) throw new PageEmulationSupersededError()
+  }
+
+  const features: Array<{ name: string; value: string }> = []
+  if (state.colorScheme) features.push({ name: 'prefers-color-scheme', value: state.colorScheme })
+  if (state.reducedMotion) features.push({ name: 'prefers-reduced-motion', value: state.reducedMotion })
+  // Chromium releases that have been attached for a long time can keep a
+  // named media feature after an empty feature list. Naming each reset feature
+  // with an empty value clears it explicitly on both old and new hosts.
+  if (options.clearNamedMediaFeatures) {
+    if (!state.colorScheme) features.push({ name: 'prefers-color-scheme', value: '' })
+    if (!state.reducedMotion) features.push({ name: 'prefers-reduced-motion', value: '' })
+  }
+
+  checkCurrent()
+  await sendCommand('Emulation.setEmulatedMedia', {
+    media: state.media ?? '',
+    features
+  })
+  checkCurrent()
+  await sendCommand('Emulation.setUserAgentOverride', {
+    userAgent: state.userAgent ?? ''
+  })
+  checkCurrent()
+  if (state.viewport) {
+    await sendCommand('Emulation.setDeviceMetricsOverride', {
+      width: state.viewport.width,
+      height: state.viewport.height,
+      deviceScaleFactor: state.viewport.deviceScaleFactor,
+      mobile: state.viewport.mobile
+    })
+  } else {
+    await sendCommand('Emulation.clearDeviceMetricsOverride')
+  }
+  checkCurrent()
+}
+
+interface PageMediaState {
+  colorScheme: 'light' | 'dark'
+  reducedMotion: 'reduce' | 'no-preference'
+}
+
+const PAGE_MEDIA_STATE_EXPRESSION = `(() => ({
+  colorScheme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+  reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduce' : 'no-preference'
+}))()`
+
+function readSystemMediaBaseline (): PageMediaState {
+  let reducedMotion: PageMediaState['reducedMotion'] = 'no-preference'
+  try {
+    if (systemPreferences.getAnimationSettings().prefersReducedMotion) reducedMotion = 'reduce'
+  } catch {
+    // Animation settings are platform-specific; color scheme is still checked.
+  }
+  return {
+    colorScheme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
+    reducedMotion
+  }
+}
+
+async function readPageMediaState (
+  debuggerSession: ElectronDebugger,
+  timeoutMs?: number
+): Promise<PageMediaState | null> {
+  try {
+    const evaluated = await withTimeout(
+      debuggerSession.sendCommand('Runtime.evaluate', {
+        expression: PAGE_MEDIA_STATE_EXPRESSION,
+        returnByValue: true
+      }),
+      Math.min(timeoutMs ?? PAGE_EMULATION_VERIFY_TIMEOUT_MS, PAGE_EMULATION_VERIFY_TIMEOUT_MS),
+      'Timed out reading the page media state.'
+    ) as { result?: { value?: unknown } }
+    const value = evaluated?.result?.value
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const record = value as Record<string, unknown>
+    const colorScheme = record.colorScheme
+    const reducedMotion = record.reducedMotion
+    if (
+      (colorScheme !== 'light' && colorScheme !== 'dark') ||
+      (reducedMotion !== 'reduce' && reducedMotion !== 'no-preference')
+    ) {
+      return null
+    }
+    return { colorScheme, reducedMotion }
+  } catch {
+    return null
+  }
+}
+
+async function verifyPageEmulationReset (
+  debuggerSession: ElectronDebugger,
+  timeoutMs: number | undefined,
+  expected: PageMediaState
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const actual = await readPageMediaState(debuggerSession, timeoutMs)
+    if (
+      actual &&
+      actual.colorScheme === expected.colorScheme &&
+      actual.reducedMotion === expected.reducedMotion
+    ) {
+      return true
+    }
+    if (attempt === 0) {
+      await new Promise<void>(resolve => setTimeout(resolve, PAGE_EMULATION_VERIFY_SETTLE_MS))
+    }
+  }
+  return false
+}
+
+async function resetPageEmulationMedia (
+  target: WebContents,
+  webContentsId: number,
+  session: PageEmulationSession,
+  timeoutMs: number | undefined,
+  isCurrent: () => boolean
+): Promise<void> {
+  const expected = readSystemMediaBaseline()
+  const clearAndVerify = async (debuggerSession: ElectronDebugger): Promise<boolean> => {
+    assertPageEmulationCurrent(isCurrent)
+    await applyPageEmulation(debuggerSession, {}, timeoutMs, {
+      clearNamedMediaFeatures: true,
+      isCurrent
+    })
+    assertPageEmulationCurrent(isCurrent)
+    return await verifyPageEmulationReset(debuggerSession, timeoutMs, expected)
+  }
+
+  if (await clearAndVerify(session.debugger)) return
+  // Aging hosts occasionally ignore the first reset; retry once before paying
+  // the cost of rebuilding the debugger session.
+  if (await clearAndVerify(session.debugger)) return
+
+  // A fresh debugger session clears every override and cancels CDP commands
+  // that were still in flight behind the old session.
+  const rebuilt = rebuildPageEmulationSession(target, session)
+  if (!rebuilt) return
+  if (await clearAndVerify(rebuilt.debugger)) return
+
+  // Detaching restores the system baseline even when the page refuses further
+  // media overrides. Do not force a light theme: keep the real system value.
+  closePageEmulationSession(webContentsId, rebuilt)
+}
+
+function toEmulatedResult (state: PageEmulationState | null): BrowserPageEmulationResult['emulated'] {
+  if (!state) return {}
+  return {
+    ...(state.media ? { media: state.media } : {}),
+    ...(state.colorScheme ? { colorScheme: state.colorScheme } : {}),
+    ...(state.reducedMotion ? { reducedMotion: state.reducedMotion } : {}),
+    userAgent: state.userAgent ?? null,
+    ...(state.viewport ? { viewport: { ...state.viewport } } : {})
+  }
 }
 
 /** `<base>.<ext>` deduplicated against names already used in one export batch. */
@@ -265,6 +1023,7 @@ const computerUsePermissions = createComputerUsePermissionService({
 export function setupIPC (): void {
   // setupIPC runs once after app.whenReady, before any renderer is opened.
   console.info('[permissions] Computer Use startup snapshot:', computerUsePermissions.initialize())
+  registerBrowserNetworkRecorder()
   const getMainWindow = () => mainState.mainWindow
   const terminal = () => mainState.terminalManager
   const projectFS = mainState.projectFS!
@@ -294,6 +1053,440 @@ export function setupIPC (): void {
     await startSelectedRustHarness()
     return mainState.rustHarness!
   }
+  ipcMain.handle('pageAutomation:captureScreenshot', async (event: IpcMainInvokeEvent, rawRequest: unknown): Promise<BrowserPageScreenshotResult> => {
+    if (!rawRequest || typeof rawRequest !== 'object' || Array.isArray(rawRequest)) {
+      throw new Error('Invalid page screenshot request.')
+    }
+
+    const request = rawRequest as Partial<BrowserPageScreenshotRequest>
+    const webContentsId = request.webContentsId
+    if (typeof webContentsId !== 'number' || !Number.isInteger(webContentsId) || webContentsId <= 0) {
+      throw new Error('Invalid page surface id for screenshot capture.')
+    }
+    if (request.format !== undefined && request.format !== 'png' && request.format !== 'jpeg') {
+      throw new Error('Unsupported page screenshot format.')
+    }
+
+    const target = webContents.fromId(webContentsId)
+    if (!target || target.isDestroyed()) {
+      const stale = pageEmulationSessions.get(webContentsId)
+      if (stale) {
+        pageEmulationSessions.delete(webContentsId)
+        stale.cleanup()
+      }
+      throw new Error('The requested page surface is not available.')
+    }
+    assertPageSurfaceOwnedBySender(target, event.sender)
+
+    const format = request.format === 'jpeg' ? 'jpeg' : 'png'
+    const fullPage = request.fullPage === true
+    const quality = typeof request.quality === 'number' && Number.isFinite(request.quality)
+      ? Math.max(10, Math.min(Math.round(request.quality), 100))
+      : 80
+    const requestedTimeoutMs = typeof request.timeoutMs === 'number' && Number.isFinite(request.timeoutMs)
+      ? request.timeoutMs
+      : PAGE_SCREENSHOT_DEFAULT_OPERATION_TIMEOUT_MS
+    const operationTimeoutMs = Math.min(
+      PAGE_SCREENSHOT_OPERATION_TIMEOUT_MS,
+      Math.max(
+        PAGE_SCREENSHOT_MIN_OPERATION_TIMEOUT_MS,
+        Math.min(Math.round(requestedTimeoutMs), PAGE_SCREENSHOT_MAX_OPERATION_TIMEOUT_MS)
+      )
+    )
+    const leaseRef: { current: PageDebuggerLease | null } = { current: null }
+    let operationFinished = false
+    const captureViewportWithNativeImage = async (): Promise<BrowserPageScreenshotResult> => {
+      const image = await withTimeout(
+        target.capturePage(),
+        operationTimeoutMs,
+        'Timed out capturing the page screenshot.'
+      )
+      if (image.isEmpty()) {
+        throw new Error('The page produced an empty screenshot.')
+      }
+      const buffer = format === 'jpeg' ? image.toJPEG(quality) : image.toPNG()
+      if (!buffer || buffer.length === 0) {
+        throw new Error('The page produced an empty screenshot.')
+      }
+      const size = image.getSize()
+      return {
+        dataUrl: `data:image/${format};base64,${buffer.toString('base64')}`,
+        width: Math.max(1, Math.round(size.width)),
+        height: Math.max(1, Math.round(size.height)),
+        fullPage: false
+      }
+    }
+    const captureWithDebugger = async (): Promise<BrowserPageScreenshotResult> => {
+      const acquiredLease = await acquirePageDebuggerForScreenshot(target)
+      if (operationFinished) {
+        acquiredLease.release()
+        throw new Error('Timed out capturing the page screenshot.')
+      }
+      leaseRef.current = acquiredLease
+      const debuggerSession = acquiredLease.debugger
+
+      const metrics = ((await withTimeout(
+        debuggerSession.sendCommand('Page.getLayoutMetrics'),
+        PAGE_LAYOUT_METRICS_TIMEOUT_MS,
+        'Timed out reading the page layout metrics.'
+      )) ?? {}) as PageScreenshotLayoutMetrics
+      const viewportWidth = positivePixelValue(metrics.cssLayoutViewport?.clientWidth)
+        ?? positivePixelValue(metrics.layoutViewport?.clientWidth)
+        ?? 1
+      const viewportHeight = positivePixelValue(metrics.cssLayoutViewport?.clientHeight)
+        ?? positivePixelValue(metrics.layoutViewport?.clientHeight)
+        ?? 1
+
+      let devicePixelRatio = 1
+      try {
+        const evaluated = await withTimeout(
+          debuggerSession.sendCommand('Runtime.evaluate', {
+            expression: 'window.devicePixelRatio || 1',
+            returnByValue: true
+          }),
+          PAGE_DEVICE_PIXEL_RATIO_TIMEOUT_MS,
+          'Timed out reading the page device pixel ratio.'
+        ) as { result?: { value?: unknown } }
+        devicePixelRatio = resolveDevicePixelRatio(evaluated?.result?.value)
+      } catch {
+        // The execution context can be unavailable mid-navigation; CSS pixels
+        // are still a usable size fallback for the capture.
+      }
+
+      const params: Record<string, unknown> = {
+        format,
+        fromSurface: true,
+        captureBeyondViewport: false
+      }
+      if (format === 'jpeg') {
+        params.quality = quality
+      }
+
+      let width = Math.max(1, Math.round(viewportWidth * devicePixelRatio))
+      let height = Math.max(1, Math.round(viewportHeight * devicePixelRatio))
+
+      if (fullPage) {
+        const contentWidth = positivePixelValue(metrics.cssContentSize?.width)
+          ?? positivePixelValue(metrics.contentSize?.width)
+          ?? viewportWidth
+        const contentHeight = positivePixelValue(metrics.cssContentSize?.height)
+          ?? positivePixelValue(metrics.contentSize?.height)
+          ?? viewportHeight
+        const outputWidth = contentWidth * devicePixelRatio
+        const outputHeight = contentHeight * devicePixelRatio
+        const scale = Math.min(
+          1,
+          PAGE_SCREENSHOT_MAX_DIMENSION / Math.max(outputWidth, outputHeight),
+          Math.sqrt(PAGE_SCREENSHOT_MAX_PIXELS / (outputWidth * outputHeight))
+        )
+        params.captureBeyondViewport = true
+        params.clip = { x: 0, y: 0, width: contentWidth, height: contentHeight, scale }
+        width = Math.max(1, Math.round(outputWidth * scale))
+        height = Math.max(1, Math.round(outputHeight * scale))
+      }
+
+      const captured = await withTimeout(
+        debuggerSession.sendCommand('Page.captureScreenshot', params),
+        Math.min(PAGE_SCREENSHOT_OPERATION_TIMEOUT_MS, Math.max(PAGE_SCREENSHOT_CAPTURE_TIMEOUT_MS, operationTimeoutMs)),
+        'Timed out capturing the page screenshot.'
+      ) as { data?: string }
+      if (typeof captured?.data !== 'string' || captured.data.length === 0) {
+        throw new Error('The page produced an empty screenshot.')
+      }
+      return {
+        dataUrl: `data:image/${format};base64,${captured.data}`,
+        width,
+        height,
+        fullPage
+      }
+    }
+    const capture = async (): Promise<BrowserPageScreenshotResult> => {
+      if (!fullPage) {
+        try {
+          return await captureViewportWithNativeImage()
+        } catch {
+          return await captureWithDebugger()
+        }
+      }
+      try {
+        return await captureWithDebugger()
+      } catch (error) {
+        try {
+          const fallback = await captureViewportWithNativeImage()
+          return {
+            ...fallback,
+            note: 'Full-page capture failed; returned the visible viewport instead.'
+          }
+        } catch {
+          throw error
+        }
+      }
+    }
+    try {
+      return await withTimeout(
+        capture(),
+        operationTimeoutMs,
+        'Timed out capturing the page screenshot.'
+      )
+    } finally {
+      operationFinished = true
+      leaseRef.current?.release()
+    }
+  })
+
+  ipcMain.handle('pageAutomation:dispatchKey', async (event: IpcMainInvokeEvent, rawRequest: unknown): Promise<BrowserPageKeyDispatchResult> => {
+    if (!rawRequest || typeof rawRequest !== 'object' || Array.isArray(rawRequest)) {
+      throw new Error('Invalid page key dispatch request.')
+    }
+    const request = rawRequest as Partial<BrowserPageKeyDispatchRequest>
+    const webContentsId = request.webContentsId
+    if (typeof webContentsId !== 'number' || !Number.isInteger(webContentsId) || webContentsId <= 0) {
+      throw new Error('Invalid page surface id for key dispatch.')
+    }
+    if (typeof request.key !== 'string' || !request.key.trim()) {
+      throw new Error('A page key is required.')
+    }
+    if (
+      request.modifiers !== undefined
+      && (!Array.isArray(request.modifiers) || request.modifiers.some(modifier => typeof modifier !== 'string'))
+    ) {
+      throw new Error('Invalid page key modifiers.')
+    }
+
+    const target = webContents.fromId(webContentsId)
+    if (!target || target.isDestroyed()) {
+      throw new Error('The requested page surface is not available.')
+    }
+    assertPageSurfaceOwnedBySender(target, event.sender)
+
+    const resolved = resolveCdpKeyParams(request.key, request.modifiers)
+    const lease = await acquirePageDebuggerForScreenshot(target)
+    try {
+      await withTimeout((async () => {
+        const { text, ...keyParams } = {
+          ...resolved.params,
+          modifiers: resolved.modifiers
+        }
+        await withTimeout(
+          lease.debugger.sendCommand('Input.dispatchKeyEvent', {
+            type: text ? 'keyDown' : 'rawKeyDown',
+            ...keyParams,
+            ...(text ? { text } : {})
+          }),
+          PAGE_KEY_COMMAND_TIMEOUT_MS,
+          'Timed out dispatching the page key.'
+        )
+        await withTimeout(
+          lease.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...keyParams }),
+          PAGE_KEY_COMMAND_TIMEOUT_MS,
+          'Timed out releasing the page key.'
+        )
+      })(), PAGE_KEY_OPERATION_TIMEOUT_MS, 'Timed out dispatching the page key.')
+    } finally {
+      lease.release()
+    }
+    return { ok: true }
+  })
+
+  ipcMain.handle('pageAutomation:getNetworkLog', async (event: IpcMainInvokeEvent, rawWebContentsId: unknown, rawLimit: unknown): Promise<BrowserAutomationNetworkEntry[]> => {
+    const webContentsId = rawWebContentsId
+    if (typeof webContentsId !== 'number' || !Number.isInteger(webContentsId) || webContentsId <= 0) {
+      throw new Error('Invalid page surface id for network diagnostics.')
+    }
+    const target = webContents.fromId(webContentsId)
+    if (!target || target.isDestroyed()) {
+      throw new Error('The requested page surface is not available.')
+    }
+    assertPageSurfaceOwnedBySender(target, event.sender)
+    const requestedLimit = typeof rawLimit === 'number' && Number.isFinite(rawLimit)
+      ? Math.round(rawLimit)
+      : 100
+    const limit = Math.max(1, Math.min(requestedLimit, BROWSER_NETWORK_LOG_LIMIT))
+    return (browserNetworkLogs.get(webContentsId) || []).slice(-limit).reverse()
+  })
+
+  ipcMain.handle('pageAutomation:emulate', async (event: IpcMainInvokeEvent, rawRequest: unknown): Promise<BrowserPageEmulationResult> => {
+    if (!rawRequest || typeof rawRequest !== 'object' || Array.isArray(rawRequest)) {
+      throw new Error('Invalid page emulation request.')
+    }
+
+    const request = rawRequest as Partial<BrowserPageEmulationRequest>
+    const webContentsId = request.webContentsId
+    if (typeof webContentsId !== 'number' || !Number.isInteger(webContentsId) || webContentsId <= 0) {
+      throw new Error('Invalid page surface id for emulation.')
+    }
+
+    if (request.media !== undefined && request.media !== 'screen' && request.media !== 'print') {
+      throw new Error('Unsupported emulated media type.')
+    }
+    if (
+      request.colorScheme !== undefined &&
+      request.colorScheme !== 'light' &&
+      request.colorScheme !== 'dark' &&
+      request.colorScheme !== 'no-preference'
+    ) {
+      throw new Error('Unsupported emulated color scheme.')
+    }
+    if (
+      request.reducedMotion !== undefined &&
+      request.reducedMotion !== 'reduce' &&
+      request.reducedMotion !== 'no-preference'
+    ) {
+      throw new Error('Unsupported emulated reduced-motion value.')
+    }
+    if (request.reset !== undefined && typeof request.reset !== 'boolean') {
+      throw new Error('Invalid emulation reset flag.')
+    }
+
+    const userAgent = request.userAgent
+    if (userAgent !== undefined && (typeof userAgent !== 'string' || userAgent.trim().length === 0)) {
+      throw new Error('Invalid emulated user agent.')
+    }
+
+    let viewport: BrowserPageEmulationViewport | undefined
+    if (request.viewport !== undefined) {
+      const rawViewport = request.viewport
+      if (!rawViewport || typeof rawViewport !== 'object' || Array.isArray(rawViewport)) {
+        throw new Error('Invalid emulated viewport.')
+      }
+      const width = rawViewport.width
+      const height = rawViewport.height
+      if (typeof width !== 'number' || !Number.isInteger(width) || width < 320 || width > 4096) {
+        throw new Error('Emulated viewport width must be an integer between 320 and 4096.')
+      }
+      if (typeof height !== 'number' || !Number.isInteger(height) || height < 320 || height > 4096) {
+        throw new Error('Emulated viewport height must be an integer between 320 and 4096.')
+      }
+      const deviceScaleFactor = rawViewport.deviceScaleFactor
+      if (
+        deviceScaleFactor !== undefined &&
+        (typeof deviceScaleFactor !== 'number' ||
+          !Number.isFinite(deviceScaleFactor) ||
+          deviceScaleFactor < 0.5 ||
+          deviceScaleFactor > 4)
+      ) {
+        throw new Error('Emulated device scale factor must be between 0.5 and 4.')
+      }
+      const mobile = rawViewport.mobile
+      if (mobile !== undefined && typeof mobile !== 'boolean') {
+        throw new Error('Invalid emulated mobile flag.')
+      }
+      viewport = {
+        width,
+        height,
+        deviceScaleFactor: deviceScaleFactor ?? 1,
+        mobile: mobile ?? false
+      }
+    }
+
+    const target = webContents.fromId(webContentsId)
+    if (!target || target.isDestroyed()) {
+      const stale = pageEmulationSessions.get(webContentsId)
+      if (stale) {
+        pageEmulationSessions.delete(webContentsId)
+        stale.cleanup()
+      }
+      if (request.reset === true) return { ok: true, emulated: {} }
+      throw new Error('The requested page surface is not available.')
+    }
+    assertPageSurfaceOwnedBySender(target, event.sender)
+
+    if (request.reset === true) {
+      // Invalidate an emulate that is already running before queueing the
+      // reset. Its late commit or rollback must not overwrite this reset.
+      invalidatePageEmulationOperations(webContentsId)
+      return await enqueuePageEmulationOperation(webContentsId, async (isCurrent) => {
+        const session = getPageEmulationSession(webContentsId)
+        if (!session) return { ok: true, emulated: {} }
+        const wasActive = session.emulationActive
+        session.emulationActive = false
+        session.emulation = null
+        let closed = false
+        try {
+          assertPageEmulationCurrent(isCurrent)
+          await resetPageEmulationMedia(target, webContentsId, session, request.timeoutMs, isCurrent)
+          assertPageEmulationCurrent(isCurrent)
+          const liveSession = getPageEmulationSession(webContentsId)
+          if (liveSession) {
+            closePageEmulationSession(webContentsId, liveSession)
+            closed = true
+          }
+          return { ok: true, emulated: {} }
+        } catch (error) {
+          // A newer reset superseded this one; that reset owns the session.
+          if (error instanceof PageEmulationSupersededError || !isCurrent()) {
+            return { ok: true, emulated: {} }
+          }
+          // Detaching is a complete reset: it drops every emulation override
+          // and cancels CDP commands still pending on the old session.
+          const liveSession = getPageEmulationSession(webContentsId)
+          if (liveSession) {
+            closePageEmulationSession(webContentsId, liveSession)
+            closed = true
+          }
+          console.warn('[pageAutomation:emulate] reset fell back to detaching the page debugger:', error)
+          return { ok: true, emulated: {} }
+        } finally {
+          if (wasActive && !closed) releasePageEmulationSessionRef(webContentsId, session)
+        }
+      })
+    }
+
+    const hasOverrides = request.media !== undefined ||
+      request.colorScheme !== undefined ||
+      request.reducedMotion !== undefined ||
+      userAgent !== undefined ||
+      viewport !== undefined
+    if (!hasOverrides) {
+      return await enqueuePageEmulationOperation(webContentsId, async (isCurrent) => {
+        assertPageEmulationCurrent(isCurrent)
+        const session = getPageEmulationSession(webContentsId)
+        return { ok: true, emulated: toEmulatedResult(session?.emulationActive ? session.emulation : null) }
+      })
+    }
+
+    return await enqueuePageEmulationOperation(webContentsId, async (isCurrent) => {
+      const currentTarget = webContents.fromId(webContentsId)
+      if (!currentTarget || currentTarget.isDestroyed()) {
+        throw new Error('The requested page surface is not available.')
+      }
+      const { session, created } = acquirePageEmulationSession(currentTarget)
+      assertPageEmulationCurrent(isCurrent)
+      const addedEmulationRef = created || !session.emulationActive
+      if (addedEmulationRef) {
+        session.emulationActive = true
+        session.refs += 1
+      }
+      const previousState = session.emulation
+      const nextState: PageEmulationState = { ...(previousState ?? {}) }
+      if (request.media !== undefined) nextState.media = request.media
+      if (request.colorScheme !== undefined) nextState.colorScheme = request.colorScheme
+      if (request.reducedMotion !== undefined) nextState.reducedMotion = request.reducedMotion
+      if (userAgent !== undefined) nextState.userAgent = userAgent
+      if (viewport !== undefined) nextState.viewport = viewport
+
+      try {
+        await applyPageEmulation(session.debugger, nextState, request.timeoutMs, { isCurrent })
+        assertPageEmulationCurrent(isCurrent)
+        session.emulation = nextState
+        return { ok: true, emulated: toEmulatedResult(nextState) }
+      } catch (error) {
+        if (!(error instanceof PageEmulationSupersededError) && isCurrent()) {
+          try {
+            await applyPageEmulation(session.debugger, previousState ?? {}, request.timeoutMs, { isCurrent })
+          } catch { /* best effort */ }
+        }
+
+        if (addedEmulationRef && isCurrent()) {
+          session.emulationActive = false
+          session.emulation = null
+          releasePageEmulationSessionRef(webContentsId, session)
+        }
+        throw error instanceof Error ? error : new Error(String(error))
+      }
+    })
+  })
+
   ipcMain.on('pageAutomation:response', (_event, payload: PageAutomationResponseEnvelope) => {
     const pending = pendingPageAutomationRequests.get(payload.requestId)
     if (!pending) return
@@ -337,6 +1530,8 @@ export function setupIPC (): void {
   // AI chat (non-streaming, kept for backward compat)
   ipcMain.handle('ai:chat', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string, activeTerminalContext?: ActiveTerminalContext) => {
     const resolvedFolderWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(folderWorkspaceRoot)
+    // The non-streaming legacy path has no coding-root argument; keep the
+    // generic folder prompt so it cannot silently claim coding mode.
     const folderWorkspacePromptSection = buildFolderWorkspacePromptSection(resolvedFolderWorkspaceRoot)
     const baseRuntimeContext = await resolveAgentRuntimeContext({
       messages,
@@ -442,7 +1637,7 @@ export function setupIPC (): void {
   })
 
   // AI chat streaming — pushes events to renderer via per-session channel
-  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext) => {
+  ipcMain.handle('ai:chatStream', async (event: IpcMainInvokeEvent, messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext, codingWorkspaceRoot?: string) => {
     const sender = event.sender
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const channel = `ai:stream-event:${sessionId}`
@@ -456,7 +1651,9 @@ export function setupIPC (): void {
     })
     const executionPreferences = settingsStore!.getAIExecutionPreferences()
     const resolvedFolderWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(folderWorkspaceRoot)
-    const folderWorkspacePromptSection = buildFolderWorkspacePromptSection(resolvedFolderWorkspaceRoot)
+    const resolvedCodingWorkspaceRoot = await resolveFolderWorkspaceRootForRequest(codingWorkspaceRoot)
+    const effectiveWorkspaceRoot = resolvedCodingWorkspaceRoot ?? resolvedFolderWorkspaceRoot
+    const workspacePromptSection = buildWorkspaceRootPromptSection(effectiveWorkspaceRoot)
     const baseRuntimeContext = await resolveAgentRuntimeContext({
       messages,
       agentId,
@@ -488,6 +1685,9 @@ export function setupIPC (): void {
           requestedTemperature: temperature
         })
       : baseRuntimeContext
+    // Work mode (coding/document/chat) is selected by the model through
+    // select_work_mode. The renderer's regex may suggest a coding root, but it
+    // never pre-arms the coding gate for the run.
     const directGroupReplyPromptSection = directGroupReply
       ? buildDirectGroupReplyPromptSection(directGroupReply)
       : null
@@ -516,6 +1716,7 @@ export function setupIPC (): void {
     let textFlushTimer: ReturnType<typeof setTimeout> | null = null
 
     const sendEventToRenderer = (event: Record<string, unknown>) => {
+      event = toRendererStreamEvent(event)
       if (sender.isDestroyed()) return
 
       try {
@@ -557,6 +1758,20 @@ export function setupIPC (): void {
               safe.results = JSON.parse(JSON.stringify(event.results ?? []))
             } catch {
               safe.results = []
+            }
+          }
+          if ('codingStatus' in event) {
+            try {
+              safe.codingStatus = JSON.parse(JSON.stringify(event.codingStatus))
+            } catch {
+              safe.codingStatus = null
+            }
+          }
+          if ('codingDiff' in event) {
+            try {
+              safe.codingDiff = JSON.parse(JSON.stringify(event.codingDiff))
+            } catch {
+              safe.codingDiff = null
             }
           }
           if ('result' in event) {
@@ -704,13 +1919,13 @@ export function setupIPC (): void {
                   hostConversationId: conversationId,
                   authMode: authModeRef.current,
                   getAuthMode: () => authModeRef.current,
-                  workspaceRoot: resolvedFolderWorkspaceRoot,
+                  workspaceRoot: effectiveWorkspaceRoot,
                   targetProjectId: runtimeContext.effectiveTargetProjectId,
                   enableThinking: runtimeContext.providerConfig?.enableThinking,
                   reasoningEffort: runtimeContext.providerConfig?.reasoningEffort,
                   temperature: runtimeContext.providerConfig?.temperature,
                   systemPromptSections: [
-                    ...(folderWorkspacePromptSection ? [folderWorkspacePromptSection] : []),
+                    ...(workspacePromptSection ? [workspacePromptSection] : []),
                     ...(activePagePromptSection ? [activePagePromptSection] : []),
                     ...(activeTerminalPromptSection ? [activeTerminalPromptSection] : []),
                     ...(activeCodeViewPromptSection ? [activeCodeViewPromptSection] : []),
@@ -732,7 +1947,10 @@ export function setupIPC (): void {
           conversationId,
           sessionId,
           targetProjectId: runtimeContext.effectiveTargetProjectId,
-          workspaceRoot: resolvedFolderWorkspaceRoot,
+          workspaceRoot: effectiveWorkspaceRoot,
+          // Start neutral; select_work_mode (or the create_project/coding-tool
+          // fallback) activates coding mode inside the Rust agent loop.
+          codingMode: false,
           computerUseEnabled: computerUseEnabled === true,
           providerConfig: runtimeContext.providerConfig,
           abortSignal: abortController.signal,
@@ -742,7 +1960,7 @@ export function setupIPC (): void {
           activeSkillContents: runtimeContext.activeSkillContents,
           systemPromptSections: [
             ...runtimeContext.systemPromptSections,
-            ...(folderWorkspacePromptSection ? [folderWorkspacePromptSection] : []),
+            ...(workspacePromptSection ? [workspacePromptSection] : []),
             ...(activePagePromptSection ? [activePagePromptSection] : []),
             ...(activeTerminalPromptSection ? [activeTerminalPromptSection] : []),
             ...(directGroupReplyPromptSection ? [directGroupReplyPromptSection] : []),

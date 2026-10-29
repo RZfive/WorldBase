@@ -3,6 +3,15 @@ import { existsSync } from 'node:fs'
 import { compileScript, parse } from 'vue/compiler-sfc'
 import ts from 'typescript'
 import { createRenderer } from 'vue'
+import { createI18n } from 'vue-i18n'
+import { DEFAULT_LOCALE, messages } from '../../src/locales/index.ts'
+
+const i18n = createI18n({
+  legacy: false,
+  locale: DEFAULT_LOCALE,
+  fallbackLocale: DEFAULT_LOCALE,
+  messages
+})
 
 // Execute the actual SFC setup/watchers in a Vue renderer with no browser or
 // expensive child views. This is intentionally a logic/layout-state test, not
@@ -73,6 +82,7 @@ export function rendererFixture (t, { idle = true } = {}) {
     window, document, idleCallbacks, frames,
     mount (component, props, plugins = []) {
       const app = renderer.createApp(component, props)
+      app.use(i18n)
       for (const plugin of plugins) app.use(plugin)
       const vm = app.mount({})
       apps.add(app)

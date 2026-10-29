@@ -1,0 +1,2 @@
+src/z/app.ts(10,15): error TS2304: Cannot find name 'missingState'.
+src/a/app.ts(14,7): error TS2339: Property 'user' does not exist on type 'AppState'.
