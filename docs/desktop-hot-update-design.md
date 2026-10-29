@@ -77,7 +77,7 @@ WorldBase-hot-1.5.2-win32-x64.zip
 
 ### 3.3 CI 产出（the-world）
 
-在 `.github/workflows/build.yml` 的 Windows job 里新增一步，脚本 `apps/electron/scripts/build-hot-payload.mjs`：
+在 `.github/workflows/reusable-build.yml` 的 Windows job 里新增一步（由 `release.yml` 在推送 v* tag 时调用），脚本 `apps/electron/scripts/build-hot-payload.mjs`：
 
 1. 遍历 `release/win-unpacked/resources/`，排除 Electron 自带文件，逐文件算 sha256。
 2. 从 `node_modules/electron/package.json` 读 `electronVersion`，从 `package.json` 读 `version`。
