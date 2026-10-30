@@ -1,7 +1,7 @@
 {
   "name": "the-world",
   "productName": "WorldBase",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "description": "AI-powered project generator and manager",
   "license": "Apache-2.0",
   "repository": {

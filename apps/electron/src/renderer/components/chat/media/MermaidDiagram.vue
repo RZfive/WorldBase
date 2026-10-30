@@ -128,8 +128,8 @@ watch(
 }
 
 .mermaid-diagram.preview {
-  /* Fits the 920px preview dialog (884px of content after its 18px padding). */
-  min-width: min(880px, calc(100vw - 140px));
+  /* Fits the 1440px preview dialog while leaving room for its body padding. */
+  min-width: min(1320px, calc(100vw - 140px));
   width: max-content;
   max-width: none;
   border: none;

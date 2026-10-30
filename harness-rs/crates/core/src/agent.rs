@@ -2700,6 +2700,36 @@ mod tests {
             "coding_verify",
             &json!({ "project_id": "project-1" })
         ));
+        assert!(is_coding_verification_tool(
+            "run_shell_command",
+            &json!({ "command": "cd /repo && bash -n scripts/build.sh" })
+        ));
+        assert!(is_coding_verification_tool(
+            "run_shell_command",
+            &json!({
+                "command": "cd /repo && \\\necho \"=== checks ===\" && \\\nbash -n scripts/a.sh && grep -q ready out.txt"
+            })
+        ));
+        assert!(is_coding_verification_tool(
+            "run_shell_command",
+            &json!({ "command": "env CI=1 pnpm run lint" })
+        ));
+        assert!(is_coding_verification_tool(
+            "run_shell_command",
+            &json!({ "command": "time npm test" })
+        ));
+        assert!(is_coding_verification_tool(
+            "run_shell_command",
+            &json!({ "command": "./gradlew test" })
+        ));
+        assert!(is_coding_verification_tool(
+            "run_shell_command",
+            &json!({ "command": "python -m py_compile app.py" })
+        ));
+        assert!(!is_coding_verification_tool(
+            "run_shell_command",
+            &json!({ "command": "cd /repo && ls -la" })
+        ));
         assert!(!is_coding_verification_tool(
             "run_project_command",
             &json!({ "command": "git show build.log" })
@@ -2708,6 +2738,40 @@ mod tests {
             "run_project_command",
             &json!({ "command": "git status" })
         ));
+    }
+
+    #[test]
+    fn manual_shell_syntax_check_satisfies_the_coding_gate() {
+        let mut state = CodingState::new(CodingPolicy {
+            enabled: true,
+            ..CodingPolicy::default()
+        });
+        state.begin();
+        state.record_mutation([std::path::PathBuf::from("scripts/build.sh")]);
+        assert!(!state.can_finish());
+        let mut signatures = Vec::new();
+        let input = json!({
+            "command": "cd /repo && \\\necho \"=== Bash syntax ===\" && \\\nbash -n scripts/build.sh && echo ok"
+        });
+
+        let execution = tool_execution(
+            "shell-1",
+            "run_shell_command",
+            r#"{"status":"completed","exitCode":0}"#,
+            false,
+        );
+        let outcome = apply_coding_tool_outcome(
+            &mut state,
+            "run_shell_command",
+            &input,
+            &execution,
+            &mut signatures,
+        )
+        .expect("manual shell verification is handled");
+
+        assert!(outcome.notice.contains("编码验证通过"));
+        assert!(!state.has_unverified_mutations());
+        assert!(state.can_finish());
     }
 
     #[test]
@@ -6681,6 +6745,145 @@ fn coding_mutation_targets(name: &str, input: &serde_json::Value) -> Vec<std::pa
     targets
 }
 
+/// Runners whose invocations can produce verification evidence. Shell
+/// interpreters are included so manual syntax checks (`bash -n`, `sh -n`)
+/// work in workspaces without a detected project profile.
+const CODING_VERIFICATION_PROGRAMS: &[&str] = &[
+    "npm",
+    "pnpm",
+    "yarn",
+    "bun",
+    "npx",
+    "node",
+    "tsc",
+    "eslint",
+    "prettier",
+    "vitest",
+    "jest",
+    "mocha",
+    "ava",
+    "playwright",
+    "cypress",
+    "webpack",
+    "vite",
+    "rollup",
+    "esbuild",
+    "turbo",
+    "nx",
+    "deno",
+    "tsx",
+    "cargo",
+    "rustc",
+    "rustfmt",
+    "clippy-driver",
+    "go",
+    "gofmt",
+    "golangci-lint",
+    "staticcheck",
+    "python",
+    "python3",
+    "pytest",
+    "tox",
+    "nox",
+    "mypy",
+    "ruff",
+    "flake8",
+    "pylint",
+    "black",
+    "isort",
+    "uv",
+    "poetry",
+    "pdm",
+    "pip",
+    "pip3",
+    "mvn",
+    "mvnw",
+    "gradle",
+    "gradlew",
+    "javac",
+    "dotnet",
+    "msbuild",
+    "make",
+    "cmake",
+    "ninja",
+    "bazel",
+    "bazelisk",
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "shellcheck",
+    "shfmt",
+    "bats",
+    "ruby",
+    "rake",
+    "rspec",
+    "rubocop",
+    "bundle",
+    "php",
+    "phpunit",
+    "composer",
+    "swift",
+    "xcodebuild",
+    "terraform",
+    "ansible-lint",
+    "helm",
+];
+
+/// Keywords that turn a known runner invocation into a verification action.
+const CODING_VERIFICATION_MARKERS: &[&str] = &[
+    "typecheck",
+    "type-check",
+    "tsc",
+    "eslint",
+    "lint",
+    "vitest",
+    "jest",
+    "test",
+    "build",
+    "cargo check",
+    "cargo test",
+    "cargo clippy",
+    "cargo fmt",
+    "pytest",
+    "go test",
+    "go vet",
+    "go build",
+    "bash -n",
+    "sh -n",
+    "zsh -n",
+    "dash -n",
+    "node --check",
+    "--check",
+    "py_compile",
+    "compileall",
+    "check",
+    "verify",
+    "validate",
+    "syntax",
+    "fmt",
+    "format",
+    "vet",
+    "clippy",
+    "audit",
+    "gofmt",
+    "golangci-lint",
+    "staticcheck",
+    "mypy",
+    "ruff",
+    "pylint",
+    "flake8",
+    "shellcheck",
+    "php -l",
+    "ruby -c",
+    "composer validate",
+    "dotnet build",
+    "dotnet test",
+    "mvn test",
+    "mvn verify",
+    "gradle test",
+];
+
 fn is_coding_verification_tool(name: &str, input: &serde_json::Value) -> bool {
     if matches!(name, "rebuild_project" | "coding_verify") {
         return true;
@@ -6701,38 +6904,60 @@ fn is_coding_verification_tool(name: &str, input: &serde_json::Value) -> bool {
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let command = command.trim();
-    let known_runner = [
-        "npm", "pnpm", "yarn", "bun", "npx", "cargo", "pytest", "python", "python3", "go",
-        "vitest", "jest", "eslint", "tsc", "prettier", "next", "vite", "node",
-    ]
-    .iter()
-    .any(|runner| {
-        command == *runner
-            || command.starts_with(&format!("{runner} "))
-            || command.contains(&format!(" {runner} "))
-    });
-    if !known_runner {
+    is_coding_verification_command(&command)
+}
+
+/// Shell commands often chain setup and checks, e.g.
+/// `cd repo && bash -n scripts/build.sh`. Split on shell separators and accept
+/// a check anywhere in the chain instead of requiring the command to start
+/// with a known runner.
+fn is_coding_verification_command(command: &str) -> bool {
+    command
+        .split(|ch: char| matches!(ch, '\n' | ';' | '&' | '|'))
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .any(coding_verification_segment)
+}
+
+fn coding_verification_segment(segment: &str) -> bool {
+    let Some(program) = shell_segment_program(segment) else {
         return false;
+    };
+    CODING_VERIFICATION_PROGRAMS.contains(&program)
+        && CODING_VERIFICATION_MARKERS
+            .iter()
+            .any(|marker| segment.contains(marker))
+}
+
+/// Return the invoked program for one shell segment, skipping wrappers and
+/// environment assignments (`env`, `time`, `FOO=bar`).
+fn shell_segment_program(mut segment: &str) -> Option<&str> {
+    loop {
+        segment = segment
+            .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, '(' | '{' | '['));
+        if segment.is_empty() {
+            return None;
+        }
+        let end = segment
+            .find(|ch: char| ch.is_whitespace())
+            .unwrap_or(segment.len());
+        let token = &segment[..end];
+        segment = &segment[end..];
+        let token = token.trim_matches(|ch: char| matches!(ch, '(' | '{' | '[' | '\'' | '"'));
+        if token.is_empty() {
+            continue;
+        }
+        if token.contains('=') && !token.starts_with('-') {
+            continue;
+        }
+        if matches!(
+            token,
+            "env" | "command" | "exec" | "nohup" | "time" | "sudo"
+        ) {
+            continue;
+        }
+        return Some(token.rsplit('/').next().unwrap_or(token));
     }
-    [
-        "typecheck",
-        "type-check",
-        "tsc",
-        "eslint",
-        "lint",
-        "vitest",
-        "jest",
-        "test",
-        "build",
-        "cargo check",
-        "cargo test",
-        "cargo clippy",
-        "pytest",
-        "go test",
-    ]
-    .iter()
-    .any(|marker| command.contains(marker))
 }
 
 fn coding_verification_passed(is_error: bool, content: &str) -> bool {

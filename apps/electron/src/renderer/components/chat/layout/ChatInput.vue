@@ -2,8 +2,10 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, type CSSProperties } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { copyTextToClipboard } from '../export-utils'
+import ImageLightbox from '../media/ImageLightbox.vue'
 import { removeSelectionQuote, SELECTION_QUOTE_TAG_PATTERN } from '../panel/selection-quote-state'
 import { removeWebQuote, WEB_QUOTE_TAG_PATTERN } from '../panel/web-quote-state'
+import type { GalleryImage } from '../types'
 
 interface PendingAttachment {
   id: string
@@ -115,6 +117,26 @@ const dragDepth = ref(0)
 const dragActive = ref(false)
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const composerSkillSelectorRef = ref<HTMLElement | null>(null)
+const pendingImageLightboxRef = ref<InstanceType<typeof ImageLightbox> | null>(null)
+const pendingImageLightboxActive = ref(false)
+const pendingImageGallery = computed<GalleryImage[]>(() =>
+  props.pendingImages.map((image, index) => ({
+    url: image.base64,
+    messageIndex: 0,
+    blockIndex: 0,
+    partIndex: index
+  }))
+)
+
+async function openPendingImagePreview (index: number): Promise<void> {
+  pendingImageLightboxActive.value = true
+  await nextTick()
+  pendingImageLightboxRef.value?.open(0, 0, index)
+}
+
+function closePendingImagePreview (): void {
+  pendingImageLightboxActive.value = false
+}
 const activeMention = ref<MentionQueryState | null>(null)
 const activeMentionIndex = ref(0)
 const pendingSelection = ref<{ start: number; end: number } | null>(null)
@@ -968,8 +990,16 @@ onUnmounted(() => {
       </div>
       <div v-if="props.pendingImages.length > 0" class="image-preview-bar">
         <div v-for="(img, idx) in props.pendingImages" :key="idx" class="image-preview-item">
-          <img :src="img.base64" class="image-thumb" />
-          <button class="image-remove" @click="emit('removeImage', idx)">×</button>
+          <button
+            class="image-preview-button"
+            type="button"
+            :title="$t('chatUi.imagePreview')"
+            :aria-label="$t('chatUi.imagePreview')"
+            @click="openPendingImagePreview(idx)"
+          >
+            <img :src="img.base64" class="image-thumb" />
+          </button>
+          <button class="image-remove" type="button" @click.stop="emit('removeImage', idx)">×</button>
         </div>
       </div>
       <div v-if="projectTags.length > 0" class="project-tag-bar">
@@ -1207,6 +1237,14 @@ onUnmounted(() => {
       </div>
     </Teleport>
     <div v-if="props.uploadFeedback" class="upload-feedback" role="status">{{ props.uploadFeedback }}</div>
+    <Teleport to="body">
+      <ImageLightbox
+        v-if="pendingImageLightboxActive"
+        ref="pendingImageLightboxRef"
+        :images="pendingImageGallery"
+        @close="closePendingImagePreview"
+      />
+    </Teleport>
   </div>
 </template>
 
@@ -1427,7 +1465,23 @@ onUnmounted(() => {
   display: inline-block;
 }
 
+.image-preview-button {
+  display: block;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  line-height: 0;
+  cursor: zoom-in;
+}
+
+.image-preview-button:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
+}
+
 .image-thumb {
+  display: block;
   width: 56px;
   height: 56px;
   object-fit: cover;
