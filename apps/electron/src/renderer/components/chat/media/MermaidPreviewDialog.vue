@@ -145,8 +145,8 @@ onUnmounted(() => {
 }
 
 .mermaid-preview-dialog {
-  width: min(920px, calc(100vw - 64px));
-  max-height: calc(100vh - 64px);
+  width: min(1440px, calc(100vw - 64px));
+  height: min(960px, calc(100vh - 64px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -258,7 +258,7 @@ onUnmounted(() => {
 
 .mermaid-preview-body {
   flex: 1;
-  min-height: 280px;
+  min-height: 0;
   overflow: hidden;
   display: flex;
   align-items: center;
@@ -285,7 +285,7 @@ onUnmounted(() => {
 
   .mermaid-preview-dialog {
     width: 100%;
-    max-height: calc(100vh - 24px);
+    height: calc(100vh - 24px);
   }
 
   .mermaid-preview-toolbar {
