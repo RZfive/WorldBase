@@ -3,6 +3,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// Keep application DTOs reachable through the historic
+// `worldbase_protocol::types::*` import path used across the workspace.
+pub use crate::application::*;
+
 /// 宿主握手声明。harness 据此过滤工具集与方法访问。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +111,25 @@ pub struct ToolDescriptor {
     /// TypeScript handler or a placeholder host callback.
     #[serde(default)]
     pub electron_native: bool,
+    /// Always-on tools stay in the main model context. Discoverable tools are
+    /// activated into one run by `search_tools`.
+    #[serde(default)]
+    pub visibility: crate::application::ToolVisibility,
+    /// `builtin`, `mcp:<server>`, `skill:<name>`, `app:<app_id>`.
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub app_id: Option<String>,
+    #[serde(default)]
+    pub capability_id: Option<String>,
+    #[serde(default)]
+    pub risk: Option<crate::application::CapabilityRisk>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub output_schema: Option<Value>,
+    #[serde(default)]
+    pub manifest_hash: Option<String>,
 }
 
 fn default_permission() -> String {
@@ -344,6 +367,11 @@ pub struct ChatRunContext {
     /// toolPolicy 设置，交互式运行永远不需要它。
     #[serde(default)]
     pub auto_approve_permissions: bool,
+    /// Parent run's already-activated discoverable tool names. Subagent runs
+    /// seed their run catalog from this list instead of silently losing tools
+    /// the parent exposed to the model.
+    #[serde(default)]
+    pub inherited_tool_names: Vec<String>,
 }
 
 /// A concrete memory scope selected for one agent run.
@@ -385,6 +413,10 @@ pub struct ChatSendResult {
     pub stream_id: String,
     /// 已落库的 user 消息 id（seq 0 事件）。
     pub user_message_seq: u64,
+    /// Short-lived token that resolves direct `tool.call` requests to this
+    /// run's Rust-held catalog. It carries no permission by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_capability_token: Option<String>,
 }
 
 /// chat.resume 参数：断线重连后从 afterSeq 之后续传事件。

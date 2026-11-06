@@ -88,9 +88,8 @@ where
             Ok(available) if available.is_empty() => {}
             Ok(available) => {
                 let mut consumed = 0;
-                while let Some(newline) = available[consumed..]
-                    .iter()
-                    .position(|&byte| byte == b'\n')
+                while let Some(newline) =
+                    available[consumed..].iter().position(|&byte| byte == b'\n')
                 {
                     line_buf.extend_from_slice(&available[consumed..consumed + newline]);
                     consumed += newline + 1;
@@ -398,7 +397,9 @@ mod tests {
                 self.block_points.pop_front();
                 return Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)));
             }
-            let end = block_at.min(self.offset + buf.remaining()).min(self.data.len());
+            let end = block_at
+                .min(self.offset + buf.remaining())
+                .min(self.data.len());
             buf.put_slice(&self.data[self.offset..end]);
             self.offset = end;
             Poll::Ready(Ok(()))
@@ -456,10 +457,7 @@ mod tests {
                 break;
             }
             if parsed.get("id").and_then(Value::as_i64) == Some(1) {
-                assert!(
-                    parsed.get("error").is_none(),
-                    "initialize failed: {parsed}"
-                );
+                assert!(parsed.get("error").is_none(), "initialize failed: {parsed}");
                 continue;
             }
             panic!("unexpected frame before the correlated response: {parsed}");

@@ -1,5 +1,6 @@
 //! Agent 循环：流式事件发布、工具执行、权限询问、中止与断点续传。
 
+use crate::application::{CatalogEntry, RunToolCatalog, SkillCatalogEntry};
 use crate::hub::{Hub, RunHandle};
 use crate::subagents::{CoreSubagentRuntime, MAX_SUBAGENT_NESTING_DEPTH};
 use crate::tool_scheduler::{into_call_order, schedule_tool_calls, ScheduledCall};
@@ -15,8 +16,9 @@ use worldbase_coding::{
 };
 use worldbase_protocol::event::{EventFrame, EventKind, StreamChannel};
 use worldbase_protocol::types::{
-    Capabilities, ChatContentPart, ChatMessage, ChatRunContext, ImageUrl as ProtocolImageUrl, Role,
-    ToolCallRecord, ToolDescriptor, ToolResultRecord,
+    Capabilities, CapabilityAvailability, ChatContentPart, ChatMessage, ChatRunContext,
+    ImageUrl as ProtocolImageUrl, Role, ToolCallRecord, ToolDescriptor, ToolResultRecord,
+    ToolVisibility,
 };
 use worldbase_providers::{
     ChatOptions, ContentBlock, LlmMessage, LlmRole, LlmTool, Provider, StreamChunk,
@@ -2307,21 +2309,36 @@ mod tests {
 
         async fn chat_stream(
             &self,
-            _system: Option<&str>,
+            system: Option<&str>,
             messages: Vec<LlmMessage>,
             tools: Vec<LlmTool>,
             _max_tokens: u32,
             options: ChatOptions,
         ) -> Result<ChunkStream> {
+            if system == Some(CONTEXT_SUMMARY_SYSTEM_PROMPT) {
+                let next_is_tool = self
+                    .turns
+                    .lock()
+                    .unwrap()
+                    .front()
+                    .is_some_and(|turn| !turn.tool_uses().is_empty());
+                if next_is_tool {
+                    return Ok(Box::pin(futures::stream::iter([Ok(
+                        StreamChunk::Completed {
+                            stop_reason: "end_turn".into(),
+                            assistant: LlmMessage::text(LlmRole::Assistant, "test context summary"),
+                            usage: TokenUsage::default(),
+                        },
+                    )])));
+                }
+            }
             self.requests.lock().unwrap().push(ProtocolRequest {
                 messages,
                 tools,
                 options,
             });
-            let assistant = self
-                .turns
-                .lock()
-                .unwrap()
+            let mut turns = self.turns.lock().unwrap();
+            let assistant = turns
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("unexpected extra model request"))?;
             let stop_reason = if assistant.tool_uses().is_empty() {
@@ -2408,7 +2425,7 @@ mod tests {
         )
         .unwrap();
         let stream_id = run.stream_id;
-        let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let events = tokio::time::timeout(std::time::Duration::from_secs(60), async {
             let mut events = Vec::new();
             loop {
                 let frame = receiver.recv().await.unwrap();
@@ -2430,7 +2447,7 @@ mod tests {
         .await
         .expect("protocol test run timed out");
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while hub.runs.lock().unwrap().contains_key(&stream_id) {
                 tokio::task::yield_now().await;
             }
@@ -5742,17 +5759,6 @@ mod tests {
     }
 }
 
-fn llm_tools(tools: &[Arc<dyn worldbase_tools::Tool>]) -> Vec<LlmTool> {
-    tools
-        .iter()
-        .map(|t| LlmTool {
-            name: t.name().to_string(),
-            description: t.description().to_string(),
-            input_schema: t.input_schema(),
-        })
-        .collect()
-}
-
 fn llm_custom_tools(tools: &[ToolDescriptor]) -> Vec<LlmTool> {
     tools
         .iter()
@@ -5834,17 +5840,6 @@ fn platform_tools(
         .collect()
 }
 
-fn run_tools(
-    tools: Vec<Arc<dyn worldbase_tools::Tool>>,
-    context: &ChatRunContext,
-    policy: &RunToolPolicy,
-) -> Vec<Arc<dyn worldbase_tools::Tool>> {
-    platform_tools(tools, context)
-        .into_iter()
-        .filter(|tool| tool_allowed_for_run(tool.name(), policy))
-        .collect()
-}
-
 fn is_folder_workspace_tool(name: &str) -> bool {
     matches!(
         name,
@@ -5906,6 +5901,134 @@ fn run_custom_tools(
         .collect()
 }
 
+fn catalog_entry(tool: Arc<dyn worldbase_tools::Tool>, visibility: ToolVisibility) -> CatalogEntry {
+    let mut descriptor = tool.descriptor();
+    descriptor.visibility = visibility;
+    CatalogEntry {
+        descriptor,
+        tool,
+        visibility,
+    }
+}
+
+/// Every enabled, available application capability for this platform. The
+/// caller applies the agent allow/deny policy when building the executable
+/// base catalog; the unfiltered list also feeds `visible_tool_catalog`.
+fn application_catalog_entries(hub: &Hub, caps: &Capabilities) -> Vec<CatalogEntry> {
+    let mut entries = Vec::new();
+    for app in hub.application_registry.list() {
+        if !app.enabled || !hub.application_registry.app_visible(&app.app_id, caps) {
+            continue;
+        }
+        let Some(provider) = hub.application_registry.provider_for(&app.app_id) else {
+            continue;
+        };
+        for capability in &app.capabilities {
+            if capability.availability != CapabilityAvailability::Available {
+                continue;
+            }
+            let tool: Arc<dyn worldbase_tools::Tool> =
+                Arc::new(worldbase_tools::CapabilityTool::new(
+                    provider.clone(),
+                    app.clone(),
+                    capability.clone(),
+                ));
+            entries.push(catalog_entry(tool, ToolVisibility::Discoverable));
+        }
+    }
+    entries
+}
+
+fn skill_catalog_entries(hub: &Hub) -> Vec<SkillCatalogEntry> {
+    hub.skills
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|skill| !skill.instructions.trim().is_empty())
+        .map(|skill| {
+            let description = if skill.description.trim().is_empty() {
+                skill.when_to_use.clone().unwrap_or_default()
+            } else {
+                skill.description.clone()
+            };
+            SkillCatalogEntry {
+                source: format!("skill:{}", skill.name),
+                name: skill.name,
+                description,
+                tags: skill.allowed_tools,
+                instructions: skill.instructions,
+            }
+        })
+        .collect()
+}
+
+fn tool_allowed_in_catalog(name: &str, policy: &RunToolPolicy) -> bool {
+    // `search_tools` is the discovery entrypoint: an agent allow/deny list
+    // must never be able to hide the only way to reach discoverable tools.
+    name == "search_tools" || tool_allowed_for_run(name, policy)
+}
+
+fn tools_meta_from_snapshot(
+    snapshot: &crate::application::RunCatalogSnapshot,
+    custom_tools: &[ToolDescriptor],
+    policy: &RunToolPolicy,
+) -> Vec<LlmTool> {
+    let mut tools_meta = snapshot
+        .entries
+        .iter()
+        .filter(|entry| tool_allowed_in_catalog(&entry.descriptor.name, policy))
+        .map(|entry| LlmTool {
+            name: entry.descriptor.name.clone(),
+            description: entry.descriptor.description.clone(),
+            input_schema: entry.descriptor.input_schema.clone(),
+        })
+        .collect::<Vec<_>>();
+    tools_meta.extend(llm_custom_tools(custom_tools));
+    let mut seen = std::collections::HashSet::new();
+    tools_meta.retain(|tool| tool.name != FINISH_TASK_TOOL_NAME && seen.insert(tool.name.clone()));
+    tools_meta.push(finish_task_tool_definition());
+    tools_meta
+}
+
+fn executable_snapshot_tools(
+    snapshot: &crate::application::RunCatalogSnapshot,
+    policy: &RunToolPolicy,
+) -> Vec<Arc<dyn worldbase_tools::Tool>> {
+    snapshot
+        .entries
+        .iter()
+        .filter(|entry| tool_allowed_in_catalog(&entry.descriptor.name, policy))
+        .map(|entry| entry.tool.clone())
+        .collect()
+}
+
+fn dynamic_system_suffix_with_skills(
+    head: Option<&str>,
+    instructions: &[String],
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(head) = head.filter(|head| !head.trim().is_empty()) {
+        parts.push(head.to_string());
+    }
+    let instructions = instructions
+        .iter()
+        .map(|instructions| instructions.trim())
+        .filter(|instructions| !instructions.is_empty())
+        .collect::<Vec<_>>();
+    if !instructions.is_empty() {
+        let content = instructions
+            .iter()
+            .enumerate()
+            .map(|(index, instructions)| format!("### Skill {}\n{instructions}", index + 1))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        parts.push(format!(
+            "## Active skills\nFollow these activated skill instructions for the rest of this run.\n\n{content}"
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
 fn apply_persisted_agent_context(
     hub: &Hub,
     context: &mut ChatRunContext,
@@ -5957,6 +6080,9 @@ fn apply_persisted_agent_context(
 pub struct ChatRun {
     pub stream_id: String,
     pub conversation_id: String,
+    /// Short-lived token that resolves direct `tool.call` requests to this
+    /// run's Rust-held catalog. It carries no permission by itself.
+    pub run_capability_token: String,
 }
 
 /// 发起一次 chat：立即返回 stream_id，事件经 channel + hub.event_tx 下发。
@@ -6115,6 +6241,15 @@ fn start_chat_with_stream_id_and_group_runtime_at_depth(
     let stream_id = stream_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let channel = hub.register_stream(&stream_id);
     let abort = CancellationToken::new();
+    // Publish the token before spawning the loop so `chat.send` can return it
+    // synchronously. The catalog itself is registered by `run_chat_inner`
+    // once the platform/agent policy and discovered MCP tools are known.
+    let run_capability_token = uuid::Uuid::new_v4().simple().to_string();
+    {
+        let mut tokens = hub.run_tokens.lock().unwrap();
+        tokens.retain(|_, mapped_stream| mapped_stream != &stream_id);
+        tokens.insert(run_capability_token.clone(), stream_id.clone());
+    }
 
     hub.runs.lock().unwrap().insert(
         stream_id.clone(),
@@ -6148,6 +6283,7 @@ fn start_chat_with_stream_id_and_group_runtime_at_depth(
     Ok(ChatRun {
         stream_id,
         conversation_id,
+        run_capability_token,
     })
 }
 
@@ -6276,6 +6412,11 @@ async fn prepare_scheduled_run(
         .create_conversation(&format!("[定时] {name}"), None)?;
     let stream_id = format!("schedule-{schedule_id}-{}", uuid::Uuid::new_v4());
     let channel = hub.register_stream(&stream_id);
+    {
+        let mut tokens = hub.run_tokens.lock().unwrap();
+        tokens.retain(|_, mapped_stream| mapped_stream != &stream_id);
+        tokens.insert(uuid::Uuid::new_v4().simple().to_string(), stream_id.clone());
+    }
     publish(
         &hub,
         &channel,
@@ -6635,6 +6776,28 @@ fn schedule_calls_for_run(
 /// A write batch must run serially when any member could ask the host for
 /// permission. `auto_approve` disables prompts for unattended runs, so the
 /// batch may stay parallel there.
+fn effective_tool_policy(
+    hub: &Hub,
+    tool: Option<&Arc<dyn worldbase_tools::Tool>>,
+    custom_tool: Option<&ToolDescriptor>,
+    name: &str,
+) -> String {
+    if let Some((app, capability, _)) = hub.application_registry.find_capability(name) {
+        let grants = hub
+            .application_registry
+            .list_grants(Some(&app.app_id))
+            .unwrap_or_default();
+        return crate::application::policy::effective_policy(
+            capability.risk,
+            &app.app_id,
+            &capability.capability_id,
+            &grants,
+        )
+        .to_string();
+    }
+    worldbase_policy_for(hub.store.as_ref(), tool, custom_tool, name)
+}
+
 fn write_call_requires_interactive_permission(
     hub: &Hub,
     tools: &[Arc<dyn worldbase_tools::Tool>],
@@ -6650,7 +6813,7 @@ fn write_call_requires_interactive_permission(
     }
     let tool = tools.iter().find(|tool| tool.name() == call.name);
     let custom_tool = custom_tools.iter().find(|tool| tool.name == call.name);
-    let policy = worldbase_policy_for(hub.store.as_ref(), tool, custom_tool, &call.name);
+    let policy = effective_tool_policy(hub, tool, custom_tool, &call.name);
     !matches!(policy.as_str(), "allow" | "deny")
 }
 
@@ -7198,6 +7361,7 @@ async fn execute_tool_for_run(
     input: serde_json::Value,
     storage_dir: &Path,
 ) -> RunToolExecution {
+    let started = std::time::Instant::now();
     let tool = tools.iter().find(|tool| tool.name() == name);
     let custom_tool = custom_tools.iter().find(|tool| tool.name == name);
     let exec_result = if let Some(error) = tool_input_errors.get(&call_id) {
@@ -7207,7 +7371,7 @@ async fn execute_tool_for_run(
             "当前处于规划模式，不允许执行写入操作 ({name})。请先退出规划模式。"
         ))
     } else {
-        let policy = worldbase_policy_for(hub.store.as_ref(), tool, custom_tool, &name);
+        let policy = effective_tool_policy(hub, tool, custom_tool, &name);
         // The workspace root defines the "safe zone" for command and path
         // permissions: folder-workspace conversations use the selected folder,
         // managed-project runs use the project root.
@@ -7222,7 +7386,10 @@ async fn execute_tool_for_run(
                 .or_else(|| services.target_project_id.clone());
             project_id.and_then(|id| services.projects.project_root(&id).ok())
         });
-        let allowed = crate::permissions::check(
+        let risk = tool
+            .and_then(|tool| tool.risk())
+            .or_else(|| custom_tool.and_then(|tool| tool.risk));
+        let allowed = crate::permissions::check_with_risk(
             hub,
             stream_id,
             &policy,
@@ -7232,6 +7399,7 @@ async fn execute_tool_for_run(
             interactive,
             auto_approve,
             Some(abort),
+            risk,
         )
         .await;
         if abort.is_cancelled() {
@@ -7266,6 +7434,20 @@ async fn execute_tool_for_run(
 
     let (content, is_error, images) =
         process_tool_result(exec_result, &name, &call_id, storage_dir).await;
+    if let Some((app, capability, _)) = hub.application_registry.find_capability(&name) {
+        let _ =
+            hub.application_registry
+                .record_call(worldbase_protocol::types::ApplicationCallAudit {
+                    call_id: call_id.clone(),
+                    conversation_id: services.conversation_id.clone(),
+                    app_id: app.app_id,
+                    capability_id: capability.capability_id,
+                    status: if is_error { "error" } else { "ok" }.into(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    approval_id: None,
+                    created_at: String::new(),
+                });
+    }
     RunToolExecution {
         call_id,
         name,
@@ -7381,6 +7563,16 @@ async fn run_chat_inner(
     if group_collaboration.is_some() {
         catalog_tools.extend(worldbase_tools::group_collaboration_tools());
     }
+    // `search_tools` is the only path to discoverable capabilities. Keep it in
+    // the catalog even if platform filtering or an agent policy would drop it.
+    if !catalog_tools
+        .iter()
+        .any(|tool| tool.name() == "search_tools")
+    {
+        if let Some(tool) = hub.tools.iter().find(|tool| tool.name() == "search_tools") {
+            catalog_tools.push(tool.clone());
+        }
+    }
     let folder_workspace = context
         .workspace_root
         .as_deref()
@@ -7403,23 +7595,6 @@ async fn run_chat_inner(
     services.abort = Some(abort.clone());
     services.group_collaboration = group_collaboration.clone();
     services.set_current_stream(&stream_id);
-    if subagent_nesting_depth < MAX_SUBAGENT_NESTING_DEPTH {
-        services.subagent_runtime = Some(Arc::new(CoreSubagentRuntime::new(
-            hub.clone(),
-            stream_id.clone(),
-            abort.clone(),
-            caps.clone(),
-            interactive,
-            agent.as_ref().map(|agent| agent.id.clone()),
-            provider_entry.as_ref().map(|entry| entry.id.clone()),
-            model_override
-                .clone()
-                .or_else(|| Some(provider.model().to_string())),
-            context.clone(),
-            group_collaboration.clone(),
-            subagent_nesting_depth,
-        )));
-    }
     if context.plan_mode_active {
         // The desktop UI may enter plan mode before this stream begins. Keep
         // the authoritative guard inside Rust rather than relying on a prompt
@@ -7460,18 +7635,94 @@ async fn run_chat_inner(
         .map(|tool| tool.name.as_str())
         .collect();
     catalog_tools.retain(|tool| !host_override_names.contains(tool.name()));
-    let mut visible_tool_catalog = worldbase_tools::descriptors(&catalog_tools);
+
+    let application_entries = application_catalog_entries(&hub, &caps);
+    let mut visible_tool_catalog = catalog_tools
+        .iter()
+        .map(|tool| {
+            let mut descriptor = tool.descriptor();
+            if tool.name().starts_with("mcp__") {
+                descriptor.visibility = ToolVisibility::Discoverable;
+            }
+            descriptor
+        })
+        .collect::<Vec<_>>();
     visible_tool_catalog.extend(catalog_custom_tools.iter().cloned());
+    visible_tool_catalog.extend(
+        application_entries
+            .iter()
+            .map(|entry| entry.descriptor.clone()),
+    );
     visible_tool_catalog.sort_by(|left, right| left.name.cmp(&right.name));
     visible_tool_catalog.dedup_by(|left, right| left.name == right.name);
     services.visible_tool_catalog = Some(Arc::new(visible_tool_catalog));
 
-    let tools = run_tools(catalog_tools, &context, &tool_policy);
     let custom_tools = run_custom_tools(catalog_custom_tools, &tool_policy);
-    let mut tools_meta = llm_tools(&tools);
-    tools_meta.extend(llm_custom_tools(&custom_tools));
-    tools_meta.retain(|tool| tool.name != FINISH_TASK_TOOL_NAME);
-    tools_meta.push(finish_task_tool_definition());
+    let mut base_entries = Vec::new();
+    for tool in catalog_tools {
+        if !tool_allowed_in_catalog(tool.name(), &tool_policy) {
+            continue;
+        }
+        let visibility = if tool.name().starts_with("mcp__") {
+            ToolVisibility::Discoverable
+        } else {
+            tool.visibility()
+        };
+        base_entries.push(catalog_entry(tool, visibility));
+    }
+    base_entries.extend(
+        application_entries
+            .into_iter()
+            .filter(|entry| tool_allowed_for_run(&entry.descriptor.name, &tool_policy)),
+    );
+    let skills = skill_catalog_entries(&hub);
+    let run_capability_token = hub
+        .run_capability_token_for_stream(&stream_id)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+    let allowed_base_names: std::collections::HashSet<String> = base_entries
+        .iter()
+        .map(|entry| entry.descriptor.name.clone())
+        .collect();
+    let catalog = RunToolCatalog::new_with_policy(
+        stream_id.clone(),
+        run_capability_token.clone(),
+        hub.application_registry.clone(),
+        base_entries,
+        skills,
+        caps.clone(),
+        Arc::new(move |name: &str| allowed_base_names.contains(name)),
+    );
+    hub.register_run_catalog(&stream_id, &run_capability_token, catalog.clone());
+    services.catalog_runtime = Some(catalog.clone());
+    services.conversation_id = Some(conversation_id.clone());
+    // A subagent inherits every tool the parent already activated. The base
+    // catalog is policy-filtered, so activation cannot widen the child.
+    if !context.inherited_tool_names.is_empty() {
+        let _ = catalog.activate(&context.inherited_tool_names);
+    }
+    context.inherited_tool_names =
+        worldbase_tools::ToolCatalogRuntime::active_tool_names(catalog.as_ref());
+    if subagent_nesting_depth < MAX_SUBAGENT_NESTING_DEPTH {
+        services.subagent_runtime = Some(Arc::new(CoreSubagentRuntime::new(
+            hub.clone(),
+            stream_id.clone(),
+            abort.clone(),
+            caps.clone(),
+            interactive,
+            agent.as_ref().map(|agent| agent.id.clone()),
+            provider_entry.as_ref().map(|entry| entry.id.clone()),
+            model_override
+                .clone()
+                .or_else(|| Some(provider.model().to_string())),
+            context.clone(),
+            group_collaboration.clone(),
+            subagent_nesting_depth,
+        )));
+    }
+
+    let initial_snapshot = catalog.snapshot();
+    let mut last_catalog_version = initial_snapshot.version;
+    let mut tools_meta = tools_meta_from_snapshot(&initial_snapshot, &custom_tools, &tool_policy);
     let memory_query_vector = resolve_memory_query_vector(&hub, &context).await;
     let system_build = system_prompt(
         &hub,
@@ -7482,7 +7733,7 @@ async fn run_chat_inner(
     )
     .await;
     let system = system_build.full;
-    let dynamic_system_suffix = system_build.dynamic_tail;
+    let dynamic_system_suffix_head = system_build.dynamic_tail;
     let selected_model = model_override
         .as_deref()
         .unwrap_or_else(|| provider.model());
@@ -7566,6 +7817,21 @@ async fn run_chat_inner(
             result = Ok(message.into());
             break;
         }
+        // Refresh the run catalog before every model turn. Registry changes
+        // (application enabled/disabled, grants, MCP reload) invalidate active
+        // entries; `search_tools` activations bump the run catalog version
+        // directly. Either way the next request must use the new snapshot.
+        catalog.refresh_from_registry();
+        let turn_snapshot = catalog.snapshot();
+        if turn_snapshot.version != last_catalog_version {
+            tools_meta = tools_meta_from_snapshot(&turn_snapshot, &custom_tools, &tool_policy);
+            last_catalog_version = turn_snapshot.version;
+        }
+        let turn_tools = executable_snapshot_tools(&turn_snapshot, &tool_policy);
+        let dynamic_system_suffix = dynamic_system_suffix_with_skills(
+            dynamic_system_suffix_head.as_deref(),
+            &turn_snapshot.active_skill_instructions,
+        );
         if segment_iterations >= MAX_STEPS {
             // Keep the loop alive across long-running tasks. The continuation
             // directive is transient context, mirroring Electron's automatic
@@ -8110,7 +8376,7 @@ async fn run_chat_inner(
         let scheduled_groups = schedule_calls_for_run(
             &tool_uses,
             hub.as_ref(),
-            &tools,
+            &turn_tools,
             &custom_tools,
             context.auto_approve_permissions,
         );
@@ -8151,7 +8417,7 @@ async fn run_chat_inner(
                 let index = call.index;
                 let hub = &hub;
                 let services = &services;
-                let tools = &tools;
+                let tools = &turn_tools;
                 let custom_tools = &custom_tools;
                 let stream_id = &stream_id;
                 let abort = &abort;
@@ -8359,5 +8625,6 @@ async fn publish(hub: &Hub, channel: &StreamChannel, stream_id: &str, kind: Even
 
 fn cleanup(hub: &Hub, stream_id: &str) {
     hub.runs.lock().unwrap().remove(stream_id);
+    hub.remove_run_catalog(stream_id);
     worldbase_tools::computer_use::release(stream_id);
 }

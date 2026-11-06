@@ -214,6 +214,20 @@ pub const HOST_ASK_USER: &str = "host.askUser";
 pub const HOST_DIALOG: &str = "host.dialog";
 pub const HOST_NOTIFY: &str = "host.notify";
 
+/// 应用能力平台管理方法（Rust 是 canonical catalog）。
+pub const APPLICATION_LIST: &str = "application.list";
+pub const APPLICATION_GET: &str = "application.get";
+pub const APPLICATION_SET_ENABLED: &str = "application.setEnabled";
+pub const APPLICATION_REFRESH: &str = "application.refresh";
+pub const APPLICATION_GRANTS_LIST: &str = "application.grants.list";
+pub const APPLICATION_GRANTS_SAVE: &str = "application.grants.save";
+pub const APPLICATION_GRANTS_REVOKE: &str = "application.grants.revoke";
+pub const APPLICATION_AUDIT_LIST: &str = "application.audit.list";
+pub const APPLICATION_SEARCH: &str = "application.search";
+pub const APPLICATION_ACTIVATE: &str = "application.activate";
+pub const APPLICATION_INVOKE: &str = "application.invoke";
+pub const APPLICATION_HOST_STATE_CHANGED: &str = "application.host.state.changed";
+
 /// 方法所属能力域。
 pub fn method_domain(method: &str) -> &'static str {
     match method {
@@ -407,6 +421,18 @@ pub const ALL_METHODS: &[&str] = &[
     SKILL_SAVE,
     SKILL_DELETE,
     HOST_RESPOND,
+    APPLICATION_LIST,
+    APPLICATION_GET,
+    APPLICATION_SET_ENABLED,
+    APPLICATION_REFRESH,
+    APPLICATION_GRANTS_LIST,
+    APPLICATION_GRANTS_SAVE,
+    APPLICATION_GRANTS_REVOKE,
+    APPLICATION_AUDIT_LIST,
+    APPLICATION_SEARCH,
+    APPLICATION_ACTIVATE,
+    APPLICATION_INVOKE,
+    APPLICATION_HOST_STATE_CHANGED,
 ];
 
 #[cfg(test)]

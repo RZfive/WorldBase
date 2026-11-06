@@ -1,6 +1,7 @@
 //! WorldBase Harness 核心：Hub（状态与服务编排）、Agent 循环、JSON-RPC dispatcher。
 
 pub mod agent;
+pub mod application;
 pub mod dispatcher;
 pub mod hub;
 pub mod permissions;

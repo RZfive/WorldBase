@@ -2207,6 +2207,142 @@ export function setupIPC (): void {
       .sort((left, right) => left.name.localeCompare(right.name, 'en'))
   })
 
+  // Applications: every read and mutation is proxied to the Rust catalog.
+  const applicationRpc = async () => {
+    await startSelectedRustHarness()
+    return mainState.rustHarness!
+  }
+  const applicationStringArg = (value: unknown, field: string): string => {
+    const text = typeof value === 'string' ? value.trim() : ''
+    if (!text) throw new TypeError(`Invalid ${field}`)
+    return text
+  }
+  const applicationOptionalString = (value: unknown): string => typeof value === 'string' ? value.trim() : ''
+  const applicationStringList = (value: unknown): string[] => Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim())
+    : []
+  const applicationRpcList = (value: unknown, keys: string[]): unknown[] => {
+    if (Array.isArray(value)) return value
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>
+      for (const key of keys) {
+        if (Array.isArray(record[key])) return record[key] as unknown[]
+      }
+    }
+    return []
+  }
+
+  ipcMain.handle('applications:list', async (_event: IpcMainInvokeEvent, rawQuery?: unknown) => {
+    const query = rawQuery && typeof rawQuery === 'object' && !Array.isArray(rawQuery)
+      ? rawQuery as Record<string, unknown>
+      : {}
+    const params: Record<string, unknown> = {}
+    const appId = applicationOptionalString(query.appId)
+    const source = applicationOptionalString(query.source)
+    if (appId) params.appId = appId
+    if (source) params.source = source
+    const client = await applicationRpc()
+    const result = await client.call('application.list', params)
+    return { apps: applicationRpcList(result, ['apps', 'applications', 'records', 'items']) }
+  })
+
+  ipcMain.handle('applications:get', async (_event: IpcMainInvokeEvent, rawAppId?: unknown) => {
+    const appId = applicationStringArg(rawAppId, 'appId')
+    const client = await applicationRpc()
+    const result = await client.call('application.get', { appId, id: appId })
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      const record = result as Record<string, unknown>
+      return record.app ?? record.application ?? record.record ?? result
+    }
+    return result
+  })
+
+  ipcMain.handle('applications:setEnabled', async (_event: IpcMainInvokeEvent, rawAppId?: unknown, enabled?: unknown) => {
+    const appId = applicationStringArg(rawAppId, 'appId')
+    if (typeof enabled !== 'boolean') throw new TypeError('Invalid enabled flag')
+    const client = await applicationRpc()
+    await client.call('application.setEnabled', { appId, id: appId, enabled })
+    return { success: true }
+  })
+
+  ipcMain.handle('applications:refresh', async (_event: IpcMainInvokeEvent, rawAppId?: unknown) => {
+    const appId = applicationOptionalString(rawAppId)
+    const client = await applicationRpc()
+    return await client.call('application.refresh', appId ? { appId, id: appId } : {})
+  })
+
+  ipcMain.handle('applications:grants:list', async (_event: IpcMainInvokeEvent, rawAppId?: unknown) => {
+    const appId = applicationOptionalString(rawAppId)
+    const client = await applicationRpc()
+    const result = await client.call('application.grants.list', appId ? { appId, id: appId } : {})
+    return { grants: applicationRpcList(result, ['grants', 'items']) }
+  })
+
+  ipcMain.handle('applications:grants:save', async (_event: IpcMainInvokeEvent, rawGrant?: unknown) => {
+    if (!rawGrant || typeof rawGrant !== 'object' || Array.isArray(rawGrant)) {
+      throw new TypeError('Invalid application grant')
+    }
+    const outer = rawGrant as Record<string, unknown>
+    const grant = outer.grant && typeof outer.grant === 'object' && !Array.isArray(outer.grant)
+      ? outer.grant as Record<string, unknown>
+      : outer
+    const appId = applicationStringArg(grant.appId, 'grant.appId')
+    const capabilityPattern = applicationOptionalString(grant.capabilityPattern) || '*'
+    const requestedMode = applicationOptionalString(grant.mode) || 'ask'
+    if (requestedMode !== 'allow' && requestedMode !== 'ask' && requestedMode !== 'deny') {
+      throw new TypeError('Invalid grant mode')
+    }
+    const expiresAt = typeof grant.expiresAt === 'string' && grant.expiresAt.trim()
+      ? grant.expiresAt.trim()
+      : null
+    const payload: Record<string, unknown> = {
+      appId,
+      capabilityPattern,
+      permissions: applicationStringList(grant.permissions),
+      dataScope: applicationStringList(grant.dataScope ?? grant.dataScopes),
+      mode: requestedMode,
+      expiresAt
+    }
+    const id = applicationOptionalString(grant.id)
+    if (id) payload.id = id
+    const client = await applicationRpc()
+    return await client.call('application.grants.save', { grant: payload, ...payload })
+  })
+
+  ipcMain.handle('applications:grants:revoke', async (_event: IpcMainInvokeEvent, rawGrantId?: unknown) => {
+    const grantId = applicationStringArg(rawGrantId, 'grantId')
+    const client = await applicationRpc()
+    return await client.call('application.grants.revoke', { grantId, id: grantId })
+  })
+
+  ipcMain.handle('applications:audit:list', async (_event: IpcMainInvokeEvent, rawOptions?: unknown) => {
+    const options = rawOptions && typeof rawOptions === 'object' && !Array.isArray(rawOptions)
+      ? rawOptions as Record<string, unknown>
+      : {}
+    const appId = applicationOptionalString(options.appId)
+    const requestedLimit = typeof options.limit === 'number' && Number.isFinite(options.limit)
+      ? Math.trunc(options.limit)
+      : 20
+    const limit = Math.min(200, Math.max(1, requestedLimit))
+    const client = await applicationRpc()
+    const result = await client.call('application.audit.list', {
+      limit,
+      ...(appId ? { appId, id: appId } : {})
+    })
+    return { audits: applicationRpcList(result, ['audits', 'items', 'records']) }
+  })
+
+  ipcMain.handle('lightapp:list', async () => {
+    const client = await applicationRpc()
+    return await client.call('lightapp.list', {})
+  })
+
+  ipcMain.handle('lightapp:delete', async (_event: IpcMainInvokeEvent, rawId?: unknown) => {
+    const id = applicationStringArg(rawId, 'lightapp id')
+    const client = await applicationRpc()
+    return await client.call('lightapp.delete', { id })
+  })
+
   ipcMain.handle('agentGroups:list', async () => {
     const rustClient = await selectedRustProjectClient()
     if (rustClient) return await rustClient.listAgentGroups()

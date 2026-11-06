@@ -255,7 +255,15 @@ pub fn write_pptx(path: &Path, slides: &[Slide]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn text_shape(id: u32, x: u32, y: u32, cx: u32, cy: u32, text: &str, size: u32) -> String {
+pub(crate) fn text_shape(
+    id: u32,
+    x: u32,
+    y: u32,
+    cx: u32,
+    cy: u32,
+    text: &str,
+    size: u32,
+) -> String {
     let paragraphs = text
         .lines()
         .map(|line| {

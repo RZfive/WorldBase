@@ -161,11 +161,12 @@ void main() {
     final tools = availableTools.map((t) => (t as Map)['name']).toSet();
     expect(
       tools,
-      hasLength(48),
+      hasLength(49),
       reason:
           'without webview automation only the mobile executable surface remains',
     );
     expect(tools, contains('read_file'));
+    expect(tools, contains('search_tools'));
     expect(
       tools,
       contains('ask_user'),

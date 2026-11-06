@@ -195,6 +195,14 @@ pub struct McpTool {
     pub description: String,
     #[serde(default)]
     pub input_schema: Value,
+    /// Optional application metadata advertised by the MCP server. All fields
+    /// default to empty so older servers and persisted payloads stay valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, alias = "app_id", skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -217,6 +225,14 @@ pub struct McpToolSummary {
     pub local_name: String,
     pub description: String,
     pub input_schema: Value,
+    /// Application metadata surfaced by the MCP server. Omitted when absent so
+    /// existing Settings consumers see the same payload they did before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -576,6 +592,9 @@ impl McpConnection {
                         .get("inputSchema")
                         .cloned()
                         .unwrap_or_else(|| json!({ "type": "object" })),
+                    category: tool_metadata_string(tool, &["category"]),
+                    tags: tool_metadata_tags(tool),
+                    app_id: tool_metadata_string(tool, &["appId", "app_id"]),
                 });
             }
         }
@@ -1543,6 +1562,38 @@ impl McpManager {
     }
 }
 
+/// Read an optional metadata string from the tool payload, accepting both the
+/// top-level MCP extension and the standard `_meta` escape hatch.
+fn tool_metadata_string(tool: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        tool.get(*key)
+            .or_else(|| tool.get("_meta").and_then(|meta| meta.get(*key)))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+/// Merge top-level and `_meta` tags while preserving order and de-duplicating.
+fn tool_metadata_tags(tool: &Value) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for source in [Some(tool), tool.get("_meta")].into_iter().flatten() {
+        let Some(values) = source.get("tags").and_then(Value::as_array) else {
+            continue;
+        };
+        for value in values {
+            let Some(tag) = value.as_str().map(str::trim).filter(|tag| !tag.is_empty()) else {
+                continue;
+            };
+            if !tags.iter().any(|existing| existing == tag) {
+                tags.push(tag.to_string());
+            }
+        }
+    }
+    tags
+}
+
 fn tool_summary(tool: &McpTool) -> McpToolSummary {
     let schema = if tool.input_schema.is_object() {
         tool.input_schema.clone()
@@ -1559,6 +1610,9 @@ fn tool_summary(tool: &McpTool) -> McpToolSummary {
         local_name: build_local_tool_name(&tool.server, &tool.name),
         description: format!("[MCP:{}] {description}", tool.server_name),
         input_schema: schema,
+        category: tool.category.clone(),
+        tags: tool.tags.clone(),
+        app_id: tool.app_id.clone(),
     }
 }
 
@@ -1763,8 +1817,14 @@ mod tests {
             Some("/tmp/runtime:/usr/bin"),
             "/opt/homebrew/bin:/usr/bin:/Users/me/n/bin:/opt/homebrew/bin",
         );
-        assert_eq!(merged, "/tmp/runtime:/usr/bin:/opt/homebrew/bin:/Users/me/n/bin");
-        assert_eq!(merge_path_entries(None, ":/usr/local/bin::/usr/bin"), "/usr/local/bin:/usr/bin");
+        assert_eq!(
+            merged,
+            "/tmp/runtime:/usr/bin:/opt/homebrew/bin:/Users/me/n/bin"
+        );
+        assert_eq!(
+            merge_path_entries(None, ":/usr/local/bin::/usr/bin"),
+            "/usr/local/bin:/usr/bin"
+        );
     }
 
     #[test]
@@ -1784,9 +1844,15 @@ mod tests {
             "env": { "PATH": "/nonexistent-worldbase-dir" }
         }))
         .unwrap();
-        let error = spawn_stdio_server(&config).await.err().expect("spawn must fail");
+        let error = spawn_stdio_server(&config)
+            .await
+            .err()
+            .expect("spawn must fail");
         let message = format!("{error:#}");
-        assert!(message.contains("spawn mcp server worldbase-definitely-missing-mcp-command"), "{message}");
+        assert!(
+            message.contains("spawn mcp server worldbase-definitely-missing-mcp-command"),
+            "{message}"
+        );
         assert!(message.contains("command not found"), "{message}");
         assert!(message.contains("/nonexistent-worldbase-dir"), "{message}");
     }
@@ -1915,6 +1981,109 @@ mod tests {
         }))
         .unwrap();
         assert!(!disabled.enabled);
+    }
+
+    #[test]
+    fn mcp_tool_metadata_defaults_are_backward_compatible() {
+        let tool: McpTool = serde_json::from_value(json!({
+            "server": "docs",
+            "serverName": "Docs",
+            "name": "lookup",
+            "description": "Look up a document",
+            "inputSchema": { "type": "object" }
+        }))
+        .unwrap();
+        assert!(tool.category.is_none());
+        assert!(tool.tags.is_empty());
+        assert!(tool.app_id.is_none());
+
+        // Empty metadata must not be serialized, so older clients and the
+        // existing mcp.list payload remain unchanged.
+        let encoded = serde_json::to_value(&tool).unwrap();
+        assert!(encoded.get("category").is_none());
+        assert!(encoded.get("tags").is_none());
+        assert!(encoded.get("appId").is_none());
+    }
+
+    #[test]
+    fn mcp_tool_metadata_round_trips_and_accepts_snake_case_app_id() {
+        let tool: McpTool = serde_json::from_value(json!({
+            "server": "docs",
+            "serverName": "Docs",
+            "name": "lookup",
+            "description": "Look up a document",
+            "inputSchema": { "type": "object" },
+            "category": "documents",
+            "tags": ["search", "read"],
+            "app_id": "worldbase.documents"
+        }))
+        .unwrap();
+        assert_eq!(tool.category.as_deref(), Some("documents"));
+        assert_eq!(tool.tags, vec!["search", "read"]);
+        assert_eq!(tool.app_id.as_deref(), Some("worldbase.documents"));
+
+        let encoded = serde_json::to_value(&tool).unwrap();
+        assert_eq!(encoded["category"], "documents");
+        assert_eq!(encoded["tags"], json!(["search", "read"]));
+        assert_eq!(encoded["appId"], "worldbase.documents");
+    }
+
+    #[test]
+    fn discovered_tool_metadata_reads_meta_extension_and_deduplicates_tags() {
+        let tool = json!({
+            "category": "documents",
+            "tags": ["search", "read"],
+            "appId": "worldbase.documents",
+            "_meta": {
+                "tags": ["read", "contract"],
+                "category": "ignored-when-top-level-exists"
+            }
+        });
+        assert_eq!(
+            tool_metadata_string(&tool, &["category"]).as_deref(),
+            Some("documents")
+        );
+        assert_eq!(
+            tool_metadata_string(&tool, &["appId", "app_id"]).as_deref(),
+            Some("worldbase.documents")
+        );
+        assert_eq!(
+            tool_metadata_tags(&tool),
+            vec!["search", "read", "contract"]
+        );
+    }
+
+    #[test]
+    fn tool_summary_preserves_metadata_without_empty_fields() {
+        let summary = tool_summary(&McpTool {
+            server: "docs".into(),
+            server_name: "Docs".into(),
+            name: "lookup".into(),
+            description: "Look up a document".into(),
+            input_schema: json!({ "type": "object" }),
+            category: Some("documents".into()),
+            tags: vec!["search".into()],
+            app_id: Some("worldbase.documents".into()),
+        });
+        let encoded = serde_json::to_value(&summary).unwrap();
+        assert_eq!(encoded["category"], "documents");
+        assert_eq!(encoded["tags"], json!(["search"]));
+        assert_eq!(encoded["appId"], "worldbase.documents");
+
+        let empty = tool_summary(&McpTool {
+            server: "docs".into(),
+            server_name: "Docs".into(),
+            name: "lookup".into(),
+            description: "Look up a document".into(),
+            input_schema: json!({ "type": "object" }),
+            category: None,
+            tags: Vec::new(),
+            app_id: None,
+        });
+        let encoded = serde_json::to_value(&empty).unwrap();
+        assert!(encoded.get("category").is_none());
+        assert!(encoded.get("tags").is_none());
+        assert!(encoded.get("appId").is_none());
     }
 
     #[test]

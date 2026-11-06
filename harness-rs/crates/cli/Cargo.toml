@@ -19,4 +19,8 @@ tracing-subscriber = { workspace = true }
 
 worldbase-core = { path = "../core" }
 worldbase-memory = { path = "../memory" }
+worldbase-project-runtime = { path = "../project-runtime" }
 worldbase-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

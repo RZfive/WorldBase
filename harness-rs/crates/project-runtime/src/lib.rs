@@ -3,7 +3,17 @@
 //! bundled Node 产物存在时优先使用（`dist/node-bin`），否则回退系统 Node；
 //! 仅桌面/server 构建链接本 crate。
 
+mod app_manifest;
+mod app_rpc;
 mod control;
+
+pub use app_manifest::{
+    list_manifests, load_manifest, manifest_hash, validate_manifest, APP_MANIFEST_RELATIVE_PATH,
+    APP_REVOCATIONS_RELATIVE_PATH,
+};
+pub use app_rpc::{
+    discover_at, invoke_at, APP_RPC_DISCOVERY_PATH, APP_RPC_INVOKE_PATH, MAX_APP_RPC_RESPONSE_BYTES,
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -20,7 +30,7 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::net::TcpStream;
-use worldbase_protocol::types::{DevServerInfo, ProjectInfo};
+use worldbase_protocol::types::{AppManifest, DevServerInfo, ProjectInfo, RuntimeLease};
 
 const MAX_LOG_ENTRIES: usize = 500;
 const MAX_LOG_ENTRY_BYTES: usize = 16 * 1024;
@@ -37,6 +47,9 @@ pub struct ProjectRuntime {
     /// must not overlap the next scheduled pass and restart the same project
     /// twice.
     gateway_health_check: tokio::sync::Mutex<()>,
+    app_tokens: Mutex<HashMap<String, String>>,
+    app_manifests: Mutex<HashMap<String, AppManifest>>,
+    app_leases: Mutex<HashMap<String, RuntimeLease>>,
 }
 
 struct DevServerHandle {
@@ -1089,6 +1102,9 @@ impl ProjectRuntime {
             restart_policies: Mutex::new(Default::default()),
             restart_counts: Mutex::new(Default::default()),
             gateway_health_check: tokio::sync::Mutex::new(()),
+            app_tokens: Mutex::new(Default::default()),
+            app_manifests: Mutex::new(Default::default()),
+            app_leases: Mutex::new(Default::default()),
         }
     }
 
@@ -1274,7 +1290,7 @@ impl ProjectRuntime {
             "project name must contain a usable path character"
         );
         normalize_project_id(safe)?;
-        let dir = self.projects_dir.join(&safe);
+        let dir = self.projects_dir.join(safe);
         anyhow::ensure!(!dir.exists(), "project already exists: {safe}");
         tokio::fs::create_dir_all(&dir).await?;
 
@@ -1667,6 +1683,18 @@ impl ProjectRuntime {
             launch.port,
             launch.node_env,
         )?;
+        if let Some(token) = self.app_token(project_id) {
+            let app_id = self
+                .app_manifest(project_id)
+                .ok()
+                .flatten()
+                .map(|manifest| manifest.app.id)
+                .filter(|app_id| !app_id.trim().is_empty())
+                .unwrap_or_else(|| project_id.to_string());
+            command
+                .env("WORLDBASE_APP_TOKEN", token)
+                .env("WORLDBASE_APP_ID", app_id);
+        }
         let mut child = command
             .spawn()
             .with_context(|| format!("spawn project runtime for {project_id}"))?;

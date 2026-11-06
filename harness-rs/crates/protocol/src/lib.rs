@@ -4,11 +4,13 @@
 //! JSON-RPC 2.0 语义。schema 与 `PROTOCOL_VERSION` 冻结后，TS/Dart 绑定由
 //! 本 crate 生成。
 
+pub mod application;
 pub mod event;
 pub mod method;
 pub mod rpc;
 pub mod types;
 
+pub use application::*;
 pub use event::*;
 pub use method::*;
 pub use rpc::*;

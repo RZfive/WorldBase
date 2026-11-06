@@ -81,8 +81,12 @@ fn assert_text_tool_not_office_target(file_path: &str) -> Result<()> {
 /// the projects directory under the host data root, matching
 /// `<userData>/projects/<id>` beside `<userData>/snapshots`.
 fn backup_project_file_before_overwrite(project_root: &Path, full: &Path) {
-    let Some(projects_dir) = project_root.parent() else { return };
-    let Some(user_data) = projects_dir.parent() else { return };
+    let Some(projects_dir) = project_root.parent() else {
+        return;
+    };
+    let Some(user_data) = projects_dir.parent() else {
+        return;
+    };
     let backup_dir = user_data.join("snapshots").join("_backups");
     if std::fs::create_dir_all(&backup_dir).is_err() {
         return;
@@ -101,7 +105,10 @@ fn backup_project_file_before_overwrite(project_root: &Path, full: &Path) {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
-    let _ = std::fs::copy(full, backup_dir.join(format!("{name}.{digest}.{millis}.bak")));
+    let _ = std::fs::copy(
+        full,
+        backup_dir.join(format!("{name}.{digest}.{millis}.bak")),
+    );
 }
 
 #[derive(Debug)]
@@ -861,24 +868,33 @@ impl Tool for ProjectPatchFileTool {
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
-        const SHAPE: &str = "patches must be an array of { start_line, end_line, content } objects.";
+        const SHAPE: &str =
+            "patches must be an array of { start_line, end_line, content } objects.";
         let (project_id, file_path, full) = project_file_path(&input, "file_path", services)?;
         anyhow::ensure!(!file_path.trim().is_empty(), "file_path is required");
         assert_text_tool_not_office_target(&file_path)?;
 
-        let raw = input.get("patches").ok_or_else(|| anyhow::anyhow!("{SHAPE}"))?;
+        let raw = input
+            .get("patches")
+            .ok_or_else(|| anyhow::anyhow!("{SHAPE}"))?;
         let array = if let Some(array) = raw.as_array() {
             array.clone()
         } else if let Some(text) = raw.as_str() {
-            let parsed: Value = serde_json::from_str(text).map_err(|_| anyhow::anyhow!("{SHAPE}"))?;
-            parsed.as_array().cloned().ok_or_else(|| anyhow::anyhow!("{SHAPE}"))?
+            let parsed: Value =
+                serde_json::from_str(text).map_err(|_| anyhow::anyhow!("{SHAPE}"))?;
+            parsed
+                .as_array()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("{SHAPE}"))?
         } else {
             anyhow::bail!("{SHAPE}");
         };
         let mut patches = Vec::with_capacity(array.len());
         for (index, entry) in array.iter().enumerate() {
             let Some(object) = entry.as_object() else {
-                anyhow::bail!("patches[{index}] must be an object with start_line, end_line, and content.");
+                anyhow::bail!(
+                    "patches[{index}] must be an object with start_line, end_line, and content."
+                );
             };
             let number = |key: &str| -> Option<f64> {
                 match object.get(key) {
@@ -887,8 +903,9 @@ impl Tool for ProjectPatchFileTool {
                     _ => None,
                 }
             };
-            let start_line = number("start_line")
-                .ok_or_else(|| anyhow::anyhow!("patches[{index}].start_line must be a positive integer."))?;
+            let start_line = number("start_line").ok_or_else(|| {
+                anyhow::anyhow!("patches[{index}].start_line must be a positive integer.")
+            })?;
             let end_line = number("end_line")
                 .ok_or_else(|| anyhow::anyhow!("patches[{index}].end_line must be an integer."))?;
             let Some(content) = object.get("content").and_then(Value::as_str) else {
@@ -902,7 +919,11 @@ impl Tool for ProjectPatchFileTool {
                 end_line.is_finite(),
                 "patches[{index}].end_line must be an integer."
             );
-            patches.push((start_line.floor() as usize, end_line.floor() as usize, content.to_string()));
+            patches.push((
+                start_line.floor() as usize,
+                end_line.floor() as usize,
+                content.to_string(),
+            ));
         }
         anyhow::ensure!(
             !patches.is_empty(),
@@ -917,7 +938,11 @@ impl Tool for ProjectPatchFileTool {
             let (current_start, current_end, _) = patches[index];
             let (next_start, next_end, _) = patches[index + 1];
             let current_effective_start = current_start.max(1);
-            let next_effective_end = if next_end < next_start { next_start - 1 } else { next_end };
+            let next_effective_end = if next_end < next_start {
+                next_start - 1
+            } else {
+                next_end
+            };
             anyhow::ensure!(
                 next_effective_end < current_effective_start,
                 "Patches overlap: lines {next_start}-{next_end} and {current_start}-{current_end}. Split into non-overlapping ranges."
@@ -926,7 +951,11 @@ impl Tool for ProjectPatchFileTool {
         for (start_line, end_line, content) in &patches {
             let start_index = (start_line - 1).min(total_lines);
             let is_insert = end_line < start_line;
-            let end_index = if is_insert { start_index } else { (*end_line).min(total_lines) };
+            let end_index = if is_insert {
+                start_index
+            } else {
+                (*end_line).min(total_lines)
+            };
             let replacement: Vec<String> = if content.is_empty() {
                 Vec::new()
             } else {
@@ -989,6 +1018,8 @@ mod tests {
             todo_items: Arc::new(std::sync::Mutex::new(Vec::new())),
             read_files: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store: store.clone(),
             memory_queue: None,
             memory_scopes: Vec::new(),
@@ -1133,8 +1164,8 @@ mod tests {
 #[cfg(test)]
 mod project_native_parity_tests {
     use super::{
-        ProjectDeleteFileTool, ProjectEditFileTool, ProjectListFilesTool,
-        ProjectPatchFileTool, ProjectReadFileTool, ProjectWriteFileTool,
+        ProjectDeleteFileTool, ProjectEditFileTool, ProjectListFilesTool, ProjectPatchFileTool,
+        ProjectReadFileTool, ProjectWriteFileTool,
     };
     use crate::{Tool, ToolServices};
     use serde_json::json;
@@ -1157,6 +1188,8 @@ mod project_native_parity_tests {
             todo_items: Arc::new(Mutex::new(Vec::new())),
             read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store: store.clone(),
             memory_queue: None,
             memory_scopes: Vec::new(),
@@ -1274,7 +1307,10 @@ mod project_native_parity_tests {
             .unwrap();
         assert_eq!(entries.len(), 1, "one .bak file expected");
         assert!(
-            entries[0].file_name().to_string_lossy().starts_with("notes.txt."),
+            entries[0]
+                .file_name()
+                .to_string_lossy()
+                .starts_with("notes.txt."),
             "backup keeps the original file name prefix"
         );
         assert_eq!(std::fs::read_to_string(entries[0].path()).unwrap(), "v1");
@@ -1298,7 +1334,10 @@ mod project_native_parity_tests {
             .contains("You must read dup.txt with read_project_file before editing it, so the edit matches its current content."));
 
         ProjectReadFileTool
-            .execute(json!({ "project_id": "alpha", "file_path": "dup.txt" }), &service)
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "dup.txt" }),
+                &service,
+            )
             .await
             .unwrap();
 
@@ -1383,7 +1422,10 @@ mod project_native_parity_tests {
         std::fs::write(temp.path().join("projects/alpha/app.txt"), "l1\nl2\nl3").unwrap();
 
         let empty = ProjectReadFileTool
-            .execute(json!({ "project_id": "alpha", "file_path": "empty.md" }), &service)
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "empty.md" }),
+                &service,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -1410,13 +1452,19 @@ mod project_native_parity_tests {
         std::fs::write(temp.path().join("projects/alpha/gone.txt"), "x").unwrap();
 
         let deleted = ProjectDeleteFileTool
-            .execute(json!({ "project_id": "alpha", "file_path": "gone.txt" }), &service)
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "gone.txt" }),
+                &service,
+            )
             .await
             .unwrap();
         assert_eq!(deleted["message"], "File gone.txt deleted successfully");
 
         let skipped = ProjectDeleteFileTool
-            .execute(json!({ "project_id": "alpha", "file_path": "gone.txt" }), &service)
+            .execute(
+                json!({ "project_id": "alpha", "file_path": "gone.txt" }),
+                &service,
+            )
             .await
             .unwrap();
         assert_eq!(skipped["skipped"], true);

@@ -110,6 +110,414 @@ fn package_has_next(files: &Map<String, Value>) -> bool {
         .unwrap_or(false)
 }
 
+const AI_MANIFEST_PATH: &str = ".worldbase/app-capabilities.json";
+const AI_INTEGRATION_DOC_PATH: &str = "AI_INTEGRATION.md";
+const AI_CONTRACT_TEST_PATH: &str = "tests/capability_contract/example.test.mjs";
+
+fn ai_integration_enabled(input: &Value) -> Result<bool> {
+    match input.get("ai_integration") {
+        None | Some(Value::Null) => Ok(true),
+        Some(Value::Bool(enabled)) => Ok(*enabled),
+        Some(Value::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
+            "" | "true" | "enabled" | "on" => Ok(true),
+            "false" | "none" | "disabled" | "off" => Ok(false),
+            other => anyhow::bail!(
+                "create_project 的 ai_integration 必须是布尔值或 \"none\"，收到: {other}"
+            ),
+        },
+        Some(_) => anyhow::bail!("create_project 的 ai_integration 必须是布尔值或 \"none\""),
+    }
+}
+
+fn ai_integration_note(input: &Value) -> Option<String> {
+    input
+        .get("ai_integration_note")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|note| !note.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn scaffold_uses_typescript(files: &Map<String, Value>, meta: &Map<String, Value>) -> bool {
+    if files.keys().any(|path| {
+        Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "ts" | "tsx" | "mts" | "cts"))
+    }) {
+        return true;
+    }
+    if meta
+        .get("framework")
+        .and_then(Value::as_str)
+        .is_some_and(|framework| framework.eq_ignore_ascii_case("nextjs"))
+    {
+        return true;
+    }
+    let Some(package) = files
+        .get("package.json")
+        .and_then(Value::as_str)
+        .and_then(|content| serde_json::from_str::<Value>(content).ok())
+    else {
+        return true;
+    };
+    ["dependencies", "devDependencies"].into_iter().any(|key| {
+        package
+            .get(key)
+            .and_then(Value::as_object)
+            .map(|entries| entries.contains_key("typescript") || entries.contains_key("next"))
+            .unwrap_or(false)
+    })
+}
+
+fn example_capability_manifest(
+    project_id: &str,
+    name: &str,
+    project_type: &str,
+    enabled: bool,
+) -> Value {
+    let app_id = format!("worldbase.local.{project_id}");
+    let capabilities = if enabled {
+        json!([{
+            "id": "example.search",
+            "title": "Search example records",
+            "description": "Search the application's example domain records with a text query.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "minLength": 1 }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "title": { "type": "string" }
+                            },
+                            "required": ["id", "title"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "total": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["items", "total"],
+                "additionalProperties": false
+            },
+            "operation": "example.search",
+            "risk": "read",
+            "permissions": [],
+            "dataScopes": ["project"],
+            "sideEffects": false,
+            "idempotent": true,
+            "deadlineMs": 5000
+        }])
+    } else {
+        json!([])
+    };
+
+    let mut manifest = json!({
+        "schemaVersion": 1,
+        "app": {
+            "id": app_id,
+            "name": name,
+            "version": "0.1.0",
+            "description": format!("{name} ({project_type}) application capability manifest"),
+            "tags": [project_type],
+            "platforms": ["desktop"],
+            "trustLevel": "untrusted"
+        },
+        "runtime": {
+            "kind": "managed_project",
+            "activation": "on-demand"
+        },
+        "capabilities": capabilities
+    });
+    if !enabled {
+        manifest["aiIntegration"] = Value::String("none".into());
+    }
+    manifest
+}
+
+fn ai_integration_document(
+    name: &str,
+    app_id: &str,
+    extension: &str,
+    enabled: bool,
+    note: Option<&str>,
+) -> String {
+    if !enabled {
+        let reason = note.unwrap_or("该应用为纯展示应用，没有需要暴露给 AI 的业务操作。");
+        return format!(
+            "# AI Integration\n\n\
+应用：{name}（`{app_id}`）\n\n\
+AI 接入状态：`aiIntegration: \"none\"`\n\n\
+## 原因\n\n\
+{reason}\n\n\
+## 何时使用\n\n\
+无。该应用不声明任何 capability，AI 不应尝试通过界面自动化替代业务操作。\n\n\
+## 后续接入\n\n\
+在 `.worldbase/app-capabilities.json` 中增加 capability 和严格 schema，\
+补充 `src/domain` 业务 service 与 `src/ai` 适配层，并重新生成 capability contract test。\n"
+        );
+    }
+
+    let note_section = note
+        .map(|note| format!("\n## 补充说明\n\n{note}\n"))
+        .unwrap_or_default();
+    format!(
+        "# AI Integration\n\n\
+应用：{name}（`{app_id}`）\n\n\
+## 自然语言用法\n\n\
+用户可以直接用业务语言请求，例如“在 {name} 里搜索和示例相关的记录”。\
+宿主把自然语言意图映射到稳定 capability `example.search`，AI 不需要理解页面、状态管理或数据库布局。\n\n\
+## 何时使用\n\n\
+- 需要按关键词查询应用内的示例业务记录时。\n\
+- 调用方已有明确的非空查询文本，并期望得到结构化结果时。\n\n\
+## 何时不要使用\n\n\
+- 查询为空或意图不明确时，应先向用户澄清。\n\
+- 需要写入、删除或触发外部副作用的任务不应使用该只读 capability。\n\
+- 不要用界面自动化替代已经声明的业务 operation。\n\n\
+## 前置条件\n\n\
+- 应用已启动，并通过 `worldbase app validate .` 校验 manifest。\n\
+- 宿主已按 manifest allowlist 授权 `example.search`。\n\n\
+## 典型输入\n\n\
+- 一个非空的 `query` 字符串，例如“示例”。\n\n\
+## 典型结果\n\n\
+- `items`：匹配的记录数组，每项包含 `id` 和 `title`。\n\
+- `total`：匹配记录数量。\n\n\
+## 实现位置\n\n\
+- 领域逻辑：`src/domain/example-service.{extension}`\n\
+- AI 适配层：`src/ai/capabilities.{extension}`\n\
+- Manifest：`.worldbase/app-capabilities.json`\n\
+- 契约测试：`tests/capability_contract/example.test.mjs`\n{note_section}\n\
+## 校验\n\n\
+```bash\nworldbase app validate .\n```\n"
+    )
+}
+
+fn write_scaffold_files(root: &Path, files: &Map<String, Value>) -> Result<()> {
+    for (relative_path, content) in files {
+        let content = content
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("generated file {relative_path} must be a string"))?;
+        let target = root.join(relative_path);
+        if target.exists() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&target, content)
+            .map_err(|error| anyhow::anyhow!("write {}: {error}", target.display()))?;
+    }
+    Ok(())
+}
+
+fn ai_scaffold_files(
+    project_id: &str,
+    name: &str,
+    project_type: &str,
+    files: &Map<String, Value>,
+    meta: &Map<String, Value>,
+    enabled: bool,
+    note: Option<&str>,
+) -> Result<Map<String, Value>> {
+    let typescript = scaffold_uses_typescript(files, meta);
+    let extension = if typescript { "ts" } else { "js" };
+    let app_id = format!("worldbase.local.{project_id}");
+    let manifest = example_capability_manifest(project_id, name, project_type, enabled);
+    let manifest = format!("{}\n", serde_json::to_string_pretty(&manifest)?);
+
+    let mut generated = Map::new();
+    generated.insert(AI_MANIFEST_PATH.into(), Value::String(manifest));
+    generated.insert(
+        AI_INTEGRATION_DOC_PATH.into(),
+        Value::String(ai_integration_document(
+            name, &app_id, extension, enabled, note,
+        )),
+    );
+    if !enabled {
+        return Ok(generated);
+    }
+
+    let domain = if typescript {
+        r#"export interface ExampleSearchInput {
+  query: string;
+}
+
+export interface ExampleSearchItem {
+  id: string;
+  title: string;
+}
+
+export interface ExampleSearchResult {
+  items: ExampleSearchItem[];
+  total: number;
+}
+
+const EXAMPLE_ITEMS: ExampleSearchItem[] = [
+  { id: "example-1", title: "Example invoice" },
+  { id: "example-2", title: "Example note" },
+];
+
+export function searchExamples(input: ExampleSearchInput): ExampleSearchResult {
+  const query = (input?.query ?? "").trim().toLowerCase();
+  const items = query
+    ? EXAMPLE_ITEMS.filter((item) => item.title.toLowerCase().includes(query))
+    : [...EXAMPLE_ITEMS];
+  return { items, total: items.length };
+}
+"#
+    } else {
+        r#"const EXAMPLE_ITEMS = [
+  { id: "example-1", title: "Example invoice" },
+  { id: "example-2", title: "Example note" },
+];
+
+function searchExamples(input) {
+  const query = (input?.query ?? "").trim().toLowerCase();
+  const items = query
+    ? EXAMPLE_ITEMS.filter((item) => item.title.toLowerCase().includes(query))
+    : [...EXAMPLE_ITEMS];
+  return { items, total: items.length };
+}
+
+module.exports = { searchExamples };
+"#
+    };
+    generated.insert(
+        format!("src/domain/example-service.{extension}"),
+        Value::String(domain.into()),
+    );
+
+    let adapter = if typescript {
+        r#"import {
+  searchExamples,
+  type ExampleSearchInput,
+  type ExampleSearchResult,
+} from "../domain/example-service";
+
+export interface CapabilityCallContext {
+  requestId: string;
+  signal?: AbortSignal;
+}
+
+export interface AppCapability<TInput, TOutput> {
+  id: string;
+  invoke(input: TInput, context: CapabilityCallContext): Promise<TOutput>;
+}
+
+function assertSearchInput(input: unknown): ExampleSearchInput {
+  if (
+    !input ||
+    typeof input !== "object" ||
+    typeof (input as ExampleSearchInput).query !== "string"
+  ) {
+    throw new Error("example.search expects { query: string }");
+  }
+  return input as ExampleSearchInput;
+}
+
+export const capabilities: Record<string, AppCapability<unknown, unknown>> = {
+  "example.search": {
+    id: "example.search",
+    async invoke(input, _context): Promise<ExampleSearchResult> {
+      return searchExamples(assertSearchInput(input));
+    },
+  },
+};
+
+export async function invokeCapability(
+  capabilityId: string,
+  input: unknown,
+  context: CapabilityCallContext,
+): Promise<unknown> {
+  const capability = capabilities[capabilityId];
+  if (!capability) {
+    throw new Error(`unknown capability: ${capabilityId}`);
+  }
+  return capability.invoke(input, context);
+}
+"#
+    } else {
+        r#"const { searchExamples } = require("../domain/example-service");
+
+function assertSearchInput(input) {
+  if (!input || typeof input !== "object" || typeof input.query !== "string") {
+    throw new Error("example.search expects { query: string }");
+  }
+  return input;
+}
+
+const capabilities = {
+  "example.search": {
+    id: "example.search",
+    async invoke(input, _context) {
+      return searchExamples(assertSearchInput(input));
+    },
+  },
+};
+
+async function invokeCapability(capabilityId, input, context) {
+  const capability = capabilities[capabilityId];
+  if (!capability) {
+    throw new Error(`unknown capability: ${capabilityId}`);
+  }
+  return capability.invoke(input, context);
+}
+
+module.exports = { capabilities, invokeCapability };
+"#
+    };
+    generated.insert(
+        format!("src/ai/capabilities.{extension}"),
+        Value::String(adapter.into()),
+    );
+
+    let contract_test = r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+
+const manifest = JSON.parse(
+  await readFile(new URL("../../.worldbase/app-capabilities.json", import.meta.url), "utf8"),
+);
+
+test("example.search is declared with a read-only contract", () => {
+  const capability = manifest.capabilities.find((entry) => entry.id === "example.search");
+  assert.ok(capability, "example.search is declared");
+  assert.equal(capability.risk, "read");
+  assert.equal(capability.sideEffects, false);
+  assert.equal(capability.inputSchema.type, "object");
+  assert.deepEqual(capability.inputSchema.required, ["query"]);
+});
+
+test.skip("example.search returns a structured result", async () => {
+  const adapter = await import("__ADAPTER_MODULE__");
+  const capabilities = adapter.capabilities ?? adapter.default?.capabilities;
+  const result = await capabilities["example.search"].invoke(
+    { query: "example" },
+    { requestId: "contract-test" },
+  );
+  assert.ok(Array.isArray(result.items));
+  assert.equal(result.total, result.items.length);
+});
+"#;
+    let adapter_module = format!("../../src/ai/capabilities.{extension}");
+    generated.insert(
+        AI_CONTRACT_TEST_PATH.into(),
+        Value::String(contract_test.replace("__ADAPTER_MODULE__", &adapter_module)),
+    );
+
+    Ok(generated)
+}
+
 const MAX_PROJECT_SLUG_LENGTH: usize = 20;
 const PROJECT_ID_HASH_LENGTH: usize = 8;
 
@@ -224,7 +632,9 @@ impl Tool for ProjectCreateTool {
                 "install_dependencies": { "type": "boolean", "description": "When true, install dependencies immediately after project creation. Defaults to false in development_mode and true otherwise when package.json exists." },
                 "build_and_start": { "type": "boolean", "description": "When true, build (if needed) and start the project immediately. Defaults to false in development_mode and true otherwise." },
                 "cleanup_dependencies_on_success": { "type": "boolean", "description": "When true, remove node_modules after a successful build/start to save disk space. Leave false during iterative development." },
-                "cleanup_build_cache_on_success": { "type": "boolean", "description": "When true, remove build caches such as .next/cache after a successful build/start to save disk space." }
+                "cleanup_build_cache_on_success": { "type": "boolean", "description": "When true, remove build caches such as .next/cache after a successful build/start to save disk space." },
+                "ai_integration": { "type": ["boolean", "string"], "enum": [true, false, "none"], "description": "Generate the AI integration scaffold (example.search capability, domain/adapter stubs and contract test). Defaults to true; use false or \"none\" for presentation-only apps." },
+                "ai_integration_note": { "type": "string", "description": "Reason or note recorded in AI_INTEGRATION.md, especially when ai_integration is false/none." }
             },
             "required": ["name", "type"]
         })
@@ -292,6 +702,17 @@ impl Tool for ProjectCreateTool {
         // explicit when handing the project to Rust so TS/Rust switching can
         // address the same directory and metadata record.
         let project_id = generate_project_id(&name);
+        let ai_integration = ai_integration_enabled(&input)?;
+        let ai_note = ai_integration_note(&input);
+        let ai_files = ai_scaffold_files(
+            &project_id,
+            &name,
+            &project_type,
+            &files,
+            &meta,
+            ai_integration,
+            ai_note.as_deref(),
+        )?;
 
         // Match Electron's workflow metadata while preserving any additional
         // caller-provided workflow fields.
@@ -339,6 +760,8 @@ impl Tool for ProjectCreateTool {
             .lock()
             .expect("created project lock poisoned") = Some(project_id.clone());
         let project = metadata_project_value(services, &project_id);
+        let root = services.projects.project_root(&project_id)?;
+        write_scaffold_files(&root, &ai_files)?;
 
         // Electron initializes declared SQLite tables before any lifecycle
         // work.  The Rust control plane owns that same schema operation.
@@ -346,7 +769,6 @@ impl Tool for ProjectCreateTool {
             .projects
             .initialize_project_database_for_tool(&project_id)?;
 
-        let root = services.projects.project_root(&project_id)?;
         let has_package_json = root.join("package.json").is_file();
         let should_install = input
             .get("install_dependencies")
@@ -522,9 +944,7 @@ async fn project_server_result(
         .logs(project_id, 20)
         .await
         .into_iter()
-        .map(|entry| {
-            json!({ "type": entry.kind, "text": entry.text, "time": entry.time })
-        })
+        .map(|entry| json!({ "type": entry.kind, "text": entry.text, "time": entry.time }))
         .collect();
     Ok(json!({
         "project_id": project_id,
@@ -651,13 +1071,9 @@ impl Tool for ProjectListTool {
         let mut projects = Vec::with_capacity(list.len());
         for project in list {
             let id = project.id.clone();
-            let runtime = services
-                .projects
-                .status(&id)
-                .await
-                .unwrap_or_else(|error| {
-                    json!({ "projectId": id, "status": "error", "error": error.to_string() })
-                });
+            let runtime = services.projects.status(&id).await.unwrap_or_else(
+                |error| json!({ "projectId": id, "status": "error", "error": error.to_string() }),
+            );
             let mut entry = serde_json::to_value(project)?;
             if let Some(object) = entry.as_object_mut() {
                 object.insert("runtime".into(), runtime);
@@ -1227,6 +1643,8 @@ mod tests {
             todo_items: Arc::new(Mutex::new(Vec::new())),
             read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store: store.clone(),
             memory_queue: None,
             memory_scopes: Vec::new(),

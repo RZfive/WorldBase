@@ -47,6 +47,8 @@ impl Fixture {
             todo_items: Arc::new(Mutex::new(Vec::new())),
             read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store: store.clone(),
             memory_queue: None,
             memory_scopes: Vec::new(),
@@ -131,14 +133,14 @@ async fn coding_apply_writes_without_a_managed_project() {
 #[tokio::test]
 async fn coding_verify_reads_the_folder_profile_without_a_project_id() {
     let fixture = Fixture::new();
-    fixture.write("package.json", r#"{"name":"fixture","scripts":{"build":"node -e \"process.exit(0)\""}}"#);
+    fixture.write(
+        "package.json",
+        r#"{"name":"fixture","scripts":{"build":"node -e \"process.exit(0)\""}}"#,
+    );
     fixture.write("README.md", "# fixture\n");
 
     let result = CodingVerifyTool
-        .execute(
-            json!({ "changed_files": ["README.md"] }),
-            &fixture.services,
-        )
+        .execute(json!({ "changed_files": ["README.md"] }), &fixture.services)
         .await
         .expect("coding_verify should detect the folder workspace profile");
 
@@ -177,7 +179,10 @@ async fn coding_diagnose_loads_the_folder_manifest() {
         .await
         .expect("coding_diagnose should read the folder manifest");
 
-    assert!(!result["dependency"]["issues"].as_array().unwrap().is_empty());
+    assert!(!result["dependency"]["issues"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -187,10 +192,7 @@ async fn coding_project_indexes_the_folder_workspace() {
         "src/a.ts",
         "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
     );
-    fixture.write(
-        "src/b.ts",
-        "export const value = 1;\n",
-    );
+    fixture.write("src/b.ts", "export const value = 1;\n");
 
     let result = CodingProjectTool
         .execute(

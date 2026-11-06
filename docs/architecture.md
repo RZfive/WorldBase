@@ -10,6 +10,8 @@
 
 文档解析与基础文档编辑属于 Rust 的公共能力迁移范围，由 `harness-rs/crates/docs` 提供跨端实现；Electron 的高级预览、原文件打开、Office/PDF 复杂编辑和工作台展示可以继续使用 TS 宿主服务。Rust/Electron 的详细 ownership 见 [rust-harness-architecture.md](rust-harness-architecture.md) 和 [HARNESS.md](../HARNESS.md)。
 
+将内置功能、托管项目和插件统一发现为 AI 可调用应用能力，并按需启动应用执行 operation 的目录、provider、权限与迁移设计见 [application-capability-platform-architecture.md](application-capability-platform-architecture.md)。
+
 ### 核心理念
 
 子项目不是"独立运行的小应用"，而是**主 AI 管理范围内的受控服务**。主 AI 既是它们的创造者，也是持续的管理者和分析者。

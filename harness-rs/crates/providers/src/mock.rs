@@ -54,9 +54,22 @@ impl MockProvider {
             }
         }
         let text = last_user.map(|m| m.text_view()).unwrap_or_default();
-        let app_intent = ["轻应用", "应用", "app", "App", "页面", "做一个", "生成一个"]
+        // Internal runtime directives (coding mode, finish-task nudges,
+        // continuation prompts) are also user-role messages. Only the first
+        // real user turn may trigger the demo app intent; otherwise the mock
+        // would create spurious light apps from its own prompts.
+        let first_user_turn = messages
             .iter()
-            .any(|k| text.contains(k));
+            .rposition(|m| m.role == LlmRole::User)
+            .is_some_and(|index| {
+                !messages[..index]
+                    .iter()
+                    .any(|m| m.role == LlmRole::Assistant)
+            });
+        let app_intent = first_user_turn
+            && ["轻应用", "应用", "app", "App", "页面", "做一个", "生成一个"]
+                .iter()
+                .any(|k| text.contains(k));
         if app_intent {
             let name = extract_app_name(&text);
             return MockTurn {

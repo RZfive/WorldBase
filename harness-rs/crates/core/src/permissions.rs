@@ -7,13 +7,52 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 use worldbase_protocol::event::EventKind;
-use worldbase_protocol::types::PermissionRequest;
+use worldbase_protocol::types::{CapabilityRisk, PermissionRequest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum SafetyLevel {
     Safe,
     Risky,
     Deny,
+}
+
+/// Outcome of the capability-risk gate that runs before the ordinary tool
+/// policy. `Proceed` means the risk adds no constraint and the existing
+/// command/path/plan logic decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RiskGate {
+    Proceed,
+    Allow,
+    Ask,
+    Deny,
+}
+
+fn risk_gate(risk: CapabilityRisk, auto_approve: bool, interactive: bool) -> RiskGate {
+    match risk {
+        CapabilityRisk::Read => RiskGate::Proceed,
+        // Reversible writes may be pre-authorized by an unattended task's
+        // saved tool policy, but an explicit confirmation is required
+        // otherwise.
+        CapabilityRisk::WriteReversible => {
+            if auto_approve {
+                RiskGate::Allow
+            } else if interactive {
+                RiskGate::Ask
+            } else {
+                RiskGate::Deny
+            }
+        }
+        // Destructive and external-effect operations always need a human.
+        // `auto_approve` never covers them, and an unattended run has nobody
+        // to answer, so they are denied outright.
+        CapabilityRisk::WriteDestructive | CapabilityRisk::ExternalEffect => {
+            if interactive {
+                RiskGate::Ask
+            } else {
+                RiskGate::Deny
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +87,7 @@ impl Drop for PendingPermissionGuard<'_> {
 /// `auto_approve` 是无人值守运行（定时任务）的任务级授权：没有人能应答询问，
 /// ask 类工具与 shell 改为直接放行，但毁灭性命令（Deny 级分类）仍然拒绝。
 /// 它只应由任务保存的 toolPolicy 设置，交互式运行永远传 false。
+#[allow(clippy::too_many_arguments)]
 pub async fn check(
     hub: &Hub,
     stream_id: &str,
@@ -59,8 +99,52 @@ pub async fn check(
     auto_approve: bool,
     abort: Option<&CancellationToken>,
 ) -> bool {
+    check_with_risk(
+        hub,
+        stream_id,
+        policy,
+        tool_name,
+        args,
+        workspace_root,
+        interactive,
+        auto_approve,
+        abort,
+        None,
+    )
+    .await
+}
+
+/// Risk-aware permission check for application capabilities. The capability
+/// risk is applied before the ordinary tool policy so a grant or an
+/// `auto_approve` task policy can never silently authorize destructive or
+/// external-effect operations.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_with_risk(
+    hub: &Hub,
+    stream_id: &str,
+    policy: &str,
+    tool_name: &str,
+    args: &Value,
+    workspace_root: Option<&Path>,
+    interactive: bool,
+    auto_approve: bool,
+    abort: Option<&CancellationToken>,
+    risk: Option<CapabilityRisk>,
+) -> bool {
     let configured = configured_rule_decision(hub, tool_name, args);
     let policy = configured.as_deref().unwrap_or(policy);
+    // An explicit deny always wins, including for application capabilities.
+    if policy == "deny" {
+        return false;
+    }
+    if let Some(risk) = risk {
+        match risk_gate(risk, auto_approve, interactive) {
+            RiskGate::Allow => return true,
+            RiskGate::Deny => return false,
+            RiskGate::Ask => return ask_host(hub, stream_id, tool_name, args, abort).await,
+            RiskGate::Proceed => {}
+        }
+    }
     // An empty-text terminal write types nothing: it is a wait-and-read poll
     // equivalent to read_active_terminal. Without an explicit user rule it
     // needs no approval; a configured "ask"/"deny" rule still wins below.
@@ -90,27 +174,25 @@ pub async fn check(
                     ask_host(hub, stream_id, tool_name, args, abort).await
                 }
             }
-        },
+        }
         // The local_* file tools accept arbitrary machine paths, so the
         // decision follows the path: inside the conversation's selected
         // folder workspace it is auto-approved, outside it (or when no root
         // is selected) the host is asked. The structurally sandboxed
         // workspace_*/project_*/bare fs tools never reach this branch —
         // their execute-time guards confine them to a workspace already.
-        _ if is_path_tool(tool_name) => {
-            match path_args_inside_root(args, workspace_root) {
-                Some(true) => true,
-                Some(false) | None => {
-                    if auto_approve {
-                        return true;
-                    }
-                    if !interactive {
-                        return false;
-                    }
-                    ask_host(hub, stream_id, tool_name, args, abort).await
+        _ if is_path_tool(tool_name) => match path_args_inside_root(args, workspace_root) {
+            Some(true) => true,
+            Some(false) | None => {
+                if auto_approve {
+                    return true;
                 }
+                if !interactive {
+                    return false;
+                }
+                ask_host(hub, stream_id, tool_name, args, abort).await
             }
-        }
+        },
         _ if wait_only_write => true,
         _ => {
             if auto_approve {
@@ -186,7 +268,9 @@ fn is_command_tool(tool_name: &str) -> bool {
 /// through this mapping.
 pub fn canonical_tool_name(tool_name: &str) -> &str {
     match tool_name {
-        "run_workspace_command" | "run_project_command" | "local_run_command"
+        "run_workspace_command"
+        | "run_project_command"
+        | "local_run_command"
         | "execute_command" => "run_shell_command",
         "get_workspace_command_status" | "get_project_command_status" => "get_command_status",
         other => other,
@@ -389,14 +473,14 @@ fn argv_is_dangerous(program: &str, args: &[&str]) -> bool {
                     .strip_prefix('-')
                     .is_some_and(|flags| flags.contains('r') || flags.contains('R'))
         }),
-        "chmod" => args.iter().any(|arg| *arg == "777") || recursive_root_target(args),
+        "chmod" => args.contains(&"777") || recursive_root_target(args),
         "chown" => recursive_root_target(args),
         "mkfs" | "fdisk" | "mkswap" => true,
         "dd" => args.iter().any(|arg| arg.starts_with("if=")),
         "sudo" | "doas" | "shutdown" | "reboot" | "halt" | "poweroff" => true,
         "kill" => {
             let has_mass_signal = args.iter().any(|arg| matches!(*arg, "-9" | "-KILL"));
-            has_mass_signal && args.iter().any(|arg| *arg == "-1")
+            has_mass_signal && args.contains(&"-1")
         }
         _ => false,
     }
@@ -617,11 +701,7 @@ fn directory_change_safety(rest: &str, workspace_root: Option<&Path>) -> SafetyL
         // Bare `cd` goes to $HOME, which is outside the workspace.
         return SafetyLevel::Risky;
     };
-    if target == "-"
-        || target.starts_with('~')
-        || target.contains('$')
-        || target.contains('`')
-    {
+    if target == "-" || target.starts_with('~') || target.contains('$') || target.contains('`') {
         return SafetyLevel::Risky;
     }
     let Some(root) = workspace_root else {
@@ -673,7 +753,9 @@ fn split_shell_segments(command: &str) -> Vec<String> {
             index += 1;
             continue;
         }
-        if matches!(character, ';' | '|' | '&') && !(character == '&' && current.ends_with(['>', '<'])) {
+        if matches!(character, ';' | '|' | '&')
+            && !(character == '&' && current.ends_with(['>', '<']))
+        {
             if !current.trim().is_empty() {
                 segments.push(current.trim().to_string());
             }
@@ -807,21 +889,55 @@ pub fn request_payload(request: &PermissionRequest) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_wait_only_terminal_write, path_args_inside_root, permission_rule_matches,
-        summarize_args, PermissionRule, SafetyLevel,
+        is_wait_only_terminal_write, path_args_inside_root, permission_rule_matches, risk_gate,
+        summarize_args, PermissionRule, RiskGate, SafetyLevel,
     };
     use serde_json::json;
     use std::path::Path;
+    use worldbase_protocol::types::CapabilityRisk;
 
-    fn classify (command: &str) -> SafetyLevel {
+    #[test]
+    fn capability_risk_never_auto_approves_destructive_or_external_effects() {
+        for risk in [
+            CapabilityRisk::WriteDestructive,
+            CapabilityRisk::ExternalEffect,
+        ] {
+            assert_eq!(risk_gate(risk, true, false), RiskGate::Deny);
+            assert_eq!(risk_gate(risk, true, true), RiskGate::Ask);
+            assert_eq!(risk_gate(risk, false, false), RiskGate::Deny);
+            assert_eq!(risk_gate(risk, false, true), RiskGate::Ask);
+        }
+    }
+
+    #[test]
+    fn reversible_writes_follow_auto_approve_only_when_unattended() {
+        assert_eq!(
+            risk_gate(CapabilityRisk::WriteReversible, true, false),
+            RiskGate::Allow
+        );
+        assert_eq!(
+            risk_gate(CapabilityRisk::WriteReversible, false, false),
+            RiskGate::Deny
+        );
+        assert_eq!(
+            risk_gate(CapabilityRisk::WriteReversible, false, true),
+            RiskGate::Ask
+        );
+        assert_eq!(
+            risk_gate(CapabilityRisk::Read, false, false),
+            RiskGate::Proceed
+        );
+    }
+
+    fn classify(command: &str) -> SafetyLevel {
         super::classify_command(command, None)
     }
 
-    fn classify_in (command: &str, root: &str) -> SafetyLevel {
+    fn classify_in(command: &str, root: &str) -> SafetyLevel {
         super::classify_command(command, Some(Path::new(root)))
     }
 
-    fn classify_args (args: &serde_json::Value) -> SafetyLevel {
+    fn classify_args(args: &serde_json::Value) -> SafetyLevel {
         super::classify_command_args(args, None)
     }
 
@@ -861,9 +977,18 @@ mod tests {
         use super::command_cwd_outside_root;
         let root = Path::new("/tmp/worldbase-workspace");
         assert!(!command_cwd_outside_root(&json!({}), Some(root)));
-        assert!(!command_cwd_outside_root(&json!({ "cwd": "sub/dir" }), Some(root)));
-        assert!(command_cwd_outside_root(&json!({ "cwd": ".." }), Some(root)));
-        assert!(command_cwd_outside_root(&json!({ "cwd": "/etc" }), Some(root)));
+        assert!(!command_cwd_outside_root(
+            &json!({ "cwd": "sub/dir" }),
+            Some(root)
+        ));
+        assert!(command_cwd_outside_root(
+            &json!({ "cwd": ".." }),
+            Some(root)
+        ));
+        assert!(command_cwd_outside_root(
+            &json!({ "cwd": "/etc" }),
+            Some(root)
+        ));
         // Without a selected root the classifier alone decides.
         assert!(!command_cwd_outside_root(&json!({ "cwd": "/etc" }), None));
     }
@@ -876,10 +1001,7 @@ mod tests {
             SafetyLevel::Safe
         );
         assert_eq!(classify("echo one && echo two"), SafetyLevel::Safe);
-        assert_eq!(
-            classify("node -e \"x\" 2>&1 | head -5"),
-            SafetyLevel::Safe
-        );
+        assert_eq!(classify("node -e \"x\" 2>&1 | head -5"), SafetyLevel::Safe);
         assert_eq!(classify("pnpm test && git push"), SafetyLevel::Risky);
         assert_eq!(classify("npm run dev"), SafetyLevel::Risky);
         // `cd` is allowed only while its target stays inside the workspace
@@ -915,7 +1037,10 @@ mod tests {
         // Without a selected root nothing can be proven inside.
         assert_eq!(classify("cd apps/electron"), SafetyLevel::Risky);
         assert_eq!(
-            classify_in("for r in a/b c/d; do echo \"$r\"; done", "/Users/me/project"),
+            classify_in(
+                "for r in a/b c/d; do echo \"$r\"; done",
+                "/Users/me/project"
+            ),
             SafetyLevel::Safe
         );
         // The loop body still decides the risk, not the structural keyword.
@@ -927,9 +1052,15 @@ mod tests {
             classify_in("for r in a; do cd /etc; done", "/Users/me/project"),
             SafetyLevel::Risky
         );
-        assert_eq!(classify("cd /tmp && curl https://example.com"), SafetyLevel::Risky);
+        assert_eq!(
+            classify("cd /tmp && curl https://example.com"),
+            SafetyLevel::Risky
+        );
         assert_eq!(classify("curl https://example.com"), SafetyLevel::Risky);
-        assert_eq!(classify("echo hi\ncurl https://example.com"), SafetyLevel::Risky);
+        assert_eq!(
+            classify("echo hi\ncurl https://example.com"),
+            SafetyLevel::Risky
+        );
         assert_eq!(classify("pnpm test && rm -rf /"), SafetyLevel::Deny);
     }
 
@@ -967,7 +1098,8 @@ mod tests {
 
     #[test]
     fn wait_only_terminal_write_is_empty_text_only() {
-        assert!(is_wait_only_terminal_write(&json!({ "text": "" })));        assert!(is_wait_only_terminal_write(&json!({ "execute": false })));
+        assert!(is_wait_only_terminal_write(&json!({ "text": "" })));
+        assert!(is_wait_only_terminal_write(&json!({ "execute": false })));
         assert!(is_wait_only_terminal_write(&json!({ "text": null })));
         assert!(!is_wait_only_terminal_write(&json!({ "text": "ls" })));
         // Any keystroke typed into the shared terminal stays behind approval.

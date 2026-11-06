@@ -59,7 +59,6 @@ impl Tool for McpCallTool {
     fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct McpListServersTool;
@@ -91,7 +90,6 @@ impl Tool for McpListServersTool {
     fn electron_native(&self) -> bool {
         true
     }
-
 }
 
 pub struct McpListResourcesTool;
@@ -309,6 +307,9 @@ pub fn dynamic_mcp_tools(discovered: Vec<McpTool>) -> Vec<Arc<dyn Tool>> {
             if !names.insert(name.clone()) {
                 return None;
             }
+            let source = format!("mcp:{}", tool.server);
+            let tags =
+                mcp_catalog_tags(tool.category.as_deref(), &tool.tags, tool.app_id.as_deref());
             Some(Arc::new(McpDynamicTool {
                 name,
                 server: tool.server,
@@ -319,9 +320,29 @@ pub fn dynamic_mcp_tools(discovered: Vec<McpTool>) -> Vec<Arc<dyn Tool>> {
                     format!("[MCP:{}] {}", tool.server_name, tool.description)
                 },
                 input_schema: normalize_schema(tool.input_schema),
+                source,
+                tags,
             }) as Arc<dyn Tool>)
         })
         .collect()
+}
+
+/// Build searchable tags from MCP application metadata. Category and app ID
+/// are folded in so `search_tools` can match a task to the owning application
+/// even when the remote tool description does not mention it.
+fn mcp_catalog_tags(category: Option<&str>, tags: &[String], app_id: Option<&str>) -> Vec<String> {
+    let mut merged: Vec<String> = Vec::new();
+    for value in category
+        .into_iter()
+        .chain(tags.iter().map(String::as_str))
+        .chain(app_id)
+    {
+        let value = value.trim();
+        if !value.is_empty() && !merged.iter().any(|existing| existing == value) {
+            merged.push(value.to_string());
+        }
+    }
+    merged
 }
 
 struct McpDynamicTool {
@@ -330,6 +351,8 @@ struct McpDynamicTool {
     remote_name: String,
     description: String,
     input_schema: Value,
+    source: String,
+    tags: Vec<String>,
 }
 
 #[async_trait]
@@ -348,6 +371,14 @@ impl Tool for McpDynamicTool {
 
     fn permission(&self) -> &str {
         "ask"
+    }
+
+    fn source(&self) -> Option<&str> {
+        Some(&self.source)
+    }
+
+    fn tags(&self) -> &[String] {
+        &self.tags
     }
 
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
@@ -468,10 +499,60 @@ mod tests {
             name: "lookup".into(),
             description: "Lookup a record".into(),
             input_schema: json!({ "type": "object", "properties": { "id": { "type": "string" } } }),
+            category: None,
+            tags: Vec::new(),
+            app_id: None,
         }]);
         assert_eq!(tools.len(), 1);
         assert!(tools[0].name().starts_with("mcp__server__lookup__"));
         assert_eq!(tools[0].permission(), "ask");
+        assert_eq!(tools[0].source(), Some("mcp:server"));
+        assert!(tools[0].tags().is_empty());
+    }
+
+    #[test]
+    fn dynamic_tools_expose_mcp_application_metadata_for_catalog_search() {
+        let tools = dynamic_mcp_tools(vec![McpTool {
+            server: "docs-server".into(),
+            server_name: "Docs".into(),
+            name: "search".into(),
+            description: "Search documents".into(),
+            input_schema: json!({ "type": "object" }),
+            category: Some("documents".into()),
+            tags: vec!["search".into(), "documents".into()],
+            app_id: Some("worldbase.documents".into()),
+        }]);
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0].name().starts_with("mcp__docs_server__search__"));
+        assert_eq!(tools[0].source(), Some("mcp:docs-server"));
+        assert_eq!(
+            tools[0].tags(),
+            ["documents", "search", "worldbase.documents"]
+        );
+        let descriptor = tools[0].descriptor();
+        assert_eq!(descriptor.source.as_deref(), Some("mcp:docs-server"));
+        assert_eq!(
+            descriptor.tags,
+            vec!["documents", "search", "worldbase.documents"]
+        );
+    }
+
+    #[test]
+    fn mcp_catalog_tags_merge_without_duplicates_or_blank_values() {
+        assert_eq!(
+            mcp_catalog_tags(
+                Some(" documents "),
+                &[
+                    "search".into(),
+                    "documents".into(),
+                    " ".into(),
+                    "search".into()
+                ],
+                Some("worldbase.documents"),
+            ),
+            ["documents", "search", "worldbase.documents"]
+        );
+        assert!(mcp_catalog_tags(None, &[], None).is_empty());
     }
 
     #[test]

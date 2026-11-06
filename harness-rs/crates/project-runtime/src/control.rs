@@ -105,7 +105,7 @@ fn standalone_recovery_meta(project_id: &str) -> Value {
 fn visible_tree(root: &Path, relative: &str) -> Result<Vec<Value>> {
     let mut entries =
         fs::read_dir(root.join(relative))?.collect::<std::result::Result<Vec<_>, _>>()?;
-    entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    entries.sort_by_key(|left| left.file_name());
 
     let mut result = Vec::new();
     for entry in entries {
@@ -150,9 +150,8 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     if path.exists() {
         fs::remove_file(path)?;
     }
-    fs::rename(&temporary, path).or_else(|error| {
+    fs::rename(&temporary, path).inspect_err(|_| {
         let _ = fs::remove_file(&temporary);
-        Err(error)
     })?;
     Ok(())
 }
@@ -229,7 +228,7 @@ fn update_meta_field(root: &Path, update: impl FnOnce(&mut Map<String, Value>)) 
 
 fn collect_source_files(root: &Path, current: &Path, files: &mut Vec<String>) -> Result<()> {
     let mut entries = fs::read_dir(current)?.collect::<std::result::Result<Vec<_>, _>>()?;
-    entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    entries.sort_by_key(|left| left.file_name());
     for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
         let file_type = entry.file_type()?;
@@ -458,7 +457,7 @@ fn package_files(
         return Ok(Vec::new());
     }
     let mut entries = fs::read_dir(full)?.collect::<std::result::Result<Vec<_>, _>>()?;
-    entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    entries.sort_by_key(|left| left.file_name());
     let mut result = Vec::new();
     for entry in entries {
         let child = relative.join(entry.file_name());
@@ -1663,6 +1662,7 @@ impl ProjectRuntime {
         Ok(db)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn project_data_read_records_for_ui(
         &self,
         project_id: &str,
@@ -1820,8 +1820,7 @@ impl ProjectRuntime {
                     .map(|column| format!("\"{column}\""))
                     .collect::<Vec<_>>()
                     .join(", "),
-                std::iter::repeat("?")
-                    .take(columns.len())
+                std::iter::repeat_n("?", columns.len())
                     .collect::<Vec<_>>()
                     .join(", ")
             );

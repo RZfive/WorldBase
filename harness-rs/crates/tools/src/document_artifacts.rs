@@ -1138,8 +1138,8 @@ fn document_backup_dir(workspace: &Path) -> PathBuf {
 }
 
 fn file_sha256(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("read document source {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("read document source {}", path.display()))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
@@ -1160,10 +1160,7 @@ fn artifact_type_matches_draft(file_type: &str, content: &DraftContent) -> Resul
         DraftContent::Docx(_) => "docx",
         DraftContent::Xlsx(_) => "xlsx",
         DraftContent::Pptx(_) => "pptx",
-        DraftContent::OfficeOps(ops) => ops
-            .first()
-            .map(|op| op.family())
-            .unwrap_or("docx"),
+        DraftContent::OfficeOps(ops) => ops.first().map(|op| op.family()).unwrap_or("docx"),
     };
     let Some(target_kind) = normalize_draft_type(file_type) else {
         anyhow::bail!(
@@ -1219,10 +1216,7 @@ fn clear_draft_state(mut artifact: DocumentArtifact) -> DocumentArtifact {
     artifact
 }
 
-fn draft_record_value(
-    workspace: &Path,
-    artifact: &DocumentArtifact,
-) -> Value {
+fn draft_record_value(workspace: &Path, artifact: &DocumentArtifact) -> Value {
     let draft = artifact.draft.clone().unwrap_or(Value::Null);
     if draft.is_null() {
         return Value::Null;
@@ -1269,11 +1263,7 @@ pub fn stage_document_draft(
         anyhow::bail!("虚拟文档没有源文件，无法生成修改草稿");
     }
     let source = artifact_source_path(workspace, &artifact);
-    anyhow::ensure!(
-        source.is_file(),
-        "文档源文件不存在: {}",
-        source.display()
-    );
+    anyhow::ensure!(source.is_file(), "文档源文件不存在: {}", source.display());
     if let Err(message) = artifact_type_matches_draft(&artifact.file_type, &content) {
         return Err(message);
     }
@@ -1293,10 +1283,7 @@ pub fn stage_document_draft(
         DraftContent::Docx(_) => "docx",
         DraftContent::Xlsx(_) => "xlsx",
         DraftContent::Pptx(_) => "pptx",
-        DraftContent::OfficeOps(ops) => ops
-            .first()
-            .map(|op| op.family())
-            .unwrap_or("docx"),
+        DraftContent::OfficeOps(ops) => ops.first().map(|op| op.family()).unwrap_or("docx"),
     };
 
     let directory = draft_dir(workspace);
@@ -1415,7 +1402,10 @@ fn extract_diff_units(file_type: &str, parsed: &Value, plain_text: &str) -> Vec<
     let mut units = Vec::new();
     let push_unit = |units: &mut Vec<DiffUnit>, page: i32, text: &str| {
         if !text.trim().is_empty() {
-            units.push(DiffUnit { page, text: text.to_string() });
+            units.push(DiffUnit {
+                page,
+                text: text.to_string(),
+            });
         }
     };
     match file_type {
@@ -1452,7 +1442,12 @@ fn extract_diff_units(file_type: &str, parsed: &Value, plain_text: &str) -> Vec<
                 .enumerate()
             {
                 let page = index as i32 + 1;
-                for row in sheet.get("rows").and_then(Value::as_array).into_iter().flatten() {
+                for row in sheet
+                    .get("rows")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
                     let text = row
                         .as_array()
                         .map(|cells| {
@@ -1492,7 +1487,12 @@ fn extract_diff_units(file_type: &str, parsed: &Value, plain_text: &str) -> Vec<
                     .join(",");
                 push_unit(&mut units, 1, &text);
             }
-            for row in parsed.get("rows").and_then(Value::as_array).into_iter().flatten() {
+            for row in parsed
+                .get("rows")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
                 let text = row
                     .as_array()
                     .map(|cells| {
@@ -1549,7 +1549,10 @@ fn diff_range(
     }
 
     // Anchor on texts unique in both slices (in order).
-    fn count_by_text(slice: &[DiffUnit], range: std::ops::Range<usize>) -> std::collections::HashMap<&str, usize> {
+    fn count_by_text(
+        slice: &[DiffUnit],
+        range: std::ops::Range<usize>,
+    ) -> std::collections::HashMap<&str, usize> {
         let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for unit in &slice[range] {
             *counts.entry(unit.text.as_str()).or_default() += 1;
@@ -1594,7 +1597,9 @@ fn diff_range(
     let mut cursor_old = os;
     let mut cursor_new = ns;
     for (anchor_old, anchor_new) in anchors {
-        diff_range(old, cursor_old, anchor_old, new, cursor_new, anchor_new, events);
+        diff_range(
+            old, cursor_old, anchor_old, new, cursor_new, anchor_new, events,
+        );
         cursor_old = anchor_old + 1;
         cursor_new = anchor_new + 1;
     }
@@ -1627,7 +1632,15 @@ fn compute_draft_changes(
     let old_units = extract_diff_units(file_type, old_parsed, old_text);
     let new_units = extract_diff_units(file_type, new_parsed, new_text);
     let mut events = Vec::new();
-    diff_range(&old_units, 0, old_units.len(), &new_units, 0, new_units.len(), &mut events);
+    diff_range(
+        &old_units,
+        0,
+        old_units.len(),
+        &new_units,
+        0,
+        new_units.len(),
+        &mut events,
+    );
     changes_record_from_events(events)
 }
 
@@ -1653,7 +1666,12 @@ fn changes_record_from_events(events: Vec<(bool, DiffUnit)>) -> Value {
             if items.len() < MAX_DRAFT_CHANGES {
                 let before = deletes[index].text.as_str();
                 let after = inserts[index].text.as_str();
-                items.push(change_item("modify", inserts[index].page, Some(before), Some(after)));
+                items.push(change_item(
+                    "modify",
+                    inserts[index].page,
+                    Some(before),
+                    Some(after),
+                ));
             }
         }
         for delete in deletes.iter().skip(paired) {
@@ -1702,7 +1720,11 @@ fn changes_from_ops(ops: &[worldbase_docs::ops::OfficeOp]) -> Value {
             break;
         }
         let item = match op {
-            worldbase_docs::ops::OfficeOp::DocxReplaceText { paragraph_index, after_text, expect_before } => {
+            worldbase_docs::ops::OfficeOp::DocxReplaceText {
+                paragraph_index,
+                after_text,
+                expect_before,
+            } => {
                 modified += 1;
                 let mut item = change_item(
                     "modify",
@@ -1716,7 +1738,11 @@ fn changes_from_ops(ops: &[worldbase_docs::ops::OfficeOp]) -> Value {
                 }
                 item
             }
-            worldbase_docs::ops::OfficeOp::DocxInsertParagraphAfter { paragraph_index, text, style } => {
+            worldbase_docs::ops::OfficeOp::DocxInsertParagraphAfter {
+                paragraph_index,
+                text,
+                style,
+            } => {
                 added += 1;
                 let mut item = change_item("insert", 1, None, Some(text));
                 if let Some(object) = item.as_object_mut() {
@@ -1736,7 +1762,11 @@ fn changes_from_ops(ops: &[worldbase_docs::ops::OfficeOp]) -> Value {
                 }
                 item
             }
-            worldbase_docs::ops::OfficeOp::DocxInsertImage { paragraph_index, image_path, .. } => {
+            worldbase_docs::ops::OfficeOp::DocxInsertImage {
+                paragraph_index,
+                image_path,
+                ..
+            } => {
                 added += 1;
                 let name = image_path
                     .file_name()
@@ -1749,7 +1779,12 @@ fn changes_from_ops(ops: &[worldbase_docs::ops::OfficeOp]) -> Value {
                 }
                 item
             }
-            worldbase_docs::ops::OfficeOp::PptxReplaceText { slide, paragraph_index, after_text, expect_before } => {
+            worldbase_docs::ops::OfficeOp::PptxReplaceText {
+                slide,
+                paragraph_index,
+                after_text,
+                expect_before,
+            } => {
                 modified += 1;
                 let mut item = change_item(
                     "modify",
@@ -1763,7 +1798,9 @@ fn changes_from_ops(ops: &[worldbase_docs::ops::OfficeOp]) -> Value {
                 }
                 item
             }
-            worldbase_docs::ops::OfficeOp::PptxInsertImage { slide, image_path, .. } => {
+            worldbase_docs::ops::OfficeOp::PptxInsertImage {
+                slide, image_path, ..
+            } => {
                 added += 1;
                 let name = image_path
                     .file_name()
@@ -1780,7 +1817,11 @@ fn changes_from_ops(ops: &[worldbase_docs::ops::OfficeOp]) -> Value {
                 }
                 item
             }
-            worldbase_docs::ops::OfficeOp::PptxInsertSlideAfter { index, title, content } => {
+            worldbase_docs::ops::OfficeOp::PptxInsertSlideAfter {
+                index,
+                title,
+                content,
+            } => {
                 added += 1;
                 let preview = if title.trim().is_empty() {
                     content.first().map(String::as_str).unwrap_or("(新页面)")
@@ -1850,10 +1891,12 @@ pub fn apply_document_draft(
     id: &str,
     expected_source_sha256: Option<&str>,
 ) -> Result<Value> {
-    let artifact = get_document(workspace, id)?.ok_or_else(|| anyhow::anyhow!("文档不存在: {id}"))?;
-    let draft = artifact.draft.clone().ok_or_else(|| {
-        anyhow::anyhow!("该文档没有待处理的修改草稿")
-    })?;
+    let artifact =
+        get_document(workspace, id)?.ok_or_else(|| anyhow::anyhow!("文档不存在: {id}"))?;
+    let draft = artifact
+        .draft
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("该文档没有待处理的修改草稿"))?;
     anyhow::ensure!(
         !is_virtual_artifact(&artifact),
         "virtual documents have no applyable draft"
@@ -1916,8 +1959,7 @@ pub fn apply_document_draft(
         .with_context(|| format!("stage draft write {}", temporary.display()))?;
     if let Err(error) = std::fs::rename(&temporary, &source) {
         let _ = std::fs::remove_file(&temporary);
-        return Err(error)
-            .with_context(|| format!("commit draft overwrite {}", source.display()));
+        return Err(error).with_context(|| format!("commit draft overwrite {}", source.display()));
     }
 
     // Re-parse the saved file so the stored artifact reflects the new content.
@@ -1947,12 +1989,9 @@ pub fn apply_document_draft(
 }
 
 /// Write the staged draft to a user-chosen path without touching the original.
-pub fn save_document_draft_as(
-    workspace: &Path,
-    id: &str,
-    target_path: &Path,
-) -> Result<Value> {
-    let artifact = get_document(workspace, id)?.ok_or_else(|| anyhow::anyhow!("文档不存在: {id}"))?;
+pub fn save_document_draft_as(workspace: &Path, id: &str, target_path: &Path) -> Result<Value> {
+    let artifact =
+        get_document(workspace, id)?.ok_or_else(|| anyhow::anyhow!("文档不存在: {id}"))?;
     let draft = artifact
         .draft
         .clone()
@@ -1991,7 +2030,8 @@ pub fn save_document_draft_as(
 
 /// Drop the staged draft: delete the draft bytes and clear the record.
 pub fn discard_document_draft(workspace: &Path, id: &str) -> Result<Value> {
-    let artifact = get_document(workspace, id)?.ok_or_else(|| anyhow::anyhow!("文档不存在: {id}"))?;
+    let artifact =
+        get_document(workspace, id)?.ok_or_else(|| anyhow::anyhow!("文档不存在: {id}"))?;
     let draft = artifact.draft.clone();
     if let Some(draft) = &draft {
         if let Some(path) = draft.get("path").and_then(Value::as_str) {
@@ -2474,16 +2514,22 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("notes.md");
         std::fs::write(&source, "# 原始标题\n\n原文内容\n").unwrap();
-        let artifact =
-            import_parsed_document(root.path(), &source, &json!({ "kind": "md", "text": "# 原始标题\n\n原文内容" }))
-                .unwrap();
+        let artifact = import_parsed_document(
+            root.path(),
+            &source,
+            &json!({ "kind": "md", "text": "# 原始标题\n\n原文内容" }),
+        )
+        .unwrap();
 
         // Stage a markdown draft.
         let staged = stage_document_draft(
             root.path(),
             Some(artifact.id.as_str()),
             None,
-            DraftContent::Text { kind: "md", body: "# 新标题\n\n改写后的内容\n".into() },
+            DraftContent::Text {
+                kind: "md",
+                body: "# 新标题\n\n改写后的内容\n".into(),
+            },
             None,
         )
         .unwrap();
@@ -2502,7 +2548,10 @@ mod tests {
 
         // Wrong sha is rejected before any write happens.
         assert!(apply_document_draft(root.path(), &artifact.id, Some("deadbeef")).is_err());
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), "# 原始标题\n\n原文内容\n");
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "# 原始标题\n\n原文内容\n"
+        );
 
         // Apply overwrites the source, backs it up, and re-parses the record.
         let applied = apply_document_draft(root.path(), &artifact.id, None).unwrap();
@@ -2516,11 +2565,16 @@ mod tests {
             "backup path returned (public form may be relative)"
         );
         let applied_artifact = applied["artifact"]["id"].as_str().unwrap();
-        let refreshed = get_document(root.path(), applied_artifact).unwrap().unwrap();
+        let refreshed = get_document(root.path(), applied_artifact)
+            .unwrap()
+            .unwrap();
         assert!(refreshed.draft.is_none(), "draft state cleared after apply");
         assert!(refreshed.plain_text.contains("改写后的内容"));
         // The backup lives under the workspace backups dir and holds the ORIGINAL bytes.
-        let backup_dir = root.path().join(".worldbase/document-backups").join(&artifact.id);
+        let backup_dir = root
+            .path()
+            .join(".worldbase/document-backups")
+            .join(&artifact.id);
         let backups: Vec<_> = std::fs::read_dir(&backup_dir)
             .unwrap()
             .filter_map(|entry| entry.ok())
@@ -2532,7 +2586,9 @@ mod tests {
         );
 
         // No pending draft remains.
-        assert!(get_document_draft(root.path(), source.to_str().unwrap()).unwrap().is_null());
+        assert!(get_document_draft(root.path(), source.to_str().unwrap())
+            .unwrap()
+            .is_null());
     }
 
     #[test]
@@ -2540,9 +2596,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("doc.md");
         std::fs::write(&source, "原文").unwrap();
-        let artifact =
-            import_parsed_document(root.path(), &source, &json!({ "kind": "md", "text": "原文" }))
-                .unwrap();
+        let artifact = import_parsed_document(
+            root.path(),
+            &source,
+            &json!({ "kind": "md", "text": "原文" }),
+        )
+        .unwrap();
 
         // docx content onto a markdown file is rejected.
         assert!(stage_document_draft(
@@ -2559,7 +2618,10 @@ mod tests {
             root.path(),
             Some(artifact.id.as_str()),
             None,
-            DraftContent::Text { kind: "text", body: "x".into() },
+            DraftContent::Text {
+                kind: "text",
+                body: "x".into()
+            },
             None,
         )
         .is_err());
@@ -2574,11 +2636,17 @@ mod tests {
             root.path(),
             Some(pdf_artifact.id.as_str()),
             None,
-            DraftContent::Text { kind: "text", body: "x".into() },
+            DraftContent::Text {
+                kind: "text",
+                body: "x".into(),
+            },
             None,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("暂不支持"), "pdf gets a clear message");
+        assert!(
+            error.to_string().contains("暂不支持"),
+            "pdf gets a clear message"
+        );
     }
 
     #[test]
@@ -2594,7 +2662,10 @@ mod tests {
             root.path(),
             Some(artifact.id.as_str()),
             None,
-            DraftContent::Text { kind: "md", body: "v2".into() },
+            DraftContent::Text {
+                kind: "md",
+                body: "v2".into(),
+            },
             None,
         )
         .unwrap();
@@ -2602,20 +2673,32 @@ mod tests {
             root.path(),
             Some(artifact.id.as_str()),
             None,
-            DraftContent::Text { kind: "md", body: "v3".into() },
+            DraftContent::Text {
+                kind: "md",
+                body: "v3".into(),
+            },
             None,
         )
         .unwrap();
         assert_ne!(first["draftPath"], second["draftPath"], "new draft file");
-        assert!(!Path::new(first["draftPath"].as_str().unwrap()).is_file(), "old draft pruned");
+        assert!(
+            !Path::new(first["draftPath"].as_str().unwrap()).is_file(),
+            "old draft pruned"
+        );
 
         let discarded = discard_document_draft(root.path(), &artifact.id).unwrap();
         assert_eq!(discarded["discarded"], true);
         assert!(!Path::new(second["draftPath"].as_str().unwrap()).is_file());
         let cleared = get_document(root.path(), &artifact.id).unwrap().unwrap();
         assert!(cleared.draft.is_none());
-        assert!(get_document_draft(root.path(), source.to_str().unwrap()).unwrap().is_null());
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), "v1", "source untouched");
+        assert!(get_document_draft(root.path(), source.to_str().unwrap())
+            .unwrap()
+            .is_null());
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "v1",
+            "source untouched"
+        );
     }
 
     #[test]
@@ -2679,14 +2762,20 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("report.md");
         std::fs::write(&source, "原稿").unwrap();
-        let artifact =
-            import_parsed_document(root.path(), &source, &json!({ "kind": "md", "text": "原稿" }))
-                .unwrap();
+        let artifact = import_parsed_document(
+            root.path(),
+            &source,
+            &json!({ "kind": "md", "text": "原稿" }),
+        )
+        .unwrap();
         stage_document_draft(
             root.path(),
             Some(artifact.id.as_str()),
             None,
-            DraftContent::Text { kind: "md", body: "改写稿".into() },
+            DraftContent::Text {
+                kind: "md",
+                body: "改写稿".into(),
+            },
             None,
         )
         .unwrap();
@@ -2719,7 +2808,10 @@ mod tests {
             root.path(),
             None,
             Some(unknown.to_str().unwrap()),
-            DraftContent::Text { kind: "md", body: "草稿".into() },
+            DraftContent::Text {
+                kind: "md",
+                body: "草稿".into(),
+            },
             None,
         )
         .unwrap();
@@ -2728,18 +2820,27 @@ mod tests {
         assert!(get_document(root.path(), staged_id).unwrap().is_some());
 
         // Existing artifacts are matched by canonical source path.
-        let _ = import_parsed_document(root.path(), &source, &json!({ "kind": "md", "text": "内容" }))
-            .unwrap();
+        let _ = import_parsed_document(
+            root.path(),
+            &source,
+            &json!({ "kind": "md", "text": "内容" }),
+        )
+        .unwrap();
         let by_path = stage_document_draft(
             root.path(),
             None,
             Some(source.to_str().unwrap()),
-            DraftContent::Text { kind: "md", body: "按路径".into() },
+            DraftContent::Text {
+                kind: "md",
+                body: "按路径".into(),
+            },
             None,
         )
         .unwrap();
         assert!(!by_path["artifactId"].as_str().unwrap().is_empty());
-        let applied = apply_document_draft(root.path(), by_path["artifactId"].as_str().unwrap(), None).unwrap();
+        let applied =
+            apply_document_draft(root.path(), by_path["artifactId"].as_str().unwrap(), None)
+                .unwrap();
         assert_eq!(std::fs::read_to_string(&source).unwrap(), "按路径");
         assert!(applied["artifact"].is_object());
     }
@@ -3001,12 +3102,11 @@ mod tests {
     fn write_docx_with_media(path: &std::path::Path) {
         use std::io::Write as _;
         const TINY_PNG: &[u8] = &[
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49,
-            0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
-            0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44,
-            0x41, 0x54, 0x78, 0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D,
-            0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42,
-            0x60, 0x82,
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
         ];
         let file = std::fs::File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -3082,7 +3182,9 @@ mod tests {
             root.path(),
             Some(artifact.id.as_str()),
             None,
-            DraftContent::Docx(vec![worldbase_docs::edit::DocBlock::Paragraph("全新内容".into())]),
+            DraftContent::Docx(vec![worldbase_docs::edit::DocBlock::Paragraph(
+                "全新内容".into(),
+            )]),
             None,
         )
         .unwrap();
@@ -3103,7 +3205,10 @@ mod tests {
             Some("改第一段".into()),
         )
         .unwrap();
-        assert!(ops_draft["dataLossRisk"].is_null(), "ops drafts carry no data loss");
+        assert!(
+            ops_draft["dataLossRisk"].is_null(),
+            "ops drafts carry no data loss"
+        );
         assert_eq!(ops_draft["changes"]["counts"]["modified"], 1);
         let draft_path = Path::new(ops_draft["draftPath"].as_str().unwrap());
         let package = worldbase_docs::ops::count_media_parts(draft_path).unwrap();
@@ -3116,9 +3221,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("doc.md");
         std::fs::write(&source, "内容").unwrap();
-        let artifact =
-            import_parsed_document(root.path(), &source, &json!({ "kind": "text", "text": "内容" }))
-                .unwrap();
+        let artifact = import_parsed_document(
+            root.path(),
+            &source,
+            &json!({ "kind": "text", "text": "内容" }),
+        )
+        .unwrap();
 
         // 已导入路径拒绝
         assert!(ensure_document_write_allowed(root.path(), &source).is_err());
@@ -3131,7 +3239,9 @@ mod tests {
         write_docx_with_media(&office);
         assert!(ensure_document_write_allowed(root.path(), &office).is_err());
         // 不存在的 office 路径放行（新建文档语义）
-        assert!(ensure_document_write_allowed(root.path(), &root.path().join("fresh.docx")).is_ok());
+        assert!(
+            ensure_document_write_allowed(root.path(), &root.path().join("fresh.docx")).is_ok()
+        );
     }
 }
 
@@ -3149,7 +3259,10 @@ mod draft_pull_path_tests {
             workspace,
             None,
             Some(source.to_str().unwrap()),
-            DraftContent::Text { kind: "md", body: "# Title\nchanged".to_string() },
+            DraftContent::Text {
+                kind: "md",
+                body: "# Title\nchanged".to_string(),
+            },
             None,
         )
         .unwrap();
@@ -3175,7 +3288,10 @@ mod draft_pull_path_tests {
             workspace,
             None,
             Some(source.to_str().unwrap()),
-            DraftContent::Text { kind: "md", body: "a".into() },
+            DraftContent::Text {
+                kind: "md",
+                body: "a".into(),
+            },
             None,
         )
         .unwrap();
@@ -3183,7 +3299,10 @@ mod draft_pull_path_tests {
             workspace,
             None,
             Some(source.to_str().unwrap()),
-            DraftContent::Text { kind: "md", body: "b".into() },
+            DraftContent::Text {
+                kind: "md",
+                body: "b".into(),
+            },
             None,
         )
         .unwrap();

@@ -19,7 +19,8 @@ const DOCUMENT_GUIDANCE: &str = "Document mode is active for the rest of this ru
 Read documents with read_document/doc_parse and edit them only with doc_draft. \
 Do not use coding_edit/coding_apply on document files.";
 
-const CHAT_GUIDANCE: &str = "Chat mode is active. Do not modify files unless the user later asks for a concrete edit.";
+const CHAT_GUIDANCE: &str =
+    "Chat mode is active. Do not modify files unless the user later asks for a concrete edit.";
 
 pub struct SelectWorkModeTool;
 
@@ -121,6 +122,8 @@ mod tests {
             todo_items: Arc::new(std::sync::Mutex::new(Vec::new())),
             read_files: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store: store.clone(),
             memory_queue: None,
             memory_scopes: Vec::new(),
@@ -131,7 +134,10 @@ mod tests {
             group_collaboration: None,
             subagent_runtime: None,
         };
-        Fixture { _temp: temp, services }
+        Fixture {
+            _temp: temp,
+            services,
+        }
     }
 
     #[test]

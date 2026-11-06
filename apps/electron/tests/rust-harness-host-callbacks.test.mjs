@@ -21,6 +21,16 @@ import { ElectronToolRegistry } from '../src/main/ai-harness/electron-tool-regis
 import { MCPService } from '../src/main/mcp/mcp-service.ts'
 import { RustHarnessClient } from '../electron/main-process/rust-harness-client.ts'
 import { normalizeRustAskUserQuestions, normalizeRustAskUserResponse } from '../electron/main-process/ai/rust-ask-user-contract.ts'
+import {
+  HOST_CAPABILITY_IDS,
+  HOST_CAPABILITY_MAX_DEADLINE_MS,
+  HOST_CAPABILITY_MAX_INPUT_BYTES,
+  HOST_CAPABILITY_MAX_OUTPUT_BYTES,
+  HOST_CAPABILITY_PROTOCOL_VERSION,
+  normalizeHostCapabilityDeadline,
+  parseHostCapabilityInvokeRequest
+} from '../src/main/ai-harness/host-capability-contract.ts'
+import { createHostCapabilityRegistry } from '../src/main/ai-harness/host-capability-registry.ts'
 
 const SESSION_ID = 'rust-host-test-session'
 
@@ -2212,4 +2222,234 @@ test('coding persistence keys localStorage by conversation and clears it', () =>
     if (previousWindow === undefined) delete globalThis.window
     else globalThis.window = previousWindow
   }
+})
+
+function createHostAdapters (overrides = {}) {
+  const calls = { dialogs: [], external: [], notifications: [] }
+  const adapters = {
+    async showOpenDialog (options) {
+      calls.dialogs.push(options)
+      return { canceled: false, filePaths: ['/tmp/report.pdf'] }
+    },
+    async openExternal (url) {
+      calls.external.push(url)
+    },
+    async showNotification (options) {
+      calls.notifications.push(options)
+    },
+    ...overrides
+  }
+  return { adapters, calls }
+}
+
+function hostCapabilityEnvelope (overrides = {}) {
+  return {
+    protocolVersion: HOST_CAPABILITY_PROTOCOL_VERSION,
+    registeredHostCapabilityId: 'host.fs.pick_file',
+    callId: 'host-call-1',
+    deadline: 5_000,
+    input: {},
+    ...overrides
+  }
+}
+
+test('host capability contract enforces version, allowlist and deadline bounds', async () => {
+  const { adapters, calls } = createHostAdapters()
+  const registry = createHostCapabilityRegistry({ adapters })
+
+  assert.deepEqual(HOST_CAPABILITY_IDS, [
+    'host.fs.pick_file',
+    'host.shell.open_external',
+    'host.notification.show'
+  ])
+
+  const unknown = await registry.invoke(hostCapabilityEnvelope({
+    registeredHostCapabilityId: 'host.fs.delete_everything',
+    callId: 'unknown-capability'
+  }))
+  assert.equal(unknown.status, 'error')
+  assert.equal(unknown.output.code, 'unknown_host_capability')
+
+  const unsupported = await registry.invoke(hostCapabilityEnvelope({
+    protocolVersion: HOST_CAPABILITY_PROTOCOL_VERSION + 1,
+    callId: 'unsupported-version'
+  }))
+  assert.equal(unsupported.status, 'error')
+  assert.equal(unsupported.output.code, 'unsupported_protocol_version')
+
+  for (const [index, deadline] of [0, -1, Number.NaN, 'soon'].entries()) {
+    const rejected = await registry.invoke(hostCapabilityEnvelope({
+      callId: `invalid-deadline-${index}`,
+      deadline
+    }))
+    assert.equal(rejected.status, 'error')
+    assert.equal(rejected.output.code, 'invalid_deadline')
+  }
+
+  const clamped = parseHostCapabilityInvokeRequest(hostCapabilityEnvelope({
+    callId: 'clamped-deadline',
+    deadline: HOST_CAPABILITY_MAX_DEADLINE_MS * 10
+  }))
+  assert.equal(clamped.ok, true)
+  assert.equal(clamped.request.deadline, HOST_CAPABILITY_MAX_DEADLINE_MS)
+  assert.equal(
+    normalizeHostCapabilityDeadline(HOST_CAPABILITY_MAX_DEADLINE_MS * 10),
+    HOST_CAPABILITY_MAX_DEADLINE_MS
+  )
+
+  const stateVersion = registry.getStateVersion()
+  assert.ok(stateVersion >= HOST_CAPABILITY_IDS.length)
+  registry.register('host.notification.show', async () => ({ shown: true }))
+  assert.equal(registry.getStateVersion(), stateVersion + 1)
+  assert.equal(registry.getStateSnapshot().stateVersion, stateVersion + 1)
+  assert.equal(calls.dialogs.length, 0)
+})
+
+test('host capability invoke runs allowlisted Electron adapters', async () => {
+  const { adapters, calls } = createHostAdapters()
+  const registry = createHostCapabilityRegistry({ adapters })
+
+  const picked = await registry.invoke(hostCapabilityEnvelope({
+    registeredHostCapabilityId: 'host.fs.pick_file',
+    callId: 'pick-file',
+    input: {
+      title: 'Choose a contract',
+      multiSelections: true,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }]
+    }
+  }))
+  assert.deepEqual(picked, {
+    status: 'ok',
+    output: { canceled: false, filePaths: ['/tmp/report.pdf'] },
+    warnings: []
+  })
+  assert.deepEqual(calls.dialogs[0], {
+    title: 'Choose a contract',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'PDF', extensions: ['pdf'] }]
+  })
+
+  const opened = await registry.invoke(hostCapabilityEnvelope({
+    registeredHostCapabilityId: 'host.shell.open_external',
+    callId: 'open-external',
+    input: { url: 'https://example.com/docs' }
+  }))
+  assert.deepEqual(opened, {
+    status: 'ok',
+    output: { opened: true, url: 'https://example.com/docs' },
+    warnings: []
+  })
+  assert.deepEqual(calls.external, ['https://example.com/docs'])
+
+  const notified = await registry.invoke(hostCapabilityEnvelope({
+    registeredHostCapabilityId: 'host.notification.show',
+    callId: 'show-notification',
+    input: { title: 'Agent', body: 'Task finished' }
+  }))
+  assert.deepEqual(notified, {
+    status: 'ok',
+    output: { shown: true },
+    warnings: []
+  })
+  assert.deepEqual(calls.notifications, [{ title: 'Agent', body: 'Task finished' }])
+})
+
+test('host capability invoke rejects unsafe urls and oversized input', async () => {
+  const { adapters, calls } = createHostAdapters()
+  const registry = createHostCapabilityRegistry({ adapters })
+
+  for (const [index, url] of ['file:///etc/passwd', 'javascript:alert(1)', 'worldbase://app'].entries()) {
+    const unsafe = await registry.invoke(hostCapabilityEnvelope({
+      registeredHostCapabilityId: 'host.shell.open_external',
+      callId: `unsafe-url-${index}`,
+      input: { url }
+    }))
+    assert.equal(unsafe.status, 'error')
+    assert.equal(unsafe.output.code, 'unsafe_url')
+  }
+  assert.deepEqual(calls.external, [])
+
+  const oversized = await registry.invoke(hostCapabilityEnvelope({
+    registeredHostCapabilityId: 'host.notification.show',
+    callId: 'oversized-input',
+    input: { body: 'x'.repeat(HOST_CAPABILITY_MAX_INPUT_BYTES + 1) }
+  }))
+  assert.equal(oversized.status, 'error')
+  assert.equal(oversized.output.code, 'input_too_large')
+  assert.equal(calls.notifications.length, 0)
+})
+
+test('host capability invoke keeps one response per callId', async () => {
+  const { adapters, calls } = createHostAdapters()
+  const registry = createHostCapabilityRegistry({ adapters })
+  const envelope = hostCapabilityEnvelope({
+    registeredHostCapabilityId: 'host.notification.show',
+    callId: 'duplicate-call',
+    input: { body: 'once' }
+  })
+
+  const first = await registry.invoke(envelope)
+  const second = await registry.invoke(envelope)
+  assert.equal(first.status, 'ok')
+  assert.equal(second.status, 'error')
+  assert.equal(second.errorCode, 'duplicate_call_id')
+  assert.equal(second.output.code, 'duplicate_call_id')
+  assert.equal(calls.notifications.length, 1)
+})
+
+test('host capability invoke caps output and never leaks handler errors', async () => {
+  const { adapters } = createHostAdapters()
+  const oversizedRegistry = createHostCapabilityRegistry({
+    adapters,
+    handlers: {
+      'host.notification.show': async () => ({
+        text: 'x'.repeat(HOST_CAPABILITY_MAX_OUTPUT_BYTES + 1)
+      })
+    }
+  })
+  const oversized = await oversizedRegistry.invoke(hostCapabilityEnvelope({
+    registeredHostCapabilityId: 'host.notification.show',
+    callId: 'oversized-output',
+    input: { body: 'ignored' }
+  }))
+  assert.equal(oversized.status, 'error')
+  assert.equal(oversized.output.code, 'output_too_large')
+
+  const throwingRegistry = createHostCapabilityRegistry({
+    adapters: {
+      ...adapters,
+      async openExternal () {
+        throw new Error('no shell available')
+      }
+    }
+  })
+  const failed = await throwingRegistry.invoke(hostCapabilityEnvelope({
+    registeredHostCapabilityId: 'host.shell.open_external',
+    callId: 'handler-error',
+    input: { url: 'https://example.com' }
+  }))
+  assert.equal(failed.status, 'error')
+  assert.equal(failed.output.code, 'host_capability_failed')
+  assert.match(failed.output.message, /no shell available/)
+})
+
+test('host capability accepts the Rust manifest input field names', async () => {
+  const { adapters, calls } = createHostAdapters()
+  const registry = createHostCapabilityRegistry({ adapters })
+
+  const opened = await registry.invoke(hostCapabilityEnvelope({
+    registeredHostCapabilityId: 'host.shell.open_external',
+    callId: 'manifest-target',
+    input: { target: 'https://example.com/reviewed' }
+  }))
+  assert.equal(opened.status, 'ok')
+  assert.deepEqual(calls.external, ['https://example.com/reviewed'])
+
+  const notified = await registry.invoke(hostCapabilityEnvelope({
+    registeredHostCapabilityId: 'host.notification.show',
+    callId: 'manifest-message',
+    input: { message: 'Task finished' }
+  }))
+  assert.equal(notified.status, 'ok')
+  assert.deepEqual(calls.notifications, [{ title: 'WorldBase', body: 'Task finished' }])
 })

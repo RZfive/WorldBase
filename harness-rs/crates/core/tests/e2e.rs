@@ -1530,7 +1530,12 @@ async fn persisted_agent_policy_and_skills_reach_the_actual_model_request() {
 
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].tools, vec!["read_file", "finish_task"]);
+    // `search_tools` is always-on even when the Agent allow/deny lists would
+    // exclude it: it is the only path to discoverable app/MCP capabilities.
+    assert_eq!(
+        requests[0].tools,
+        vec!["search_tools", "read_file", "finish_task"]
+    );
     assert_eq!(
         requests[0].options.reasoning_effort.as_deref(),
         Some("high")

@@ -4,6 +4,7 @@ import path from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import type { AIEngineServices } from '../../src/main/ai-host/engine-contracts.js'
 import { RustHarnessEngine } from '../../src/main/ai-harness/rust-harness-engine.js'
+import { createHostCapabilityRegistry } from '../../src/main/ai-harness/host-capability-registry.js'
 import { ProjectFS } from '../../src/main/project-fs/project-fs.js'
 import { ProjectPackageService } from '../../src/main/project-fs/project-package-service.js'
 import { UpdateService } from '../../src/main/app-update/update-service.js'
@@ -53,6 +54,8 @@ import { buildDocumentRenderPreview, readDocumentRenderAsset } from '../../src/m
 import type { DocumentFileType } from '../../src/main/document-workbench/document-types.js'
 
 let electronMcpParkedForRust = false
+
+const hostCapabilityRegistry = createHostCapabilityRegistry()
 
 function recordsFromRustValue (value: unknown): Record<string, unknown>[] {
   return Array.isArray(value)
@@ -379,6 +382,21 @@ function saveRustNativeMcpServer (result: unknown): string | null {
   return id
 }
 
+async function notifyHostCapabilityState (hostCapabilityId: string): Promise<void> {
+  const harness = mainState.rustHarness
+  if (!harness?.isRunning()) return
+  try {
+    await harness.call('application.host.state.changed', {
+      hostCapabilityId,
+      availability: 'available',
+      stateVersion: hostCapabilityRegistry.getStateVersion()
+    })
+  } catch {
+    // State notifications are best-effort; the invoke path still returns the
+    // authoritative result or a structured host error.
+  }
+}
+
 async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpcResult> {
   if (request.requestKind === 'page_automation') {
     const conversationId = request.conversationId
@@ -615,6 +633,14 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
       return result as unknown as JsonRpcResult
     }
     throw new Error('terminal_automation requires action "read" or "write"')
+  }
+
+  if (request.requestKind === 'application.host.capability.invoke') {
+    const hostCapabilityId = typeof request.payload.registeredHostCapabilityId === 'string'
+      ? request.payload.registeredHostCapabilityId
+      : ''
+    if (hostCapabilityId) void notifyHostCapabilityState(hostCapabilityId)
+    return await hostCapabilityRegistry.invoke(request.payload) as unknown as JsonRpcResult
   }
 
   throw new Error(`Unsupported Rust host request: ${request.requestKind}`)

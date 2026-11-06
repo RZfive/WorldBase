@@ -768,7 +768,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ws-sched-policy-{}", uuid::Uuid::new_v4()));
         let sched = Scheduler::new(Arc::new(Store::open(&dir.join("db.sqlite")).unwrap()));
         let mut request = structured_request(
-            ScheduledTaskSchedule::Daily { time_of_day: "09:00".into() },
+            ScheduledTaskSchedule::Daily {
+                time_of_day: "09:00".into(),
+            },
             true,
         );
         request.tool_policy = ScheduleToolPolicy::AutoApprove;
@@ -829,7 +831,9 @@ mod tests {
                     title: "[LongTermGoal] 目标".into(),
                     prompt: "推进".into(),
                     enabled: true,
-                    schedule: ScheduledTaskSchedule::Daily { time_of_day: "21:30".into() },
+                    schedule: ScheduledTaskSchedule::Daily {
+                        time_of_day: "21:30".into(),
+                    },
                     selected_skill_ids: Vec::new(),
                     selected_mcp_server_ids: Vec::new(),
                     tool_policy: ScheduleToolPolicy::default(),
@@ -848,7 +852,10 @@ mod tests {
         assert_eq!(listed.len(), 1);
         let listed = listed.pop().unwrap();
         assert_eq!(listed.id, "task_goal_abc");
-        assert!(matches!(listed.schedule, Some(ScheduledTaskSchedule::Daily { .. })));
+        assert!(matches!(
+            listed.schedule,
+            Some(ScheduledTaskSchedule::Daily { .. })
+        ));
         // electron_task_value must round-trip the hidden flag so the Electron
         // overlay keeps long-term-goal backing tasks out of the scheduler UI.
         let view = electron_task_value(&listed);

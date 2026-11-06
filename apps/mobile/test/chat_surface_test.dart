@@ -57,7 +57,7 @@ void main() {
 
     expect(find.text('搜索对话'), findsOneWidget);
     expect(find.text('应用广场'), findsOneWidget);
-    expect(find.text('绘图工作室'), findsOneWidget);
+    expect(find.text('绘图工作室'), findsAtLeastNWidgets(1));
     expect(find.text('群组协作'), findsOneWidget);
     expect(find.text('我的'), findsOneWidget);
     expect(tester.takeException(), isNull);

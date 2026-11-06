@@ -124,13 +124,16 @@ pub fn docx(path: &std::path::Path) -> Result<Value> {
         })
         .collect();
     let images = {
-        let rels_xml = read_zip_entry(&mut archive, "word/_rels/document.xml.rels")
-            .unwrap_or_default();
+        let rels_xml =
+            read_zip_entry(&mut archive, "word/_rels/document.xml.rels").unwrap_or_default();
         extract_office_images(&document_xml, &rels_xml, "word/media/")
     };
     let mut text = paragraphs.join("\n");
     for image in &images {
-        text.push_str(&format!("\n[图片 {}]", image["name"].as_str().unwrap_or("")));
+        text.push_str(&format!(
+            "\n[图片 {}]",
+            image["name"].as_str().unwrap_or("")
+        ));
     }
     Ok(json!({
         "kind": "docx",
@@ -561,7 +564,9 @@ pub(crate) fn scan_ooxml_elements(
 /// for source-aware (surgical) editing.
 pub fn extract_pptx_paragraph_items(xml: &str) -> Vec<(usize, String)> {
     let mut items = Vec::new();
-    for (index, (start, end)) in scan_ooxml_elements(xml, "<a:p", "</a:p>").into_iter().enumerate()
+    for (index, (start, end)) in scan_ooxml_elements(xml, "<a:p", "</a:p>")
+        .into_iter()
+        .enumerate()
     {
         let text = extract_xml_tag_text_trimmed_parts(&xml[start..end], "a:t");
         if !text.trim().is_empty() {

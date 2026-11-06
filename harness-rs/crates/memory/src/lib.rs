@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use image::io::Reader as ImageReader;
 use image::{GenericImageView, ImageOutputFormat};
-use rusqlite::{params, params_from_iter, Connection, OpenFlags, Row};
+use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension, Row};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -22,9 +22,7 @@ mod embedding_store;
 mod ingest;
 mod search;
 mod vector;
-pub use search::{
-    is_personal_memory_query, merge_memory_recall, personal_profile_category_terms,
-};
+pub use search::{is_personal_memory_query, merge_memory_recall, personal_profile_category_terms};
 
 pub use embedding::{
     EmbeddingProvider, FakeEmbeddingProvider, OpenAIEmbeddingProvider, EMBEDDING_PREPROCESS_VERSION,
@@ -368,6 +366,53 @@ impl Store {
                 metadata TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS applications (
+                source_id TEXT,
+                app_id TEXT PRIMARY KEY,
+                version TEXT,
+                manifest_hash TEXT,
+                enabled INTEGER,
+                trust_level TEXT,
+                status TEXT,
+                record_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS application_capabilities (
+                app_id TEXT,
+                capability_id TEXT,
+                schema_hash TEXT,
+                provider_ref TEXT,
+                availability TEXT,
+                record_json TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY(app_id, capability_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_application_capabilities_app
+                ON application_capabilities(app_id);
+            CREATE TABLE IF NOT EXISTS application_grants (
+                id TEXT PRIMARY KEY,
+                app_id TEXT,
+                capability_pattern TEXT,
+                permissions_json TEXT NOT NULL DEFAULT '[]',
+                data_scope_json TEXT NOT NULL DEFAULT '[]',
+                mode TEXT,
+                expires_at TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_application_grants_app
+                ON application_grants(app_id);
+            CREATE TABLE IF NOT EXISTS application_call_audit (
+                call_id TEXT PRIMARY KEY,
+                conversation_id TEXT,
+                app_id TEXT,
+                capability_id TEXT,
+                status TEXT,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                approval_id TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_application_call_audit_app_created
+                ON application_call_audit(app_id, created_at);
             "#,
         )
         .context("migrate schema")?;
@@ -573,9 +618,7 @@ impl Store {
     /// 本库文件所在的数据目录，与 `default_dir()` 对应（生产环境两者一致），
     /// 供命令输出落盘等同目录工件复用。
     pub fn data_dir(&self) -> &Path {
-        self.memory_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
+        self.memory_path.parent().unwrap_or_else(|| Path::new("."))
     }
 
     pub fn open_default() -> Result<Self> {
@@ -2317,10 +2360,7 @@ impl Store {
                 // A model plan may not touch user-scope facts or pinned
                 // entries at all: skip the whole group rather than merging
                 // around the protected member.
-                if cluster
-                    .iter()
-                    .any(Self::protected_from_model_compaction)
-                {
+                if cluster.iter().any(Self::protected_from_model_compaction) {
                     continue;
                 }
                 let target_id = group
@@ -2735,6 +2775,366 @@ impl Store {
         Ok(n > 0)
     }
 
+    // ---------- 应用能力平台 ----------
+
+    fn application_enum_text<T: serde::Serialize>(value: &T) -> String {
+        serde_json::to_value(value)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    fn capability_schema_hash(capability: &worldbase_protocol::types::CapabilityRecord) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical = serde_json::to_string(&capability.input_schema).unwrap_or_default();
+        let digest = Sha256::digest(canonical.as_bytes());
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn load_application_capabilities_locked(
+        conn: &Connection,
+        app_id: &str,
+    ) -> Result<Vec<worldbase_protocol::types::CapabilityRecord>> {
+        let mut stmt = conn.prepare(
+            "SELECT record_json FROM application_capabilities
+             WHERE app_id = ?1 ORDER BY capability_id",
+        )?;
+        let rows = stmt.query_map(params![app_id], |row| row.get::<_, String>(0))?;
+        let mut capabilities = Vec::new();
+        for row in rows {
+            let raw = row?;
+            let capability = serde_json::from_str(&raw)
+                .with_context(|| format!("parse application capability for {app_id}"))?;
+            capabilities.push(capability);
+        }
+        Ok(capabilities)
+    }
+
+    fn replace_application_capabilities_locked(
+        conn: &Connection,
+        app_id: &str,
+        capabilities: &[worldbase_protocol::types::CapabilityRecord],
+    ) -> Result<()> {
+        conn.execute(
+            "DELETE FROM application_capabilities WHERE app_id = ?1",
+            params![app_id],
+        )?;
+        let mut stmt = conn.prepare(
+            "INSERT INTO application_capabilities
+                (app_id, capability_id, schema_hash, provider_ref, availability, record_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for capability in capabilities {
+            let availability = Self::application_enum_text(&capability.availability);
+            stmt.execute(params![
+                app_id,
+                capability.capability_id,
+                Self::capability_schema_hash(capability),
+                capability.provider_ref,
+                availability,
+                serde_json::to_string(capability)?,
+            ])?;
+        }
+        Ok(())
+    }
+
+    /// Insert or update an application and replace its capability rows.
+    pub fn upsert_application(
+        &self,
+        record: &worldbase_protocol::types::ApplicationRecord,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO applications
+                (source_id, app_id, version, manifest_hash, enabled, trust_level, status,
+                 record_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(app_id) DO UPDATE SET
+                source_id = excluded.source_id,
+                version = excluded.version,
+                manifest_hash = excluded.manifest_hash,
+                enabled = excluded.enabled,
+                trust_level = excluded.trust_level,
+                status = excluded.status,
+                record_json = excluded.record_json,
+                updated_at = excluded.updated_at",
+            params![
+                record.source_id,
+                record.app_id,
+                record.version,
+                record.manifest_hash,
+                record.enabled as i64,
+                Self::application_enum_text(&record.trust_level),
+                record.health.status,
+                serde_json::to_string(record)?,
+                now_ts(),
+            ],
+        )?;
+        Self::replace_application_capabilities_locked(&tx, &record.app_id, &record.capabilities)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_application(
+        &self,
+        app_id: &str,
+    ) -> Result<Option<worldbase_protocol::types::ApplicationRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let raw = conn
+            .query_row(
+                "SELECT record_json FROM applications WHERE app_id = ?1",
+                params![app_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let mut record: worldbase_protocol::types::ApplicationRecord =
+            serde_json::from_str(&raw)
+                .with_context(|| format!("parse application record for {app_id}"))?;
+        if record.app_id.is_empty() {
+            record.app_id = app_id.to_string();
+        }
+        record.capabilities = Self::load_application_capabilities_locked(&conn, app_id)?;
+        Ok(Some(record))
+    }
+
+    pub fn list_applications(&self) -> Result<Vec<worldbase_protocol::types::ApplicationRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT record_json FROM applications ORDER BY app_id")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut applications = Vec::new();
+        for row in rows {
+            let raw = row?;
+            let mut record: worldbase_protocol::types::ApplicationRecord =
+                serde_json::from_str(&raw).context("parse application record")?;
+            record.capabilities =
+                Self::load_application_capabilities_locked(&conn, &record.app_id)?;
+            applications.push(record);
+        }
+        Ok(applications)
+    }
+
+    pub fn set_application_enabled(&self, app_id: &str, enabled: bool) -> Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE applications SET enabled = ?1, updated_at = ?2 WHERE app_id = ?3",
+            params![enabled as i64, now_ts(), app_id],
+        )?;
+        if updated == 0 {
+            return Ok(false);
+        }
+        let raw = tx.query_row(
+            "SELECT record_json FROM applications WHERE app_id = ?1",
+            params![app_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("enabled".into(), serde_json::Value::Bool(enabled));
+                tx.execute(
+                    "UPDATE applications SET record_json = ?1 WHERE app_id = ?2",
+                    params![value.to_string(), app_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn delete_application(&self, app_id: &str) -> Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let deleted = tx.execute(
+            "DELETE FROM applications WHERE app_id = ?1",
+            params![app_id],
+        )?;
+        tx.execute(
+            "DELETE FROM application_capabilities WHERE app_id = ?1",
+            params![app_id],
+        )?;
+        if deleted > 0 {
+            tx.execute(
+                "DELETE FROM application_grants WHERE app_id = ?1",
+                params![app_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(deleted > 0)
+    }
+
+    pub fn replace_application_capabilities(
+        &self,
+        app_id: &str,
+        capabilities: &[worldbase_protocol::types::CapabilityRecord],
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        Self::replace_application_capabilities_locked(&tx, app_id, capabilities)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn save_application_grant(
+        &self,
+        grant: &worldbase_protocol::types::ApplicationGrant,
+    ) -> Result<()> {
+        let id = if grant.id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            grant.id.clone()
+        };
+        let created_at = if grant.created_at.is_empty() {
+            now_ts()
+        } else {
+            grant.created_at.clone()
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO application_grants
+                (id, app_id, capability_pattern, permissions_json, data_scope_json, mode,
+                 expires_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+                app_id = excluded.app_id,
+                capability_pattern = excluded.capability_pattern,
+                permissions_json = excluded.permissions_json,
+                data_scope_json = excluded.data_scope_json,
+                mode = excluded.mode,
+                expires_at = excluded.expires_at,
+                created_at = excluded.created_at",
+            params![
+                id,
+                grant.app_id,
+                grant.capability_pattern,
+                serde_json::to_string(&grant.permissions)?,
+                serde_json::to_string(&grant.data_scope)?,
+                grant.mode,
+                grant.expires_at,
+                created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_application_grants(
+        &self,
+        app_id: Option<&str>,
+    ) -> Result<Vec<worldbase_protocol::types::ApplicationGrant>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = match app_id {
+            Some(_) => {
+                "SELECT id, app_id, capability_pattern, permissions_json, data_scope_json,
+                        mode, expires_at, created_at
+                 FROM application_grants WHERE app_id = ?1 ORDER BY created_at DESC, id"
+            }
+            None => {
+                "SELECT id, app_id, capability_pattern, permissions_json, data_scope_json,
+                        mode, expires_at, created_at
+                 FROM application_grants ORDER BY created_at DESC, id"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let parse =
+            |row: &Row<'_>| -> rusqlite::Result<worldbase_protocol::types::ApplicationGrant> {
+                let permissions_json: String = row.get(3)?;
+                let data_scope_json: String = row.get(4)?;
+                Ok(worldbase_protocol::types::ApplicationGrant {
+                    id: row.get(0)?,
+                    app_id: row.get(1)?,
+                    capability_pattern: row.get(2)?,
+                    permissions: serde_json::from_str(&permissions_json).unwrap_or_default(),
+                    data_scope: serde_json::from_str(&data_scope_json).unwrap_or_default(),
+                    mode: row.get(5)?,
+                    expires_at: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            };
+        let rows = match app_id {
+            Some(app_id) => stmt.query_map(params![app_id], parse)?,
+            None => stmt.query_map([], parse)?,
+        };
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn revoke_application_grant(&self, grant_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM application_grants WHERE id = ?1",
+            params![grant_id],
+        )?;
+        Ok(deleted > 0)
+    }
+
+    pub fn add_application_call_audit(
+        &self,
+        audit: &worldbase_protocol::types::ApplicationCallAudit,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO application_call_audit
+                (call_id, conversation_id, app_id, capability_id, status, duration_ms,
+                 approval_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                audit.call_id,
+                audit.conversation_id,
+                audit.app_id,
+                audit.capability_id,
+                audit.status,
+                audit.duration_ms as i64,
+                audit.approval_id,
+                audit.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_application_call_audit(
+        &self,
+        app_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<worldbase_protocol::types::ApplicationCallAudit>> {
+        let conn = self.conn.lock().unwrap();
+        let limit = limit as i64;
+        let sql = match app_id {
+            Some(_) => {
+                "SELECT call_id, conversation_id, app_id, capability_id, status, duration_ms,
+                        approval_id, created_at
+                 FROM application_call_audit WHERE app_id = ?1
+                 ORDER BY created_at DESC, call_id DESC LIMIT ?2"
+            }
+            None => {
+                "SELECT call_id, conversation_id, app_id, capability_id, status, duration_ms,
+                        approval_id, created_at
+                 FROM application_call_audit
+                 ORDER BY created_at DESC, call_id DESC LIMIT ?1"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let parse =
+            |row: &Row<'_>| -> rusqlite::Result<worldbase_protocol::types::ApplicationCallAudit> {
+                Ok(worldbase_protocol::types::ApplicationCallAudit {
+                    call_id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    app_id: row.get(2)?,
+                    capability_id: row.get(3)?,
+                    status: row.get(4)?,
+                    duration_ms: row.get::<_, i64>(5)? as u64,
+                    approval_id: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            };
+        let rows = match app_id {
+            Some(app_id) => stmt.query_map(params![app_id, limit], parse)?,
+            None => stmt.query_map(params![limit], parse)?,
+        };
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     // ---------- 用量统计 ----------
 
     pub fn record_usage(
@@ -3092,30 +3492,19 @@ mod tests {
     #[test]
     fn model_compaction_never_touches_user_scope_or_pinned_entries() {
         let store = temp_store();
-        let mut user_fact = workspace_entry(
-            "user-fact",
-            "Diet preference",
-            "用户喜欢吃苹果",
-        );
+        let mut user_fact = workspace_entry("user-fact", "Diet preference", "用户喜欢吃苹果");
         user_fact.memory_type = "user_trait".into();
         user_fact.source_text = Some("我喜欢吃苹果。".into());
         store.save_workspace_memory(&user_fact).unwrap();
 
-        let mut pinned_agent = workspace_entry(
-            "pinned-agent",
-            "Pinned convention",
-            "部署前必须跑完整测试",
-        );
+        let mut pinned_agent =
+            workspace_entry("pinned-agent", "Pinned convention", "部署前必须跑完整测试");
         pinned_agent.scope_type = "agent".into();
         pinned_agent.scope_id = "agent_default".into();
         pinned_agent.pinned = true;
         store.save_workspace_memory(&pinned_agent).unwrap();
 
-        let mut first = workspace_entry(
-            "agent-a",
-            "Build note",
-            "Rust services use cargo build",
-        );
+        let mut first = workspace_entry("agent-a", "Build note", "Rust services use cargo build");
         first.scope_type = "agent".into();
         first.scope_id = "agent_default".into();
         store.save_workspace_memory(&first).unwrap();
@@ -3127,11 +3516,7 @@ mod tests {
         second.scope_type = "agent".into();
         second.scope_id = "agent_default".into();
         store.save_workspace_memory(&second).unwrap();
-        let mut third = workspace_entry(
-            "agent-c",
-            "Stale fragment",
-            "leftover scratch",
-        );
+        let mut third = workspace_entry("agent-c", "Stale fragment", "leftover scratch");
         third.scope_type = "agent".into();
         third.scope_id = "agent_default".into();
         store.save_workspace_memory(&third).unwrap();
@@ -3146,11 +3531,7 @@ mod tests {
 
         let result = store
             .compact_workspace_memories(&MemoryCompactionPlan {
-                delete_ids: vec![
-                    "user-fact".into(),
-                    "pinned-agent".into(),
-                    "agent-c".into(),
-                ],
+                delete_ids: vec!["user-fact".into(), "pinned-agent".into(), "agent-c".into()],
                 merge_groups: vec![
                     MemoryMergeGroup {
                         ids: vec!["agent-a".into(), "agent-b".into()],
@@ -3208,10 +3589,7 @@ mod tests {
         assert_eq!(user_after.title, "Diet preference");
         assert_eq!(user_after.summary, "用户喜欢吃苹果");
         assert_eq!(user_after.source_text.as_deref(), Some("我喜欢吃苹果。"));
-        let pinned_after = store
-            .get_workspace_memory("pinned-agent")
-            .unwrap()
-            .unwrap();
+        let pinned_after = store.get_workspace_memory("pinned-agent").unwrap().unwrap();
         assert_eq!(pinned_after.title, "Pinned convention");
         assert_eq!(pinned_after.summary, "部署前必须跑完整测试");
         assert!(pinned_after.pinned);
@@ -3225,7 +3603,10 @@ mod tests {
         // Manual deletion of a protected entry remains available: the guard
         // covers the model compaction entry only.
         assert!(store.delete_workspace_memory("pinned-agent").unwrap());
-        assert!(store.get_workspace_memory("pinned-agent").unwrap().is_none());
+        assert!(store
+            .get_workspace_memory("pinned-agent")
+            .unwrap()
+            .is_none());
         assert!(store.delete_workspace_memory("user-fact").unwrap());
     }
 

@@ -212,12 +212,18 @@ impl VectorIndex {
         let table = Self::table_name(generation_id);
         let mut sql = format!(
             "SELECT document_id, distance FROM {table} WHERE scope_key IN ({})",
-            std::iter::repeat("?").take(query.scope_keys.len()).collect::<Vec<_>>().join(", ")
+            std::iter::repeat("?")
+                .take(query.scope_keys.len())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         if !query.document_kinds.is_empty() {
             sql.push_str(&format!(
                 " AND document_kind IN ({})",
-                std::iter::repeat("?").take(query.document_kinds.len()).collect::<Vec<_>>().join(", ")
+                std::iter::repeat("?")
+                    .take(query.document_kinds.len())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         sql.push_str(" AND embedding MATCH ? ORDER BY distance LIMIT ?");
@@ -398,7 +404,8 @@ mod tests {
     use super::*;
 
     fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("worldbase-vector-test-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("worldbase-vector-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -443,7 +450,9 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].document_id, "memory:a");
 
-        index.delete_documents("gen_test", &["memory:a".to_string()]).unwrap();
+        index
+            .delete_documents("gen_test", &["memory:a".to_string()])
+            .unwrap();
         let hits = index
             .query(
                 "gen_test",

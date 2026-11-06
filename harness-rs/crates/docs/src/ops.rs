@@ -5,7 +5,7 @@
 //! 不会因为一次 AI 修改而丢失。段落定位使用 `parse` 暴露的稳定索引
 //! （document-order 元素序，包含空段落）。
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -133,7 +133,17 @@ pub fn is_media_part(name: &str) -> bool {
     is_media_directory
         && matches!(
             extension,
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" | "emf" | "wmf" | "svg"
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "bmp"
+                | "webp"
+                | "tiff"
+                | "tif"
+                | "emf"
+                | "wmf"
+                | "svg"
         )
 }
 
@@ -159,8 +169,8 @@ impl ZipPackage {
     fn load(source: &Path) -> Result<Self> {
         let file =
             std::fs::File::open(source).with_context(|| format!("open {}", source.display()))?;
-        let mut archive = zip::ZipArchive::new(file)
-            .with_context(|| format!("read zip {}", source.display()))?;
+        let mut archive =
+            zip::ZipArchive::new(file).with_context(|| format!("read zip {}", source.display()))?;
         let mut entries = Vec::with_capacity(archive.len());
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index)?;
@@ -183,11 +193,16 @@ impl ZipPackage {
     }
 
     fn get_string(&self, name: &str) -> Option<String> {
-        self.get(name).map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        self.get(name)
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
     }
 
     fn set(&mut self, name: &str, bytes: Vec<u8>) {
-        if let Some(slot) = self.entries.iter_mut().find(|(existing, _)| existing == name) {
+        if let Some(slot) = self
+            .entries
+            .iter_mut()
+            .find(|(existing, _)| existing == name)
+        {
             slot.1 = bytes;
         } else {
             self.entries.push((name.to_string(), bytes));
@@ -205,8 +220,8 @@ impl ZipPackage {
     }
 
     fn save(&self, output: &Path) -> Result<()> {
-        let file =
-            std::fs::File::create(output).with_context(|| format!("create {}", output.display()))?;
+        let file = std::fs::File::create(output)
+            .with_context(|| format!("create {}", output.display()))?;
         let mut writer = zip::ZipWriter::new(file);
         let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
         for (name, bytes) in &self.entries {
@@ -240,9 +255,7 @@ fn verify_package(output: &Path, family: &str) -> Result<()> {
                 presentation.contains("</p:presentation>"),
                 "校验失败：presentation.xml 结构不完整"
             );
-            let declared = presentation
-                .match_indices("<p:sldId ")
-                .count();
+            let declared = presentation.match_indices("<p:sldId ").count();
             let resolved = resolve_slide_parts(&package)?.len();
             anyhow::ensure!(
                 declared == resolved,
@@ -267,15 +280,26 @@ fn apply_docx_ops(package: &mut ZipPackage, ops: &[OfficeOp]) -> Result<()> {
 
     for op in ops {
         match op {
-            OfficeOp::DocxReplaceText { paragraph_index, after_text, expect_before } => {
+            OfficeOp::DocxReplaceText {
+                paragraph_index,
+                after_text,
+                expect_before,
+            } => {
                 let spans = parse::scan_ooxml_elements(&xml, "<w:p", "</w:p>");
                 let (start, end) = paragraph_span(&spans, *paragraph_index)?;
                 let paragraph = xml[start..end].to_string();
                 let current = parse::extract_xml_tag_text(&paragraph, "w:t");
                 ensure_expect_before(expect_before, &current)?;
-                xml.replace_range(start..end, &replace_docx_paragraph_text(&paragraph, after_text));
+                xml.replace_range(
+                    start..end,
+                    &replace_docx_paragraph_text(&paragraph, after_text),
+                );
             }
-            OfficeOp::DocxInsertParagraphAfter { paragraph_index, text, style } => {
+            OfficeOp::DocxInsertParagraphAfter {
+                paragraph_index,
+                text,
+                style,
+            } => {
                 let element = docx_paragraph_xml(text, *style);
                 insert_after_docx_paragraph(&mut xml, *paragraph_index, &element)?;
             }
@@ -284,7 +308,11 @@ fn apply_docx_ops(package: &mut ZipPackage, ops: &[OfficeOp]) -> Result<()> {
                 let (start, end) = paragraph_span(&spans, *paragraph_index)?;
                 xml.replace_range(start..end, "");
             }
-            OfficeOp::DocxInsertImage { paragraph_index, image_path, width_inches } => {
+            OfficeOp::DocxInsertImage {
+                paragraph_index,
+                image_path,
+                width_inches,
+            } => {
                 drawing_sequence += 1;
                 insert_docx_image(
                     package,
@@ -336,7 +364,10 @@ fn replace_docx_paragraph_text(paragraph: &str, after_text: &str) -> String {
 
     for (start, end) in spans.iter().rev() {
         let replacement = if *start == spans[0].0 {
-            format!("<w:t xml:space=\"preserve\">{}</w:t>", xml_escape(after_text))
+            format!(
+                "<w:t xml:space=\"preserve\">{}</w:t>",
+                xml_escape(after_text)
+            )
         } else {
             "<w:t xml:space=\"preserve\"/>".to_string()
         };
@@ -356,7 +387,11 @@ fn docx_paragraph_xml(text: &str, style: ParagraphStyle) -> String {
         }
         ParagraphStyle::Plain | ParagraphStyle::Bold => String::new(),
     };
-    let bold = if style == ParagraphStyle::Bold { "<w:rPr><w:b/></w:rPr>" } else { "" };
+    let bold = if style == ParagraphStyle::Bold {
+        "<w:rPr><w:b/></w:rPr>"
+    } else {
+        ""
+    };
     format!("<w:p>{properties}<w:r>{bold}<w:t xml:space=\"preserve\">{escaped}</w:t></w:r></w:p>")
 }
 
@@ -393,17 +428,32 @@ struct ImageBlob {
 
 /// 仅依赖文件头的 PNG/JPEG 尺寸探测，避免引入重量级图像解码依赖。
 fn read_image(path: &Path) -> Result<ImageBlob> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("read image {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("read image {}", path.display()))?;
     if bytes.len() >= 24 && bytes[..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
         let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
         let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
-        anyhow::ensure!(width > 0 && height > 0, "PNG 图片尺寸无效: {}", path.display());
-        return Ok(ImageBlob { bytes, mime: "image/png", extension: "png", width, height });
+        anyhow::ensure!(
+            width > 0 && height > 0,
+            "PNG 图片尺寸无效: {}",
+            path.display()
+        );
+        return Ok(ImageBlob {
+            bytes,
+            mime: "image/png",
+            extension: "png",
+            width,
+            height,
+        });
     }
     if bytes.len() >= 4 && bytes[..2] == [0xFF, 0xD8] {
         if let Some((width, height)) = probe_jpeg_dimensions(&bytes) {
-            return Ok(ImageBlob { bytes, mime: "image/jpeg", extension: "jpg", width, height });
+            return Ok(ImageBlob {
+                bytes,
+                mime: "image/jpeg",
+                extension: "jpg",
+                width,
+                height,
+            });
         }
         bail!("无法解析 JPEG 图片尺寸: {}", path.display());
     }
@@ -428,7 +478,8 @@ fn probe_jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
             cursor += 2;
             continue;
         }
-        let length = u16::from_be_bytes(bytes.get(cursor + 2..cursor + 4)?.try_into().ok()?) as usize;
+        let length =
+            u16::from_be_bytes(bytes.get(cursor + 2..cursor + 4)?.try_into().ok()?) as usize;
         cursor += 2 + length;
     }
     None
@@ -598,7 +649,8 @@ fn resolve_slide_parts(package: &ZipPackage) -> Result<Vec<String>> {
     }
 
     let mut ordered = Vec::new();
-    if let Some((list_start, list_end)) = section_bounds(&presentation, "<p:sldIdLst>", "</p:sldIdLst>")
+    if let Some((list_start, list_end)) =
+        section_bounds(&presentation, "<p:sldIdLst>", "</p:sldIdLst>")
     {
         let list = &presentation[list_start..list_end];
         let mut tag_cursor = 0;
@@ -608,8 +660,7 @@ fn resolve_slide_parts(package: &ZipPackage) -> Result<Vec<String>> {
                 break;
             };
             let element = &list[start..=start + tag_end];
-            let rid = attribute_value(element, "r:id")
-                .or_else(|| attribute_value(element, "id"));
+            let rid = attribute_value(element, "r:id").or_else(|| attribute_value(element, "id"));
             if let Some(rid) = rid {
                 if let Some(target) = target_by_rid.get(&rid) {
                     ordered.push(normalize_part_target("ppt", target));
@@ -675,7 +726,12 @@ fn apply_pptx_ops(package: &mut ZipPackage, ops: &[OfficeOp]) -> Result<()> {
 
     for op in ops {
         match op {
-            OfficeOp::PptxReplaceText { slide, paragraph_index, after_text, expect_before } => {
+            OfficeOp::PptxReplaceText {
+                slide,
+                paragraph_index,
+                after_text,
+                expect_before,
+            } => {
                 let slide_part = slide_part_at(&slide_parts, *slide)?;
                 let mut xml = package
                     .get_string(&slide_part)
@@ -685,15 +741,32 @@ fn apply_pptx_ops(package: &mut ZipPackage, ops: &[OfficeOp]) -> Result<()> {
                 let paragraph = xml[start..end].to_string();
                 let current = parse::extract_xml_tag_text_trimmed_parts(&paragraph, "a:t");
                 ensure_expect_before(expect_before, &current)?;
-                xml.replace_range(start..end, &replace_pptx_paragraph_text(&paragraph, after_text));
+                xml.replace_range(
+                    start..end,
+                    &replace_pptx_paragraph_text(&paragraph, after_text),
+                );
                 package.set(&slide_part, xml.into_bytes());
             }
-            OfficeOp::PptxInsertImage { slide, image_path, width_inches } => {
+            OfficeOp::PptxInsertImage {
+                slide,
+                image_path,
+                width_inches,
+            } => {
                 let slide_part = slide_part_at(&slide_parts, *slide)?;
                 pic_sequence += 1;
-                insert_pptx_image(package, &slide_part, image_path, *width_inches, pic_sequence)?;
+                insert_pptx_image(
+                    package,
+                    &slide_part,
+                    image_path,
+                    *width_inches,
+                    pic_sequence,
+                )?;
             }
-            OfficeOp::PptxInsertSlideAfter { index, title, content } => {
+            OfficeOp::PptxInsertSlideAfter {
+                index,
+                title,
+                content,
+            } => {
                 insert_pptx_slide(package, *index, title, content)?;
             }
             OfficeOp::PptxDeleteSlide { index } => {
@@ -707,12 +780,15 @@ fn apply_pptx_ops(package: &mut ZipPackage, ops: &[OfficeOp]) -> Result<()> {
 
 fn slide_part_at(slide_parts: &[String], slide: u32) -> Result<String> {
     let index = slide as usize;
-    slide_parts.get(index.wrapping_sub(1)).cloned().ok_or_else(|| {
-        anyhow::anyhow!(
-            "幻灯片序号 {slide} 越界：演示共有 {} 页（从 1 开始）",
-            slide_parts.len()
-        )
-    })
+    slide_parts
+        .get(index.wrapping_sub(1))
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "幻灯片序号 {slide} 越界：演示共有 {} 页（从 1 开始）",
+                slide_parts.len()
+            )
+        })
 }
 
 /// 首个 `<a:r>` 写入新文本，其余 run 删除（保留 endParaRPr / 段属性）。
@@ -745,12 +821,18 @@ fn replace_pptx_paragraph_text(paragraph: &str, after_text: &str) -> String {
         if let Some((text_start, text_end)) = text_spans.first() {
             replaced.replace_range(
                 *text_start..*text_end,
-                &format!("<a:t xml:space=\"preserve\">{}</a:t>", xml_escape(after_text)),
+                &format!(
+                    "<a:t xml:space=\"preserve\">{}</a:t>",
+                    xml_escape(after_text)
+                ),
             );
         } else if let Some(position) = replaced.rfind("</a:r>") {
             replaced.insert_str(
                 position,
-                &format!("<a:t xml:space=\"preserve\">{}</a:t>", xml_escape(after_text)),
+                &format!(
+                    "<a:t xml:space=\"preserve\">{}</a:t>",
+                    xml_escape(after_text)
+                ),
             );
         }
         updated.replace_range(*start..*end, &replaced);
@@ -892,8 +974,7 @@ fn insert_pptx_slide(
         .iter()
         .find(|name| {
             let lower = name.to_ascii_lowercase();
-            lower.starts_with("ppt/slideLayouts/slideLayout")
-                && lower.ends_with(".xml")
+            lower.starts_with("ppt/slideLayouts/slideLayout") && lower.ends_with(".xml")
         })
         .map(|layout| layout.trim_start_matches("ppt/").to_string())
         .unwrap_or_else(|| "slideLayouts/slideLayout1.xml".to_string());
@@ -947,7 +1028,9 @@ fn insert_pptx_slide(
         .match_indices("<p:sldId ")
         .filter_map(|(position, _)| {
             let element_end = presentation[position..].find('>')? + position;
-            attribute_value(&presentation[position..=element_end], "id")?.parse::<u64>().ok()
+            attribute_value(&presentation[position..=element_end], "id")?
+                .parse::<u64>()
+                .ok()
         })
         .max()
         .unwrap_or(255);
@@ -1019,10 +1102,7 @@ fn delete_pptx_slide(package: &mut ZipPackage, index: u32) -> Result<()> {
     let list = presentation[list_start..list_end].to_string();
     let tag_spans = scan_tag_elements(&list, "<p:sldId");
     let target_index = index as usize - 1;
-    anyhow::ensure!(
-        target_index < tag_spans.len(),
-        "幻灯片序号 {index} 越界"
-    );
+    anyhow::ensure!(target_index < tag_spans.len(), "幻灯片序号 {index} 越界");
     let (tag_start, tag_end) = tag_spans[target_index];
     let mut new_list = String::with_capacity(list.len());
     new_list.push_str(&list[..tag_start]);
@@ -1100,11 +1180,11 @@ mod tests {
     use serde_json::json;
 
     const TINY_PNG: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
-        0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
-        0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
-        0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
-        0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x62, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
 
     fn write_docx_fixture(path: &Path) {
@@ -1183,9 +1263,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> tempfile::TempDir {
-        tempfile::tempdir().unwrap_or_else(|_| {
-            panic!("tempdir unavailable for {name}")
-        })
+        tempfile::tempdir().unwrap_or_else(|_| panic!("tempdir unavailable for {name}"))
     }
 
     #[test]
@@ -1238,7 +1316,10 @@ mod tests {
         // 新图片尺寸按 3in 宽、1x1 比例 → EMU；fixture 已占用 rId10，新关系取 rId1
         let document = package.get_string("word/document.xml").unwrap();
         assert!(document.contains("cx=\"2743200\""), "3in EMU width present");
-        assert!(document.contains("r:embed=\"rId1\""), "new relationship referenced");
+        assert!(
+            document.contains("r:embed=\"rId1\""),
+            "new relationship referenced"
+        );
         // 锚文本不匹配要报错
         let rejected = apply_ops(
             &source,
@@ -1300,7 +1381,10 @@ mod tests {
         assert_eq!(parts[1], "ppt/slides/slide3.xml");
         let slide1 = package.get_string(&parts[0]).unwrap();
         assert!(slide1.contains("封面"));
-        assert!(slide1.contains("r:embed=\"rId1\""), "slide1 references new image rel");
+        assert!(
+            slide1.contains("r:embed=\"rId1\""),
+            "slide1 references new image rel"
+        );
         assert!(
             package
                 .get_string("ppt/slides/_rels/slide1.xml.rels")
@@ -1310,7 +1394,10 @@ mod tests {
         );
         let slide2 = package.get_string(&parts[1]).unwrap();
         assert!(slide2.contains("总结"));
-        assert!(package.get("ppt/slides/slide2.xml").is_none(), "deleted slide part removed");
+        assert!(
+            package.get("ppt/slides/slide2.xml").is_none(),
+            "deleted slide part removed"
+        );
 
         let parsed = crate::parse_file(&output).unwrap();
         assert_eq!(parsed["slides"], json!(2));
