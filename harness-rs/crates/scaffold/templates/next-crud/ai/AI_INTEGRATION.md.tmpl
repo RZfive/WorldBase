@@ -1,0 +1,56 @@
+# AI Integration
+
+应用：{{PROJECT_NAME}}（`{{APP_ID}}`）
+
+- 模板：`{{TEMPLATE}}`
+- 项目类型：`{{PROJECT_TYPE}}`
+
+## 自然语言用法
+
+用户可以直接用业务语言请求，例如“列出最近的{{PROJECT_NAME}}记录”“在{{PROJECT_NAME}}里搜索某个关键词”。
+宿主会把自然语言意图映射到稳定 capability，AI 不需要理解页面、状态管理或数据库布局。
+
+## Capability 一览
+
+{{CAPABILITY_TABLE}}
+
+## 何时使用
+
+- 需要查询、创建、修改或删除应用内的业务记录时。
+- 调用方已经明确业务对象和操作，并期望得到结构化结果时。
+
+## 何时不要使用
+
+- 意图不明确或缺少关键字段时，应先向用户澄清。
+- 不要用页面自动化替代已经声明的 capability。
+- 高风险写操作（删除）必须先获得用户确认。
+
+## 前置条件
+
+- 应用已启动，并生成了 `.worldbase/app-capabilities.json`。
+- 宿主已按 manifest allowlist 授权对应 capability。
+- 固定 RPC 请求必须携带 `Authorization: Bearer ${WORLDBASE_APP_TOKEN}`，并声明 `protocolVersion: 1` 与 `deadline`。
+
+## 业务实体
+
+{{ENTITY_SUMMARY}}
+
+## 实现位置
+
+- 领域逻辑：`src/domain/<entity>-service.ts`
+- AI 适配层：`src/ai/capabilities.ts`
+- RPC 调度：`src/ai/invoke.ts`
+- 固定路由：`app/worldbase/capabilities/invoke/route.ts`
+- Manifest：`.worldbase/app-capabilities.json`
+- 契约测试：`tests/capability_contract/<entity>.test.mjs`
+
+## 补充说明
+
+{{AI_NOTE}}
+
+## 校验
+
+```bash
+node scripts/generate-manifest.mjs
+worldbase app validate .
+```

@@ -1,0 +1,93 @@
+import {
+  capabilities,
+  CapabilityError,
+  type CapabilityCallContext,
+} from "./capabilities";
+
+export const MAX_INPUT_BYTES = 1024 * 1024;
+
+export interface InvokeRequest {
+  capabilityId: string;
+  input?: unknown;
+  callId?: string;
+  deadline?: number;
+  idempotencyKey?: string;
+}
+
+export interface InvokeSuccess {
+  status: "ok";
+  data: unknown;
+  warnings?: string[];
+}
+
+export interface InvokeFailure {
+  status: "error";
+  errorCode: string;
+  message: string;
+}
+
+export type InvokeResponse = InvokeSuccess | InvokeFailure;
+
+function fail(errorCode: string, message: string): InvokeFailure {
+  return { status: "error", errorCode, message };
+}
+
+function byteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+export async function invokeCapability(
+  request: InvokeRequest,
+): Promise<InvokeResponse> {
+  if (!request || typeof request !== "object") {
+    return fail("input_schema_invalid", "invoke request must be an object");
+  }
+
+  const capabilityId = request.capabilityId;
+  if (typeof capabilityId !== "string" || capabilityId.trim().length === 0) {
+    return fail("input_schema_invalid", "capabilityId is required");
+  }
+
+  const capability = capabilities[capabilityId];
+  if (!capability) {
+    return fail("capability_not_found", `unknown capability: ${capabilityId}`);
+  }
+
+  const input = request.input ?? {};
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(input);
+  } catch {
+    return fail("input_schema_invalid", "input must be JSON serializable");
+  }
+  if (!serialized || byteLength(serialized) > MAX_INPUT_BYTES) {
+    return fail("input_schema_invalid", "input exceeds the 1 MiB limit");
+  }
+
+  if (
+    typeof request.deadline === "number" &&
+    request.deadline > 0 &&
+    Date.now() > request.deadline
+  ) {
+    return fail("operation_timeout", "deadline exceeded before invocation");
+  }
+
+  const context: CapabilityCallContext = {
+    requestId: request.callId ?? crypto.randomUUID(),
+    deadline: request.deadline,
+  };
+
+  try {
+    const data = await capability.invoke(input, context);
+    return { status: "ok", data };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const errorCode =
+      error instanceof CapabilityError
+        ? error.code
+        : message.includes("expects")
+          ? "input_schema_invalid"
+          : "provider_unavailable";
+    return fail(errorCode, message);
+  }
+}

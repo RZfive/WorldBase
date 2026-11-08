@@ -1193,6 +1193,12 @@ fn project_editing_prompt(tools: &PromptToolContext<'_>) -> Option<String> {
     if tools.has("create_project") {
         lines.push("- Do not call `create_project` for an existing-project request.".into());
     }
+    if tools.has("upgrade_project") {
+        lines.push(
+            "- Use `upgrade_project` when an existing project needs the generated data, API, or capability files; it fills only missing files and never overwrites existing code."
+                .into(),
+        );
+    }
     let discovery = tools.visible_names(&[
         "list_project_files",
         "read_project_file",
@@ -1505,30 +1511,34 @@ fn runtime_data_api_prompt(tools: &PromptToolContext<'_>) -> Option<String> {
         "create_project",
         "call_project_api",
         "query_project_database",
-        "analyze_project_data",
     ]) {
         return None;
     }
 
     let mut lines = vec!["## Runtime, data, and API rules".to_string()];
     if tools.has("create_project") {
-        lines.extend([
-            "- Generated managed projects must use WorldBase host-provided project data APIs for persistent business data; do not add a separate SQLite/ORM driver or make browser-only storage the primary source of truth.".into(),
-            "- Define persistence in `create_project` `meta.dataSchema` / `.world-meta.json`; `dataSchema.tables` is an array of table definitions, never an object map.".into(),
-            "- Use `THE_WORLD_PROJECT_DATA_BASE_URL` or `NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL` for project records. `THE_WORLD_SYSTEM_BASE_URL` is for shell-level system APIs, not project data.".into(),
-            "- Use host-provided runtime environment variables and resource proxying instead of hardcoded machine paths, ports, or duplicated host services.".into(),
-        ]);
+        lines.push("- New projects use the scaffold-generated data and capability layer; do not introduce a second database, ORM, or storage driver.".into());
     }
     if tools.has("call_project_api") {
-        lines.push("- Use `call_project_api` for managed project HTTP checks. Supply the exact project ID, method, path, headers, and body fields defined by its schema.".into());
+        lines.push("- Use `call_project_api` for managed project HTTP verification with the exact project ID, method, path, headers, and body defined by its schema.".into());
     }
     if tools.has("query_project_database") {
         lines.push("- `query_project_database` is read-only: issue a single `SELECT` query and never use it for mutations or schema changes.".into());
     }
-    if tools.has("analyze_project_data") {
-        lines.push("- Use `analyze_project_data` only after identifying the correct project/table and request an operation supported by its schema.".into());
-    }
     Some(lines.join("\n"))
+}
+
+/// Static routing rules for local application capabilities. Discovery stays
+/// dynamic (`search_tools`); this section never lists concrete applications or
+/// their runtime state. Kept compact: it is resident in every run that can
+/// discover tools, so it must not crowd the context budget.
+fn local_app_capabilities_prompt(tools: &PromptToolContext<'_>) -> Option<String> {
+    tools.has("search_tools").then(|| {
+        "## Local app capabilities\n\
+         - Discover with `search_tools` and `source: \"app\"`; call a matching capability directly (its app auto-starts). Prefer local capabilities over web/browser/UI automation or new code.\n\
+         - Do not search again after activation. Fall back only when no local capability matches, and explain why."
+            .into()
+    })
 }
 
 fn new_project_prompt(tools: &PromptToolContext<'_>, context: &ChatRunContext) -> Option<String> {
@@ -1547,14 +1557,12 @@ fn new_project_prompt(tools: &PromptToolContext<'_>, context: &ChatRunContext) -
     ]);
     let mut lines = vec![
         "## New managed project workflow".to_string(),
-        "- Before implementation, present a concise PRD-style plan covering the goal, modules, pages, interactions, layout, stack, data model, and primary flow; wait for explicit approval.".into(),
-        "- In that plan, use a ```mermaid block for the primary user flow and any architecture or data-model relationships. Describe page layout in short prose or a compact list instead of a second diagram.".into(),
-        "- After approval, call `create_project` exactly once. For a medium, large, multi-screen, or uncertain project, use `development_mode: true` and create only the starter shell or first coherent file batch.".into(),
-        "- Use the built-in Next.js App Router starter and runtime-compatible dependency versions. Keep `build: next build`, a valid start script, standalone output, one route implementation per language, and global styles imported from the root layout.".into(),
+        "- Before implementation, present a concise PRD-style plan covering the goal, modules, pages, interactions, layout, stack, data model, and primary flow, with a ```mermaid block for the primary user flow and any architecture or data-model relationships; wait for explicit approval.".into(),
+        "- After approval, call `create_project` exactly once with `template`, `entities`, and `features`. The scaffold generates the manifest, RPC routes, data layer, and capabilities; do not hand-write those files.".into(),
     ];
     if !followups.is_empty() {
         lines.push(format!(
-            "- Continue the same project over multiple calls with {} until implementation is complete.",
+            "- Continue the same project over multiple calls with {}; after each write or patch, rebuild and verify the app before the next change.",
             followups
                 .iter()
                 .map(|name| format!("`{name}`"))
@@ -1563,15 +1571,9 @@ fn new_project_prompt(tools: &PromptToolContext<'_>, context: &ChatRunContext) -
         ));
     }
     if tools.has("rebuild_project") {
-        lines.push("- Use `rebuild_project` for iterative verification and confirm that the standalone server output is produced.".into());
-    }
-    if tools.has("open_project_app") {
         lines.push(
-            "- When ready, use `open_project_app` to present the app inside WorldBase.".into(),
+            "- Use `rebuild_project` for iterative verification and confirm the app still builds and serves.".into(),
         );
-    }
-    if tools.has("finalize_project") {
-        lines.push("- Use `finalize_project` only for the final rebuild and cleanup after all iterative work is complete.".into());
     }
     Some(lines.join("\n"))
 }
@@ -1718,6 +1720,7 @@ fn static_system_prompt_sections(
         mcp_tools_prompt(&tools),
         subagent_prompt(&tools),
         runtime_data_api_prompt(&tools),
+        local_app_capabilities_prompt(&tools),
         new_project_prompt(&tools, context),
     ]
     .into_iter()
@@ -3528,6 +3531,58 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_routes_local_capabilities_through_search_tools() {
+        let tools = vec![
+            prompt_tool("search_tools", "Discover additional tools."),
+            prompt_tool("create_project", "Create a managed project."),
+        ];
+        let prompt = static_system_prompt_sections(
+            std::path::Path::new("/workspace"),
+            &ChatRunContext::default(),
+            &tools,
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("## Local app capabilities"));
+        assert!(prompt.contains("`search_tools`"));
+        assert!(prompt.contains("`source: \"app\"`"));
+        assert!(
+            prompt.contains("its app auto-starts"),
+            "the model must know capability invocation auto-starts the app"
+        );
+        assert!(prompt.contains("Prefer local capabilities over web/browser/UI automation"));
+        assert!(prompt.contains("Do not search again after activation"));
+        assert!(prompt.contains("Fall back only when no local capability matches"));
+
+        // The routing section stays generic: no concrete application names or
+        // runtime status values.
+        for leaked in [
+            "worldbase.tasks",
+            "worldbase.documents",
+            "worldbase.projects",
+            "worldbase.host",
+            "localhost:5173",
+        ] {
+            assert!(
+                !prompt.contains(leaked),
+                "prompt leaked application-specific data: {leaked}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_capability_prompt_requires_search_tools() {
+        let tools = vec![prompt_tool("read_file", "Read a workspace file.")];
+        let prompt = static_system_prompt_sections(
+            std::path::Path::new("/workspace"),
+            &ChatRunContext::default(),
+            &tools,
+        )
+        .join("\n\n");
+        assert!(!prompt.contains("## Local app capabilities"));
+    }
+
+    #[test]
     fn memory_prompt_explains_local_store_and_respects_scope_policy() {
         let tools = vec![prompt_tool(
             "memory_search",
@@ -3850,6 +3905,8 @@ mod tests {
     fn system_prompt_adds_desktop_workflows_only_for_visible_tools() {
         let tools = [
             "create_project",
+            "upgrade_project",
+            "search_tools",
             "list_project_files",
             "read_project_file",
             "edit_project_file",
@@ -3911,6 +3968,27 @@ mod tests {
         assert!(prompt.contains("`mcp_call` requires the exact server ID"));
         assert!(prompt.contains("`query_project_database` is read-only"));
         assert!(prompt.contains("Poll `get_project_command_status`"));
+        assert!(prompt.contains("`upgrade_project`"));
+        for expected in ["`template`", "`entities`", "`features`", "`search_tools`"] {
+            assert!(
+                prompt.contains(expected),
+                "new project guidance must mention {expected}"
+            );
+        }
+        for removed in [
+            "THE_WORLD_PROJECT_DATA_BASE_URL",
+            "NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL",
+            "build: next build",
+            "standalone output",
+            "root layout",
+            "dataSchema",
+            ".world-meta.json",
+        ] {
+            assert!(
+                !prompt.contains(removed),
+                "low-level prompt detail must be removed: {removed}"
+            );
+        }
     }
 
     #[test]
@@ -7346,6 +7424,38 @@ fn apply_coding_tool_outcome(
     })
 }
 
+/// Resolve the managed project that a successful scaffold tool created or
+/// upgraded. `create_project` reports the id in its result; `upgrade_project`
+/// receives it as input. Returns `None` for other tools or failed calls.
+fn scaffold_tool_project_id(
+    tool_name: &str,
+    input: &serde_json::Value,
+    result: &Result<serde_json::Value>,
+) -> Option<String> {
+    fn from_value(value: &serde_json::Value) -> Option<String> {
+        value
+            .get("projectId")
+            .or_else(|| value.get("project_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|project_id| !project_id.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
+    let value = result.as_ref().ok()?;
+    match tool_name {
+        "create_project" => from_value(value),
+        "upgrade_project" => input
+            .get("project_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|project_id| !project_id.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| from_value(value)),
+        _ => None,
+    }
+}
+
 async fn execute_tool_for_run(
     hub: &Arc<Hub>,
     services: &worldbase_tools::ToolServices,
@@ -7432,8 +7542,27 @@ async fn execute_tool_for_run(
         }
     };
 
+    let scaffold_project_id = scaffold_tool_project_id(&name, &input, &exec_result);
+    let scaffold_dry_run = exec_result
+        .as_ref()
+        .ok()
+        .and_then(|value| value.get("dryRun"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let (content, is_error, images) =
         process_tool_result(exec_result, &name, &call_id, storage_dir).await;
+    if !is_error && matches!(name.as_str(), "create_project" | "upgrade_project") {
+        hub.refresh_managed_applications();
+        hub.application_registry.invalidate();
+        // Scaffold-generated applications are safe to enable immediately; the
+        // capability call still starts the project runtime on demand. A dry
+        // run must not flip catalog state.
+        if !scaffold_dry_run {
+            if let Some(project_id) = scaffold_project_id.as_deref() {
+                hub.auto_enable_scaffold_application(project_id);
+            }
+        }
+    }
     if let Some((app, capability, _)) = hub.application_registry.find_capability(&name) {
         let _ =
             hub.application_registry

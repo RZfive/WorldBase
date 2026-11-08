@@ -90,6 +90,7 @@ pub use memory_tools::{MemoryAddTool, MemoryDeleteTool, MemorySearchTool};
 pub use project_tools::{
     ProjectCreateTool, ProjectDevRestartTool, ProjectDevStartTool, ProjectDevStopTool,
     ProjectListTool, ProjectRestartServerTool, ProjectStartServerTool, ProjectStatusTool,
+    ProjectUpgradeTool,
 };
 pub use schedule_tools::{ScheduleCreateTool, ScheduleDeleteTool, ScheduleListTool};
 pub use search_tools::SearchToolsTool;
@@ -733,6 +734,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(ComputerActionTool),
         Arc::new(ProjectListTool),
         Arc::new(ProjectCreateTool),
+        Arc::new(ProjectUpgradeTool),
         Arc::new(ProjectStartServerTool),
         Arc::new(ProjectRestartServerTool),
         Arc::new(ProjectDevStartTool),

@@ -14,6 +14,7 @@ members = [
     "crates/docs",
     "crates/search",
     "crates/coding",
+    "crates/scaffold",
     # P2/P4 接入层与桌面专属
     "crates/app-server",
     "crates/exec",

@@ -3092,6 +3092,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "worldbase-scaffold"
+version = "1.7.3"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "worldbase-scheduler"
 version = "1.7.3"
 dependencies = [
@@ -3165,6 +3175,7 @@ dependencies = [
  "worldbase-project-runtime",
  "worldbase-protocol",
  "worldbase-providers",
+ "worldbase-scaffold",
  "worldbase-scheduler",
  "worldbase-search",
  "worldbase-skills",

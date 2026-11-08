@@ -1,0 +1,13 @@
+import { NextResponse } from 'next/server'
+
+export const dynamic = 'force-dynamic'
+
+export async function GET () {
+  return NextResponse.json({
+    status: 'ok',
+    app: {{project_name_ts}},
+    appId: {{app_id_ts}},
+    template: {{template_id_ts}},
+    time: new Date().toISOString()
+  })
+}

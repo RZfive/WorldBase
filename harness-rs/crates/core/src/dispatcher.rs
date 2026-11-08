@@ -1243,6 +1243,33 @@ fn record_application_call(
     });
 }
 
+fn should_refresh_application_catalog(name: &str, success: bool) -> bool {
+    success && matches!(name, "create_project" | "upgrade_project")
+}
+
+/// `create_project` reports the generated project in its result payload, in
+/// both the camelCase and snake_case spellings used by host bridges.
+fn project_id_from_tool_result(result: &Value) -> Option<String> {
+    result
+        .get("projectId")
+        .or_else(|| result.get("project_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// `upgrade_project` only names its target in the tool input. Capture it
+/// before `execute` consumes the arguments.
+fn project_id_from_tool_input(input: &Value) -> Option<String> {
+    input
+        .get("project_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 async fn tool_call(
     hub: &Arc<Hub>,
     ctx: &ConnectionContext,
@@ -1271,6 +1298,13 @@ async fn tool_call(
     }
     let run_token =
         non_empty_string_alias(&params, &["runCapabilityToken", "run_capability_token"])?;
+    // `upgrade_project` names its target only in the tool input and `execute`
+    // consumes `args`; keep the project id for the post-refresh auto-enable.
+    let upgrade_project_id = if name == "upgrade_project" {
+        project_id_from_tool_input(&args)
+    } else {
+        None
+    };
 
     let (resolved, policy, permission_stream, interactive, auto_approve, abort, services) =
         if let Some(token) = run_token {
@@ -1383,6 +1417,31 @@ async fn tool_call(
         status,
         started.elapsed().as_millis() as u64,
     );
+    if should_refresh_application_catalog(name, result.is_ok()) {
+        hub.refresh_managed_applications();
+        hub.application_registry.invalidate();
+        // Scaffold-generated applications are discoverable as soon as their
+        // manifest is on disk. Enable them here so `search_tools` can find the
+        // capabilities without a manual toggle; the runtime stays stopped and
+        // starts lazily through the existing `ensure_ready` path on first call.
+        let project_id = match name {
+            "create_project" => result.as_ref().ok().and_then(project_id_from_tool_result),
+            "upgrade_project" => upgrade_project_id,
+            _ => None,
+        };
+        let dry_run = result
+            .as_ref()
+            .ok()
+            .and_then(|value| value.get("dryRun"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !dry_run {
+            if let Some(project_id) = project_id {
+                // The helper invalidates the catalog itself when it enables.
+                let _ = hub.auto_enable_scaffold_application(&project_id);
+            }
+        }
+    }
     result.map_err(internal)
 }
 
@@ -6273,6 +6332,62 @@ mod tests {
     use worldbase_protocol::types::{
         Capabilities, ChatContentPart, ChatMessage, ChatRunContext, Role,
     };
+
+    #[test]
+    fn application_catalog_refreshes_only_after_successful_scaffold_tools() {
+        assert!(super::should_refresh_application_catalog(
+            "create_project",
+            true
+        ));
+        assert!(super::should_refresh_application_catalog(
+            "upgrade_project",
+            true
+        ));
+        assert!(!super::should_refresh_application_catalog(
+            "create_project",
+            false
+        ));
+        assert!(!super::should_refresh_application_catalog(
+            "upgrade_project",
+            false
+        ));
+        assert!(!super::should_refresh_application_catalog(
+            "create_lightweight_app",
+            true
+        ));
+        assert!(!super::should_refresh_application_catalog(
+            "write_project_file",
+            true
+        ));
+    }
+
+    #[test]
+    fn scaffold_project_ids_are_extracted_from_tool_shapes() {
+        assert_eq!(
+            super::project_id_from_tool_result(&serde_json::json!({ "projectId": " proj_alpha " })),
+            Some("proj_alpha".to_string())
+        );
+        assert_eq!(
+            super::project_id_from_tool_result(&serde_json::json!({ "project_id": "proj_beta" })),
+            Some("proj_beta".to_string())
+        );
+        assert_eq!(
+            super::project_id_from_tool_result(&serde_json::json!({ "success": false })),
+            None
+        );
+        assert_eq!(
+            super::project_id_from_tool_result(&serde_json::json!({ "projectId": "  " })),
+            None
+        );
+        assert_eq!(
+            super::project_id_from_tool_input(&serde_json::json!({ "project_id": "proj_gamma" })),
+            Some("proj_gamma".to_string())
+        );
+        assert_eq!(
+            super::project_id_from_tool_input(&serde_json::json!({ "projectId": "proj_delta" })),
+            None
+        );
+    }
 
     #[test]
     fn tool_policy_parses_electron_values_and_rejects_unknowns() {

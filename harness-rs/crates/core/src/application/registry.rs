@@ -367,6 +367,7 @@ impl ApplicationRegistry {
                     ApplicationCandidate {
                         tool_name: capability.tool_name.clone(),
                         app_id: app.app_id.clone(),
+                        app_name: app.name.clone(),
                         capability_id: capability.capability_id.clone(),
                         title: capability.title.clone(),
                         description: capability.description.clone(),

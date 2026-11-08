@@ -675,6 +675,7 @@ export function shouldActivateCodingMode (name: string, args: unknown): boolean 
     return typeof mode === 'string' && mode.trim().toLowerCase() === 'coding'
   }
   return name === 'create_project' ||
+    name === 'upgrade_project' ||
     name === 'create_lightweight_app' ||
     name.startsWith('coding_')
 }

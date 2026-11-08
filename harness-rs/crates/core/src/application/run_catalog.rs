@@ -19,6 +19,11 @@ const DEFAULT_MAX_RESULTS: usize = 5;
 const MAX_RESULTS_LIMIT: usize = 8;
 const MAX_CACHE_ENTRIES: usize = 256;
 
+/// Routing guidance returned with every `search_tools` result. It tells the
+/// main model that local app capabilities are directly callable and that the
+/// runtime starts the owning application on demand.
+pub const LOCAL_APP_GUIDANCE: &str = "These are local app capabilities. Invoking one starts its app runtime automatically if needed. Prefer them over web/browser/UI automation.";
+
 #[derive(Clone)]
 pub struct CatalogEntry {
     pub descriptor: ToolDescriptor,
@@ -78,6 +83,17 @@ impl SearchHit {
             Self::App { candidate, .. }
             | Self::Base { candidate, .. }
             | Self::Skill { candidate, .. } => &candidate.tool_name,
+        }
+    }
+
+    /// Tie-break priority for equal lexical scores. Local app capabilities are
+    /// preferred over base (builtin/MCP) tools and skills because invoking one
+    /// also starts its app runtime on demand.
+    fn source_priority(&self) -> u8 {
+        match self {
+            Self::App { .. } => 0,
+            Self::Base { .. } => 1,
+            Self::Skill { .. } => 2,
         }
     }
 
@@ -405,6 +421,7 @@ impl RunToolCatalog {
             right
                 .score()
                 .cmp(&left.score())
+                .then_with(|| left.source_priority().cmp(&right.source_priority()))
                 .then_with(|| left.name().cmp(right.name()))
         });
         hits
@@ -463,6 +480,7 @@ impl ToolCatalogRuntime for RunToolCatalog {
             activated,
             skills_activated,
             catalog_version,
+            guidance: LOCAL_APP_GUIDANCE.to_string(),
         };
         if result.activated.len() + result.skills_activated.len() == result.candidates.len() {
             let key = cache_key(catalog_version, &normalized, &request, limit);
@@ -698,6 +716,8 @@ fn candidate_from_descriptor(descriptor: &ToolDescriptor) -> ApplicationCandidat
     ApplicationCandidate {
         tool_name: descriptor.name.clone(),
         app_id: descriptor.app_id.clone().unwrap_or_default(),
+        // Base-catalog entries are not owned by an application manifest.
+        app_name: String::new(),
         capability_id: descriptor.capability_id.clone().unwrap_or_default(),
         title: descriptor.name.clone(),
         description: descriptor.description.clone(),
@@ -715,6 +735,7 @@ fn candidate_from_skill(skill: &SkillCatalogEntry) -> ApplicationCandidate {
     ApplicationCandidate {
         tool_name: skill.name.clone(),
         app_id: String::new(),
+        app_name: String::new(),
         capability_id: String::new(),
         title: skill.name.clone(),
         description: skill.description.clone(),
@@ -795,6 +816,8 @@ mod tests {
         };
         let first = catalog.search_and_activate(request.clone()).await.unwrap();
         assert_eq!(catalog.cache.lock().unwrap().len(), 1);
+        assert!(first.candidates[0].app_name.is_empty());
+        assert_eq!(first.guidance, LOCAL_APP_GUIDANCE);
         let second = catalog.search_and_activate(request.clone()).await.unwrap();
         assert_eq!(first.catalog_version, second.catalog_version);
         assert_eq!(catalog.cache.lock().unwrap().len(), 1);
@@ -802,6 +825,69 @@ mod tests {
         assert!(catalog.cache.lock().unwrap().is_empty());
         let third = catalog.search_and_activate(request).await.unwrap();
         assert!(third.catalog_version > second.catalog_version);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn app_candidates_carry_registry_app_name_and_guidance() {
+        let dir = std::env::temp_dir().join(format!(
+            "worldbase-catalog-app-name-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Arc::new(worldbase_memory::Store::open(&dir.join("app.sqlite")).unwrap());
+        let registry = ApplicationRegistry::new(store);
+        let manifest: worldbase_protocol::types::AppManifest = serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "app": {
+                "id": "worldbase.echoes",
+                "name": "Echo Suite",
+                "version": "1.0.0",
+                "description": "Echo capabilities",
+                "tags": ["echo"],
+                "platforms": ["desktop"],
+                "trustLevel": "builtin"
+            },
+            "runtime": { "kind": "host_service", "activation": "always" },
+            "capabilities": [{
+                "id": "echo.run",
+                "title": "Echo",
+                "description": "Echoes input",
+                "operation": "echo"
+            }]
+        }))
+        .unwrap();
+        let tool: Arc<dyn Tool> = Arc::new(EchoTool);
+        registry
+            .register_from_manifest(
+                manifest,
+                Arc::new(worldbase_tools::NativeToolCapabilityProvider::new(
+                    "worldbase.echoes",
+                    tool,
+                )),
+            )
+            .expect("register app");
+        let catalog = RunToolCatalog::new(
+            "stream".into(),
+            "token".into(),
+            registry,
+            Vec::new(),
+            Vec::new(),
+            Capabilities::desktop(),
+        );
+        let result = catalog
+            .search_and_activate(ApplicationSearchParams {
+                query: "echo".into(),
+                ..ApplicationSearchParams::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].app_name, "Echo Suite");
+        assert_eq!(result.guidance, LOCAL_APP_GUIDANCE);
+        assert_eq!(
+            result.activated,
+            vec![result.candidates[0].tool_name.clone()]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

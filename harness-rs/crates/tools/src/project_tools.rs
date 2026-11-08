@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use sha1::{Digest, Sha1};
 use std::{
+    collections::BTreeMap,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -136,6 +137,181 @@ fn ai_integration_note(input: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|note| !note.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn scaffold_requested(input: &Value) -> bool {
+    ["template", "entities", "features"]
+        .iter()
+        .any(|key| input.get(*key).is_some_and(|value| !value.is_null()))
+}
+
+fn string_array_argument(input: &Value, key: &str) -> Result<Option<Vec<String>>> {
+    let Some(value) = input.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(items) = value.as_array() else {
+        anyhow::bail!("参数 {key} 必须是字符串数组。");
+    };
+    let mut values = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(text) = item.as_str() else {
+            anyhow::bail!("参数 {key} 必须是字符串数组。");
+        };
+        let text = text.trim();
+        if !text.is_empty() && !values.iter().any(|existing| existing == text) {
+            values.push(text.to_string());
+        }
+    }
+    Ok(Some(values))
+}
+
+fn entity_specs(input: &Value) -> Result<Vec<worldbase_scaffold::EntitySpec>> {
+    let Some(value) = input.get("entities") else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let Some(entries) = value.as_array() else {
+        anyhow::bail!("create_project 的 entities 参数必须是对象数组。");
+    };
+    let mut entities = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(object) = entry.as_object() else {
+            anyhow::bail!("create_project 的 entities 每一项必须是对象。");
+        };
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        anyhow::ensure!(
+            !name.is_empty(),
+            "create_project 的 entities 每一项必须包含非空 name。"
+        );
+        let table = object
+            .get("table")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|table| !table.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| worldbase_scaffold::EntitySpec::default_table(name));
+        let mut fields = Vec::new();
+        if let Some(field_entries) = object.get("fields").and_then(Value::as_array) {
+            for field_entry in field_entries {
+                let Some(field) = field_entry.as_object() else {
+                    anyhow::bail!("create_project 的实体 {name} 的 fields 每一项必须是对象。");
+                };
+                let field_name = field
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                anyhow::ensure!(
+                    !field_name.is_empty(),
+                    "create_project 的实体 {name} 存在空字段名。"
+                );
+                fields.push(worldbase_scaffold::FieldSpec {
+                    name: field_name.to_string(),
+                    field_type: field
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("text")
+                        .to_string(),
+                    required: field
+                        .get("required")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    primary_key: field
+                        .get("primaryKey")
+                        .or_else(|| field.get("primary_key"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    default_sql: field
+                        .get("defaultSql")
+                        .or_else(|| field.get("default_sql"))
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                });
+            }
+        }
+        if !fields
+            .iter()
+            .any(|field| field.primary_key || field.name == "id")
+        {
+            fields.insert(
+                0,
+                worldbase_scaffold::FieldSpec {
+                    name: "id".to_string(),
+                    field_type: "text".to_string(),
+                    required: true,
+                    primary_key: true,
+                    default_sql: None,
+                },
+            );
+        }
+        entities.push(worldbase_scaffold::EntitySpec {
+            name: name.to_string(),
+            table,
+            fields,
+        });
+    }
+    Ok(entities)
+}
+
+fn default_scaffold_features(
+    entities: &[worldbase_scaffold::EntitySpec],
+    ai_integration: bool,
+) -> Vec<String> {
+    let mut features = vec![
+        "core".to_string(),
+        "data".to_string(),
+        "crud-ui".to_string(),
+    ];
+    if ai_integration {
+        features.push("ai".to_string());
+    }
+    if !entities.is_empty() {
+        features.push("search".to_string());
+    }
+    features
+}
+
+fn scaffold_input(
+    project_id: &str,
+    name: &str,
+    project_type: &str,
+    input: &Value,
+    entities: Vec<worldbase_scaffold::EntitySpec>,
+    ai_integration: bool,
+    ai_integration_note: Option<String>,
+    development_mode: bool,
+) -> Result<worldbase_scaffold::ScaffoldInput> {
+    let template = input
+        .get("template")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|template| !template.is_empty())
+        .unwrap_or(worldbase_scaffold::DEFAULT_TEMPLATE)
+        .to_string();
+    let features = string_array_argument(input, "features")?
+        .unwrap_or_else(|| default_scaffold_features(&entities, ai_integration));
+    Ok(worldbase_scaffold::ScaffoldInput {
+        project_id: project_id.to_string(),
+        name: name.to_string(),
+        project_type: project_type.to_string(),
+        template,
+        entities,
+        features,
+        ai_integration,
+        ai_integration_note,
+        development_mode,
+    })
 }
 
 fn scaffold_uses_typescript(files: &Map<String, Value>, meta: &Map<String, Value>) -> bool {
@@ -577,6 +753,33 @@ fn metadata_project_value(services: &ToolServices, project_id: &str) -> Value {
         .unwrap_or_else(|_| json!({ "id": project_id }))
 }
 
+/// Describe the WorldBase local application a scaffold plan produces. This is
+/// pure information: nothing is started, registered, or health-checked here.
+fn application_info(project_id: &str, plan_meta: &Value, manifest_exists: bool) -> Value {
+    let ai_integration = plan_meta.get("aiIntegration");
+    let ai_enabled = ai_integration
+        .and_then(|value| value.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let capabilities = ai_integration
+        .and_then(|value| value.get("capabilities"))
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({
+        "appId": format!("worldbase.local.{project_id}"),
+        "registered": manifest_exists,
+        "enabled": manifest_exists && ai_enabled,
+        "capabilities": capabilities,
+    })
+}
+
 fn error_message(error: &anyhow::Error) -> String {
     error.to_string()
 }
@@ -633,8 +836,36 @@ impl Tool for ProjectCreateTool {
                 "build_and_start": { "type": "boolean", "description": "When true, build (if needed) and start the project immediately. Defaults to false in development_mode and true otherwise." },
                 "cleanup_dependencies_on_success": { "type": "boolean", "description": "When true, remove node_modules after a successful build/start to save disk space. Leave false during iterative development." },
                 "cleanup_build_cache_on_success": { "type": "boolean", "description": "When true, remove build caches such as .next/cache after a successful build/start to save disk space." },
-                "ai_integration": { "type": ["boolean", "string"], "enum": [true, false, "none"], "description": "Generate the AI integration scaffold (example.search capability, domain/adapter stubs and contract test). Defaults to true; use false or \"none\" for presentation-only apps." },
-                "ai_integration_note": { "type": "string", "description": "Reason or note recorded in AI_INTEGRATION.md, especially when ai_integration is false/none." }
+                "ai_integration": { "type": "boolean", "description": "Generate the AI integration scaffold. Defaults to true; set false for presentation-only apps." },
+                "ai_integration_note": { "type": "string", "description": "Reason or note recorded in AI_INTEGRATION.md, especially when ai_integration is false." },
+                "template": { "type": "string", "enum": ["next-crud", "next-dashboard", "node-api", "blank"], "description": "Deterministic application template. When set (or when entities are provided), the project is generated from the application scaffold instead of the legacy example capability stub." },
+                "entities": {
+                    "type": "array",
+                    "description": "Business entities to generate CRUD UI, API routes, data layer and AI capabilities for. Providing entities enables scaffold mode.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "Singular entity name, for example expense" },
+                            "table": { "type": "string", "description": "Table name; defaults to the pluralized entity name, for example expenses" },
+                            "fields": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "type": { "type": "string", "enum": ["text", "number", "integer", "boolean"] },
+                                        "required": { "type": "boolean" },
+                                        "primaryKey": { "type": "boolean" },
+                                        "defaultSql": { "type": "string" }
+                                    },
+                                    "required": ["name", "type"]
+                                }
+                            }
+                        },
+                        "required": ["name"]
+                    }
+                },
+                "features": { "type": "array", "items": { "type": "string" }, "description": "Scaffold features such as core, data, crud-ui, ai, search, upload, chart, settings." }
             },
             "required": ["name", "type"]
         })
@@ -686,8 +917,50 @@ impl Tool for ProjectCreateTool {
             .get("development_mode")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let files = project_files(&input, development_mode)?;
-        let meta = object_argument(&input, "meta", true)?;
+        // Electron generates the ID before writing any files. Keep that ID
+        // explicit when handing the project to Rust so TS/Rust switching can
+        // address the same directory and metadata record.
+        let project_id = generate_project_id(&name);
+        let ai_integration = ai_integration_enabled(&input)?;
+        let ai_note = ai_integration_note(&input);
+        let use_scaffold = scaffold_requested(&input);
+        let user_files = project_files(&input, development_mode)?;
+        let user_meta = object_argument(&input, "meta", true)?;
+        let (files, meta, scaffold_meta) = if use_scaffold {
+            let input_plan = scaffold_input(
+                &project_id,
+                &name,
+                &project_type,
+                &input,
+                entity_specs(&input)?,
+                ai_integration,
+                ai_note.clone(),
+                development_mode,
+            )?;
+            let scaffold_plan = worldbase_scaffold::plan(&input_plan)?;
+            let user_files_map: BTreeMap<String, String> = user_files
+                .iter()
+                .filter_map(|(path, content)| {
+                    content
+                        .as_str()
+                        .map(|content| (path.clone(), content.to_string()))
+                })
+                .collect();
+            let merged_files =
+                worldbase_scaffold::plan::merge_files(scaffold_plan.files.clone(), &user_files_map);
+            let files: Map<String, Value> = merged_files
+                .into_iter()
+                .map(|(path, content)| (path, Value::String(content)))
+                .collect();
+            let merged_meta = worldbase_scaffold::plan::merge_meta(
+                &scaffold_plan.meta,
+                &Value::Object(user_meta.clone()),
+            );
+            let meta = merged_meta.as_object().cloned().unwrap_or_default();
+            (files, meta, Some(scaffold_plan.meta))
+        } else {
+            (user_files, user_meta, None)
+        };
         let next_hint = meta
             .get("framework")
             .and_then(Value::as_str)
@@ -697,22 +970,19 @@ impl Tool for ProjectCreateTool {
             || files.contains_key("next.config.ts")
             || files.contains_key("next.config.cjs")
             || package_has_next(&files);
-
-        // Electron generates the ID before writing any files. Keep that ID
-        // explicit when handing the project to Rust so TS/Rust switching can
-        // address the same directory and metadata record.
-        let project_id = generate_project_id(&name);
-        let ai_integration = ai_integration_enabled(&input)?;
-        let ai_note = ai_integration_note(&input);
-        let ai_files = ai_scaffold_files(
-            &project_id,
-            &name,
-            &project_type,
-            &files,
-            &meta,
-            ai_integration,
-            ai_note.as_deref(),
-        )?;
+        let ai_files = if use_scaffold {
+            Map::new()
+        } else {
+            ai_scaffold_files(
+                &project_id,
+                &name,
+                &project_type,
+                &files,
+                &meta,
+                ai_integration,
+                ai_note.as_deref(),
+            )?
+        };
 
         // Match Electron's workflow metadata while preserving any additional
         // caller-provided workflow fields.
@@ -762,6 +1032,13 @@ impl Tool for ProjectCreateTool {
         let project = metadata_project_value(services, &project_id);
         let root = services.projects.project_root(&project_id)?;
         write_scaffold_files(&root, &ai_files)?;
+        let application = scaffold_meta.as_ref().map(|plan_meta| {
+            application_info(
+                &project_id,
+                plan_meta,
+                root.join(AI_MANIFEST_PATH).is_file(),
+            )
+        });
 
         // Electron initializes declared SQLite tables before any lifecycle
         // work.  The Rust control plane owns that same schema operation.
@@ -806,7 +1083,7 @@ impl Tool for ProjectCreateTool {
         }
 
         if development_mode && !should_build_and_start {
-            return Ok(json!({
+            let mut result = json!({
                 "success": true,
                 "ready": false,
                 "development_mode": true,
@@ -814,7 +1091,11 @@ impl Tool for ProjectCreateTool {
                 "projectId": project_id,
                 "project_id": project_id,
                 "message": format!("Project \"{name}\" created with ID: {project_id}. Development mode is active. Continue with write_project_file or patch_project_file, then call rebuild_project when ready.")
-            }));
+            });
+            if let Some(application) = application.clone() {
+                result["application"] = application;
+            }
+            return Ok(result);
         }
 
         let current_meta = metadata_project_value(services, &project_id);
@@ -905,7 +1186,7 @@ impl Tool for ProjectCreateTool {
             .and_then(|backend| backend.get("command"))
             .and_then(Value::as_str)
             .unwrap_or("node server.js");
-        Ok(json!({
+        let mut result = json!({
             "success": true,
             "ready": ready,
             "project": project,
@@ -915,6 +1196,470 @@ impl Tool for ProjectCreateTool {
             "status": status,
             "development_mode": development_mode,
             "message": format!("Project \"{name}\" created with ID: {project_id}.{} Runtime configured with command: {command}{}", if should_install { " Dependencies installed." } else { " Dependencies were not auto-installed." }, if let Some(port) = port { format!(" Running on port {port}") } else if should_build_and_start { String::new() } else { " Continue editing files and call rebuild_project when ready.".to_string() })
+        });
+        if let Some(application) = application {
+            result["application"] = application;
+        }
+        Ok(result)
+    }
+}
+
+fn entity_name_from_table(table: &str) -> String {
+    table
+        .strip_suffix('s')
+        .filter(|name| !name.is_empty())
+        .unwrap_or(table)
+        .to_string()
+}
+
+fn field_type_from_sqlite(value: Option<&str>) -> String {
+    match value.unwrap_or("TEXT").trim().to_ascii_uppercase().as_str() {
+        "INTEGER" | "INT" => "integer",
+        "BOOLEAN" | "BOOL" => "boolean",
+        "REAL" | "FLOAT" | "DOUBLE" | "NUMERIC" => "number",
+        _ => "text",
+    }
+    .to_string()
+}
+
+fn entities_from_project_meta(meta: &Value) -> Vec<worldbase_scaffold::EntitySpec> {
+    let mut entities = Vec::new();
+    let Some(tables) = meta.pointer("/dataSchema/tables").and_then(Value::as_array) else {
+        return entities;
+    };
+    for table in tables {
+        let Some(table_name) = table.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let table_name = table_name.trim();
+        if table_name.is_empty() {
+            continue;
+        }
+        let name = entity_name_from_table(table_name);
+        let fields = table
+            .get("columns")
+            .and_then(Value::as_array)
+            .map(|columns| {
+                columns
+                    .iter()
+                    .filter_map(|column| {
+                        let field_name = column.get("name").and_then(Value::as_str)?;
+                        if field_name.trim().is_empty() {
+                            return None;
+                        }
+                        Some(worldbase_scaffold::FieldSpec {
+                            name: field_name.to_string(),
+                            field_type: field_type_from_sqlite(
+                                column.get("type").and_then(Value::as_str),
+                            ),
+                            required: column
+                                .get("notNull")
+                                .or_else(|| column.get("required"))
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                            primary_key: column
+                                .get("primaryKey")
+                                .or_else(|| column.get("primary_key"))
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                            default_sql: column
+                                .get("defaultSql")
+                                .or_else(|| column.get("default_sql"))
+                                .and_then(Value::as_str)
+                                .map(ToOwned::to_owned),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        entities.push(worldbase_scaffold::EntitySpec {
+            name,
+            table: table_name.to_string(),
+            fields,
+        });
+    }
+    entities
+}
+
+fn ensure_relative_project_path(path: &str) -> Result<()> {
+    let normalized = path.replace('\\', "/");
+    anyhow::ensure!(
+        !path.trim().is_empty()
+            && !normalized.starts_with('/')
+            && !normalized.contains('\0')
+            && !normalized.split('/').any(|part| part == ".."),
+        "generated file path escapes the project directory: {path}",
+    );
+    Ok(())
+}
+
+fn upgrade_scaffold_input(
+    project_id: &str,
+    meta: &Value,
+    input: &Value,
+) -> Result<worldbase_scaffold::ScaffoldInput> {
+    let entities = entities_from_project_meta(meta);
+    let template = input
+        .get("template")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|template| !template.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            meta.pointer("/template/id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            let is_node = meta.get("framework").and_then(Value::as_str) == Some("node")
+                || meta.pointer("/runtime/type").and_then(Value::as_str) == Some("api");
+            is_node.then(|| "node-api".to_string())
+        })
+        .unwrap_or_else(|| worldbase_scaffold::DEFAULT_TEMPLATE.to_string());
+    let features = match string_array_argument(input, "features")? {
+        Some(features) => features,
+        None => meta
+            .get("features")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|features| !features.is_empty())
+            .unwrap_or_else(|| {
+                default_scaffold_features(
+                    &entities,
+                    meta.pointer("/aiIntegration/enabled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                )
+            }),
+    };
+    let mut features = features;
+    features.retain(|feature| worldbase_scaffold::SUPPORTED_FEATURES.contains(&feature.as_str()));
+    if features.is_empty() {
+        features = default_scaffold_features(
+            &entities,
+            meta.pointer("/aiIntegration/enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        );
+    }
+    let name = meta
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(project_id)
+        .to_string();
+    let project_type = meta
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("fullstack")
+        .to_string();
+    Ok(worldbase_scaffold::ScaffoldInput {
+        project_id: project_id.to_string(),
+        name,
+        project_type,
+        template,
+        entities,
+        features,
+        ai_integration: meta
+            .pointer("/aiIntegration/enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        ai_integration_note: None,
+        development_mode: meta
+            .pointer("/workflow/mode")
+            .and_then(Value::as_str)
+            .is_some_and(|mode| mode == "development"),
+    })
+}
+
+fn safe_sql_identifier(value: &str) -> Result<&str> {
+    let value = value.trim();
+    anyhow::ensure!(
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_'),
+        "unsafe SQL identifier: {value}"
+    );
+    Ok(value)
+}
+
+fn merge_data_schema(existing: &Value, planned: &Value) -> Value {
+    let mut merged = existing.as_object().cloned().unwrap_or_default();
+    let mut tables = merged
+        .get("tables")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for planned_table in planned
+        .get("tables")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(table_name) = planned_table.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(existing_table) = tables
+            .iter_mut()
+            .find(|table| table.get("name").and_then(Value::as_str) == Some(table_name))
+        else {
+            tables.push(planned_table.clone());
+            continue;
+        };
+        let mut columns = existing_table
+            .get("columns")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for planned_column in planned_table
+            .get("columns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(column_name) = planned_column.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if !columns
+                .iter()
+                .any(|column| column.get("name").and_then(Value::as_str) == Some(column_name))
+            {
+                columns.push(planned_column.clone());
+            }
+        }
+        existing_table["columns"] = Value::Array(columns);
+    }
+    merged.insert("tables".into(), Value::Array(tables));
+    for key in ["database", "dbPath", "schemaVersion"] {
+        if merged.get(key).is_none() {
+            if let Some(value) = planned.get(key) {
+                merged.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    Value::Object(merged)
+}
+
+fn apply_additive_sqlite_columns(root: &Path, schema: &Value) -> Result<Vec<String>> {
+    if schema
+        .get("database")
+        .and_then(Value::as_str)
+        .is_none_or(|database| database != "sqlite")
+    {
+        return Ok(Vec::new());
+    }
+    let Some(db_relative) = schema.get("dbPath").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    anyhow::ensure!(
+        !db_relative.trim().is_empty()
+            && !db_relative.starts_with('/')
+            && !db_relative.contains('\0')
+            && !db_relative.split('/').any(|part| part == ".."),
+        "unsafe project database path: {db_relative}"
+    );
+    let db_path = root.join(db_relative);
+    if !db_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let connection = rusqlite::Connection::open(&db_path)?;
+    let mut added = Vec::new();
+    for table in schema
+        .get("tables")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(table_name) = table.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let table_name = safe_sql_identifier(table_name)?;
+        let mut statement = connection.prepare(&format!("PRAGMA table_info(\"{table_name}\")"))?;
+        let existing = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+        for column in table
+            .get("columns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(column_name) = column.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let column_name = safe_sql_identifier(column_name)?;
+            if existing.contains(column_name) {
+                continue;
+            }
+            let column_type = column
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("TEXT")
+                .trim()
+                .to_ascii_uppercase();
+            let column_type = match column_type.as_str() {
+                "INTEGER" | "INT" => "INTEGER",
+                "REAL" | "FLOAT" | "DOUBLE" | "NUMERIC" => "REAL",
+                "BLOB" => "BLOB",
+                _ => "TEXT",
+            };
+            connection.execute_batch(&format!(
+                "ALTER TABLE \"{table_name}\" ADD COLUMN \"{column_name}\" {column_type}"
+            ))?;
+            added.push(format!("{table_name}.{column_name}"));
+        }
+    }
+    Ok(added)
+}
+
+/// Bring an existing managed project up to the current scaffold plan without
+/// overwriting any file the project already owns. Metadata and SQLite columns
+/// are extended additively so upgraded apps get the same soft-delete contract.
+pub struct ProjectUpgradeTool;
+
+#[async_trait]
+impl Tool for ProjectUpgradeTool {
+    fn name(&self) -> &str {
+        "upgrade_project"
+    }
+
+    fn description(&self) -> &str {
+        "Upgrade an existing project with the deterministic application scaffold. Creates only files that are missing; existing file content is never overwritten, and metadata/SQLite columns are extended additively."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "project_id": { "type": "string", "description": "Project ID to upgrade" },
+                "dry_run": { "type": "boolean", "description": "When true, report the files that would be created without writing anything. Defaults to false." },
+                "template": { "type": "string", "enum": ["next-crud", "next-dashboard", "node-api", "blank"], "description": "Override the template. Defaults to the project's recorded template or next-crud." },
+                "features": { "type": "array", "items": { "type": "string" }, "description": "Override the feature list for the generated app." }
+            },
+            "required": ["project_id"]
+        })
+    }
+
+    fn domain(&self) -> &str {
+        "desktop"
+    }
+
+    fn permission(&self) -> &str {
+        "allow"
+    }
+
+    fn electron_native(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let project_id = require_str(&input, "project_id")?.trim().to_string();
+        anyhow::ensure!(
+            !project_id.is_empty(),
+            "upgrade_project 的 project_id 不能为空。"
+        );
+        let dry_run = input
+            .get("dry_run")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let root = services.projects.project_root(&project_id)?;
+        let meta = services.projects.project_meta(&project_id)?;
+        let plan_input = upgrade_scaffold_input(&project_id, &meta, &input)?;
+        let scaffold_plan = worldbase_scaffold::plan(&plan_input)?;
+
+        let mut warnings = scaffold_plan.warnings.clone();
+        if plan_input.entities.is_empty() {
+            warnings.push(
+                "project metadata has no dataSchema.tables; the upgraded app has no business entities"
+                    .to_string(),
+            );
+        }
+
+        let mut created = Vec::new();
+        let mut skipped = Vec::new();
+        for (relative_path, content) in &scaffold_plan.files {
+            ensure_relative_project_path(relative_path)?;
+            let target = root.join(relative_path);
+            if target.exists() {
+                skipped.push(Value::String(relative_path.clone()));
+                continue;
+            }
+            created.push(Value::String(relative_path.clone()));
+            if dry_run {
+                continue;
+            }
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&target, content)
+                .map_err(|error| anyhow::anyhow!("write {}: {error}", target.display()))?;
+        }
+
+        if !dry_run {
+            let mut updated_meta = meta.clone();
+            if let Some(planned_meta) = scaffold_plan.meta.as_object() {
+                if let Some(target) = updated_meta.as_object_mut() {
+                    for key in ["template", "features", "aiIntegration"] {
+                        if !target.contains_key(key) {
+                            if let Some(value) = planned_meta.get(key) {
+                                target.insert(key.to_string(), value.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(planned_schema) = scaffold_plan.meta.get("dataSchema") {
+                let existing_schema = updated_meta
+                    .get("dataSchema")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let merged_schema = merge_data_schema(&existing_schema, planned_schema);
+                if let Some(target) = updated_meta.as_object_mut() {
+                    target.insert("dataSchema".into(), merged_schema.clone());
+                }
+                std::fs::write(
+                    root.join(".world-meta.json"),
+                    format!("{}\n", serde_json::to_string_pretty(&updated_meta)?),
+                )
+                .map_err(|error| anyhow::anyhow!("write .world-meta.json: {error}"))?;
+                match apply_additive_sqlite_columns(&root, &merged_schema) {
+                    Ok(added) => {
+                        for column in added {
+                            warnings.push(format!(
+                                "added missing database column for upgraded app: {column}"
+                            ));
+                        }
+                    }
+                    Err(error) => warnings.push(format!(
+                        "additive database migration failed; review the project data schema: {error}"
+                    )),
+                }
+                let _ = services
+                    .projects
+                    .initialize_project_database_for_tool(&project_id);
+            }
+        }
+
+        let application = application_info(
+            &project_id,
+            &scaffold_plan.meta,
+            root.join(AI_MANIFEST_PATH).is_file(),
+        );
+
+        Ok(json!({
+            "success": true,
+            "projectId": project_id,
+            "dryRun": dry_run,
+            "created": created,
+            "skipped": skipped,
+            "warnings": warnings,
+            "application": application,
         }))
     }
 }

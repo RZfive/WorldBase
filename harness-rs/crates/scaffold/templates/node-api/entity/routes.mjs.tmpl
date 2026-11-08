@@ -1,0 +1,38 @@
+  {
+    pattern: new RegExp('^/api/{{table_name}}/?$'),
+    handlers: {
+      GET: async ({ url }) => {
+        const q = url.searchParams.get('q')?.trim()
+        if (q) {
+          const items = await search{{entity_plural_pascal}}(q)
+          return { body: { items, total: items.length } }
+        }
+        const result = await list{{entity_plural_pascal}}({
+          limit: numberParam(url, 'limit'),
+          offset: numberParam(url, 'offset'),
+          orderBy: url.searchParams.get('orderBy') ?? undefined,
+          orderDirection: directionParam(url)
+        })
+        return { body: result }
+      },
+      POST: async ({ body }) => ({ status: 201, body: await create{{entity_pascal}}(body) })
+    }
+  },
+  {
+    pattern: new RegExp('^/api/{{table_name}}/([^/]+)/?$'),
+    handlers: {
+      GET: async ({ id }) => {
+        const item = await get{{entity_pascal}}(decodeURIComponent(id))
+        return item
+          ? { body: item }
+          : { status: 404, body: { error: {{entity_title_ts}} + ' not found' } }
+      },
+      PUT: async ({ id, body }) => ({
+        body: await update{{entity_pascal}}(decodeURIComponent(id), body)
+      }),
+      DELETE: async ({ id }) => {
+        await remove{{entity_pascal}}(decodeURIComponent(id))
+        return { body: { success: true } }
+      }
+    }
+  },

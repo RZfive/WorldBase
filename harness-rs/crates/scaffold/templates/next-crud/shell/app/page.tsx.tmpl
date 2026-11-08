@@ -1,0 +1,44 @@
+import type { Metadata } from 'next'
+
+const appName = {{project_name_ts}}
+const templateId = {{template_id_ts}}
+const entities: Array<{ table: string; title: string; href: string }> = {{entity_nav_json}}
+
+export const metadata: Metadata = {
+  title: appName
+}
+
+export default function HomePage () {
+  return (
+    <>
+      <section className="hero-card">
+        <span className="eyebrow">WorldBase scaffold · {templateId}</span>
+        <h1>{appName}</h1>
+        <p className="hero-copy">
+          This application was generated deterministically from an entity schema. Every entity
+          ships with a typed domain service, host-data-API repositories, CRUD routes, and a
+          management UI.
+        </p>
+      </section>
+
+      <section className="feature-grid">
+        {entities.map((entity) => (
+          <article key={entity.table} className="feature-card">
+            <span className="eyebrow">{entity.table}</span>
+            <h2>{entity.title}</h2>
+            <p>List, create, edit, search, and remove {entity.title.toLowerCase()} records.</p>
+            <a className="card-link" href={entity.href}>Open {entity.title}</a>
+          </article>
+        ))}
+      </section>
+
+      <section className="info-card">
+        <h2>Runtime data API</h2>
+        <p>
+          Records are persisted through the WorldBase host data API
+          (<code>THE_WORLD_PROJECT_DATA_BASE_URL</code>). No second database driver is required.
+        </p>
+      </section>
+    </>
+  )
+}

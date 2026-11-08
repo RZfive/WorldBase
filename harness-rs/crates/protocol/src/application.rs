@@ -415,6 +415,10 @@ pub struct ApplicationSearchParams {
 pub struct ApplicationCandidate {
     pub tool_name: String,
     pub app_id: String,
+    /// Human-readable application name. Optional so 1.x payloads without it
+    /// still deserialize.
+    #[serde(default)]
+    pub app_name: String,
     pub capability_id: String,
     #[serde(default)]
     pub title: String,
@@ -441,6 +445,9 @@ pub struct ApplicationSearchResult {
     pub skills_activated: Vec<String>,
     #[serde(default)]
     pub catalog_version: u64,
+    /// Short routing guidance for the main model. Empty on legacy payloads.
+    #[serde(default)]
+    pub guidance: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -550,5 +557,42 @@ mod tests {
         assert_eq!(descriptor.visibility, ToolVisibility::AlwaysOn);
         assert!(descriptor.source.is_none());
         assert!(descriptor.tags.is_empty());
+    }
+
+    #[test]
+    fn search_candidate_and_result_accept_legacy_payloads() {
+        // 1.x payloads predate `appName` and `guidance`; both must default to
+        // empty instead of failing deserialization.
+        let candidate: ApplicationCandidate = serde_json::from_value(serde_json::json!({
+            "toolName": "app__worldbase_documents__doc_read",
+            "appId": "worldbase.documents",
+            "capabilityId": "doc.read",
+            "title": "Read document",
+            "description": "Reads a document",
+            "source": "builtin"
+        }))
+        .expect("candidate");
+        assert!(candidate.app_name.is_empty());
+
+        let result: ApplicationSearchResult = serde_json::from_value(serde_json::json!({
+            "candidates": [],
+            "activated": [],
+            "skillsActivated": [],
+            "catalogVersion": 3
+        }))
+        .expect("search result");
+        assert!(result.guidance.is_empty());
+
+        let enriched = ApplicationSearchResult {
+            guidance: "local apps first".into(),
+            candidates: vec![ApplicationCandidate {
+                app_name: "Documents".into(),
+                ..candidate
+            }],
+            ..result
+        };
+        let value = serde_json::to_value(&enriched).expect("serialize");
+        assert_eq!(value["guidance"], "local apps first");
+        assert_eq!(value["candidates"][0]["appName"], "Documents");
     }
 }

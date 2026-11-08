@@ -1,0 +1,49 @@
+import { NextResponse } from 'next/server'
+import type { Create{{entity_pascal}}Input } from '@/shared/schema'
+import {
+  create{{entity_pascal}},
+  list{{entity_plural_pascal}},
+  search{{entity_plural_pascal}}
+} from '@/domain/{{entity_name}}-service'
+
+export const dynamic = 'force-dynamic'
+
+export async function GET (request: Request) {
+  try {
+    const url = new URL(request.url)
+    const query = url.searchParams.get('q')?.trim()
+    if (query) {
+      const items = await search{{entity_plural_pascal}}(query)
+      return NextResponse.json({ items, total: items.length })
+    }
+
+    const limitValue = Number(url.searchParams.get('limit'))
+    const offsetValue = Number(url.searchParams.get('offset'))
+    const direction = url.searchParams.get('orderDirection')
+    const result = await list{{entity_plural_pascal}}({
+      limit: Number.isFinite(limitValue) && limitValue > 0 ? limitValue : undefined,
+      offset: Number.isFinite(offsetValue) && offsetValue >= 0 ? offsetValue : undefined,
+      orderBy: url.searchParams.get('orderBy') ?? undefined,
+      orderDirection: direction === 'desc' ? 'desc' : direction === 'asc' ? 'asc' : undefined
+    })
+    return NextResponse.json(result)
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 500 }
+    )
+  }
+}
+
+export async function POST (request: Request) {
+  try {
+    const input = await request.json() as Create{{entity_pascal}}Input
+    const item = await create{{entity_pascal}}(input)
+    return NextResponse.json(item, { status: 201 })
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 400 }
+    )
+  }
+}

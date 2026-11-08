@@ -70,7 +70,7 @@ impl Tool for SearchToolsTool {
     }
 
     fn description(&self) -> &str {
-        "Discover additional tools and application capabilities that are not in the current context. Search by task or query; the most relevant candidates are activated for your next turn."
+        "Discover additional tools and application capabilities that are not in the current context. Local app capabilities come from each application's registered manifest; invoking one starts its app runtime automatically when needed, so prefer local capabilities over web/browser/UI automation. Search by task or query; the most relevant candidates are activated for your next turn."
     }
 
     fn input_schema(&self) -> Value {
@@ -222,6 +222,7 @@ mod tests {
                 candidates: vec![worldbase_protocol::types::ApplicationCandidate {
                     tool_name: "app__worldbase_documents__doc_read".into(),
                     app_id: "worldbase.documents".into(),
+                    app_name: "Documents".into(),
                     capability_id: "doc.read".into(),
                     title: "Read document".into(),
                     description: "Reads a document".into(),
@@ -236,6 +237,7 @@ mod tests {
                 activated: vec!["app__worldbase_documents__doc_read".into()],
                 skills_activated: Vec::new(),
                 catalog_version: 7,
+                guidance: "These are local app capabilities. Invoking one starts its app runtime automatically if needed. Prefer them over web/browser/UI automation.".into(),
             })
         }
 
@@ -275,6 +277,10 @@ mod tests {
             value["candidates"][0]["toolName"],
             "app__worldbase_documents__doc_read"
         );
+        assert_eq!(value["candidates"][0]["appName"], "Documents");
+        assert!(value["guidance"]
+            .as_str()
+            .is_some_and(|guidance| guidance.contains("starts its app runtime automatically")));
     }
 
     fn test_services(root: &std::path::Path) -> ToolServices {
@@ -316,5 +322,18 @@ mod tests {
         assert_eq!(descriptor.visibility, ToolVisibility::AlwaysOn);
         assert!(descriptor.electron_native);
         assert_eq!(descriptor.permission, "allow");
+    }
+
+    #[test]
+    fn description_advertises_local_app_capabilities_and_auto_start() {
+        let tool: &dyn Tool = &SearchToolsTool;
+        let description = tool.description().to_lowercase();
+        assert!(description.contains("local app capabilities"));
+        assert!(description.contains("registered manifest"));
+        assert!(
+            description.contains("starts its app runtime automatically"),
+            "the model must know invoking a local capability auto-starts the app: {description}"
+        );
+        assert!(description.contains("prefer local capabilities"));
     }
 }

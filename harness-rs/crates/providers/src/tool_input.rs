@@ -38,7 +38,7 @@ pub(crate) fn parse_tool_input(provider: &str, tool_name: &str, raw: &str) -> Re
     }
 
     bail!(
-        "{provider} returned invalid JSON arguments for tool `{tool_name}`: {}",
+        "{provider} returned invalid JSON arguments for tool `{tool_name}`: {}. Tool arguments must be valid JSON; quote string values and use lowercase true/false/null instead of bare none/undefined.",
         snippet(raw)
     )
 }

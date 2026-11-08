@@ -1,0 +1,145 @@
+'use client'
+
+import { useCallback, useEffect, useState } from 'react'
+import type { ChangeEvent, FormEvent } from 'react'
+import { useParams, useRouter } from 'next/navigation'
+
+type FieldKind = 'text' | 'number' | 'checkbox'
+
+interface FormField {
+  name: string
+  label: string
+  type: FieldKind
+  required: boolean
+  step?: string | null
+}
+
+const formFields: FormField[] = {{form_fields_json}}
+
+type RecordRow = Record<string, unknown>
+
+export default function {{entity_pascal}}DetailPage () {
+  const params = useParams<{ id: string }>()
+  const router = useRouter()
+  const id = String(params?.id ?? '')
+  const [form, setForm] = useState<Record<string, string | boolean>>({})
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    if (!id) return
+    setLoading(true)
+    setError(null)
+    try {
+      const response = await fetch(`{{route_base}}/${encodeURIComponent(id)}`, { cache: 'no-store' })
+      if (!response.ok) throw new Error(await response.text())
+      const record = await response.json() as RecordRow
+      const next: Record<string, string | boolean> = {}
+      for (const field of formFields) {
+        const value = record[field.name]
+        next[field.name] = field.type === 'checkbox' ? Boolean(value) : String(value ?? '')
+      }
+      setForm(next)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError))
+    } finally {
+      setLoading(false)
+    }
+  }, [id])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  async function saveRecord (event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError(null)
+    const body: Record<string, unknown> = {}
+    for (const field of formFields) {
+      const value = form[field.name]
+      if (field.type === 'checkbox') {
+        body[field.name] = Boolean(value)
+        continue
+      }
+      if (value === undefined || value === '') {
+        if (field.required) {
+          setError(`${field.label} is required`)
+          return
+        }
+        continue
+      }
+      body[field.name] = field.type === 'number' ? Number(value) : value
+    }
+
+    try {
+      const response = await fetch(`{{route_base}}/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+      if (!response.ok) throw new Error(await response.text())
+      router.push('{{page_base}}')
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError))
+    }
+  }
+
+  async function removeRecord () {
+    if (!window.confirm('Delete this record?')) return
+    setError(null)
+    try {
+      const response = await fetch(`{{route_base}}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!response.ok) throw new Error(await response.text())
+      router.push('{{page_base}}')
+    } catch (removeError) {
+      setError(removeError instanceof Error ? removeError.message : String(removeError))
+    }
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div>
+          <span className="eyebrow">Edit</span>
+          <h2>{{entity_title}}</h2>
+        </div>
+        <a className="link-button" href="{{page_base}}">Back to list</a>
+      </div>
+
+      {error ? <p className="error">{error}</p> : null}
+      {loading ? <p className="muted">Loading...</p> : null}
+
+      <form onSubmit={saveRecord}>
+        <div className="form-grid">
+          {formFields.map((field) => (
+            <label
+              key={field.name}
+              className={field.type === 'checkbox' ? 'field field-checkbox' : 'field'}
+            >
+              <span>{field.label}{field.required ? ' *' : ''}</span>
+              {field.type === 'checkbox' ? (
+                <input
+                  type="checkbox"
+                  checked={Boolean(form[field.name])}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setForm((current) => ({ ...current, [field.name]: event.target.checked }))}
+                />
+              ) : (
+                <input
+                  type={field.type}
+                  step={field.step ?? undefined}
+                  required={field.required}
+                  value={String(form[field.name] ?? '')}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setForm((current) => ({ ...current, [field.name]: event.target.value }))}
+                />
+              )}
+            </label>
+          ))}
+        </div>
+        <div className="form-actions">
+          <button type="submit">Save changes</button>
+          <button type="button" className="danger" onClick={() => void removeRecord()}>Delete</button>
+        </div>
+      </form>
+    </section>
+  )
+}
