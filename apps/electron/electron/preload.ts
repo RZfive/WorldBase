@@ -33,6 +33,7 @@ interface BrowserPageEmulationRequest {
   media?: 'screen' | 'print'
   colorScheme?: 'light' | 'dark' | 'no-preference'
   reducedMotion?: 'reduce' | 'no-preference'
+  autoDarkMode?: boolean
   userAgent?: string
   viewport?: BrowserPageEmulationViewportRequest
   reset?: boolean
@@ -46,6 +47,7 @@ interface BrowserPageEmulationResult {
     media?: string
     colorScheme?: string
     reducedMotion?: string
+    autoDarkMode?: boolean
     userAgent?: string | null
     viewport?: {
       width: number
@@ -54,6 +56,16 @@ interface BrowserPageEmulationResult {
       mobile: boolean
     }
   }
+}
+
+interface BrowserPageThemeRequest {
+  webContentsId: number
+  colorScheme: 'light' | 'dark'
+  autoDarkMode?: boolean
+}
+
+interface BrowserPageThemeResult {
+  ok: true
 }
 
 interface ChatMessage {
@@ -573,6 +585,7 @@ export interface ElectronAPI {
   dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => Promise<BrowserPageKeyDispatchResult>
   getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => Promise<BrowserAutomationNetworkEntry[]>
   emulateBrowserPage: (request: BrowserPageEmulationRequest) => Promise<BrowserPageEmulationResult>
+  setBrowserPageTheme: (request: BrowserPageThemeRequest) => Promise<BrowserPageThemeResult>
   onWorkspaceTabControl: (callback: (payload: WorkspaceTabControlRequestEnvelope) => void) => () => void
   resolveWorkspaceTabControl: (payload: WorkspaceTabControlResponseEnvelope) => void
   getAboutInfo: () => Promise<AppAboutInfo>
@@ -916,6 +929,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => ipcRenderer.invoke('pageAutomation:dispatchKey', request),
   getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => ipcRenderer.invoke('pageAutomation:getNetworkLog', webContentsId, limit),
   emulateBrowserPage: (request: BrowserPageEmulationRequest) => ipcRenderer.invoke('pageAutomation:emulate', request),
+  setBrowserPageTheme: (request: BrowserPageThemeRequest) => ipcRenderer.invoke('pageAutomation:setTheme', request),
   getAboutInfo: () => ipcRenderer.invoke('app:getAboutInfo'),
   getAppUpdateState: () => ipcRenderer.invoke('appUpdate:getState'),
   getAppUpdateConfig: () => ipcRenderer.invoke('appUpdate:getConfig'),

@@ -23,7 +23,7 @@ export async function loadSetupComponent (url) {
   const { outputText } = ts.transpileModule(script.content, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
   })
-  const code = outputText.replace(/import\s+([\s\S]*?)\s+from\s+['"]([^'"]+)['"];?/g, (_match, bindings, specifier) => {
+  const code = outputText.replace(/import\s+['"][^'"]+['"];?/g, '').replace(/import\s+([\s\S]*?)\s+from\s+['"]([^'"]+)['"];?/g, (_match, bindings, specifier) => {
     if (specifier.endsWith('.vue')) return `const ${bindings.trim()} = {};`
     const resolved = specifier.startsWith('.')
       ? new URL(existsSync(new URL(specifier, url)) ? specifier : `${specifier}.ts`, url).href
@@ -65,7 +65,11 @@ export function rendererFixture (t, { idle = true } = {}) {
       cancelIdleCallback: id => idleCallbacks.delete(id)
     } : {})
   }
-  const document = { ...eventHub(), visibilityState: 'visible' }
+  const document = {
+    ...eventHub(),
+    visibilityState: 'visible',
+    body: { style: {} }
+  }
   Object.assign(globalThis, { window, document })
   const renderer = createRenderer({
     createElement: () => ({}),

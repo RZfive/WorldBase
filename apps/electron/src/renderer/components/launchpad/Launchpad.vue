@@ -7,6 +7,7 @@ import LaunchpadGrid from './LaunchpadGrid.vue'
 import FolderBubble from './FolderBubble.vue'
 import ProjectAppearanceDialog from './ProjectAppearanceDialog.vue'
 import { canInterpretAsWebUrl, createWebAppId, getWebAppNameFromUrl, normalizeWebUrlInput } from '../../utils/web-app'
+import { resolveProjectAiStatus } from '../../utils/project-ai-status'
 import type {
   LaunchFolder,
   LaunchpadDragItem,
@@ -367,16 +368,28 @@ async function loadProjects () {
   error.value = null
   try {
     if (!window.electronAPI) return
-    const [nextProjects, nextWebApps] = await Promise.all([
+    const applicationsApi = window.electronAPI.applications
+    const applicationCatalogPromise = applicationsApi?.list
+      ? applicationsApi.list().catch((err) => {
+          console.warn('[launchpad] Failed to load AI application status:', err)
+          return null
+        })
+      : Promise.resolve(null)
+    const [nextProjects, nextWebApps, applicationCatalog] = await Promise.all([
       window.electronAPI.listProjects() as Promise<Project[]>,
-      window.electronAPI.getWebApps ? window.electronAPI.getWebApps() as Promise<WebAppShortcut[]> : Promise.resolve([])
+      window.electronAPI.getWebApps ? window.electronAPI.getWebApps() as Promise<WebAppShortcut[]> : Promise.resolve([]),
+      applicationCatalogPromise
     ])
     console.info('[launchpad] loadProjects webApps', (nextWebApps as WebAppShortcut[]).map(app => ({
       id: app.id,
       name: app.name,
       url: app.url
     })))
-    const mergedApps = [...nextProjects, ...(nextWebApps as unknown as Project[])]
+    const projectApps = Array.isArray(applicationCatalog?.apps) ? applicationCatalog.apps : null
+    const enrichedProjects = projectApps
+      ? nextProjects.map(project => ({ ...project, ...resolveProjectAiStatus(project, projectApps) }))
+      : nextProjects
+    const mergedApps = [...enrichedProjects, ...(nextWebApps as unknown as Project[])]
     projects.value = mergedApps
     syncLayoutWithProjects(mergedApps)
   } catch (err) {
@@ -1555,6 +1568,28 @@ onUnmounted(() => {
   background: var(--app-success);
   border: 2px solid var(--app-panel-strong);
   box-shadow: 0 0 8px var(--app-success);
+}
+.lp-ai-upgrade-badge {
+  position: absolute;
+  top: -6px;
+  right: -7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-width: 28px;
+  height: 18px;
+  padding: 0 5px;
+  border: 2px solid var(--app-panel-strong);
+  border-radius: 999px;
+  background: linear-gradient(135deg, #f59e0b, #f97316);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 750;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  box-shadow: 0 3px 10px rgba(249, 115, 22, 0.38);
+  pointer-events: none;
 }
 
 .lp-cell-name {

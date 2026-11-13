@@ -176,6 +176,7 @@ export interface BrowserAutomationEmulatedState {
   media?: string
   colorScheme?: string
   reducedMotion?: string
+  autoDarkMode?: boolean
   userAgent?: string | null
   viewport?: {
     width: number

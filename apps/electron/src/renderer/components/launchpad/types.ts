@@ -13,6 +13,8 @@ export interface Project {
   createdAt?: string
   updatedAt?: string
   runtime?: ProjectRuntime
+  aiReady?: boolean
+  aiUpgradeAvailable?: boolean
   [key: string]: unknown
 }
 

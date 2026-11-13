@@ -2,8 +2,49 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import './register-ts-hooks.mjs'
 import { flush, loadSetupComponent, rendererFixture } from './helpers/renderer-fixture.mjs'
+import { resolveProjectAiStatus } from '../src/renderer/utils/project-ai-status.ts'
 
 const ApplicationsPanel = await loadSetupComponent(new URL('../src/renderer/components/settings/ApplicationsPanel.vue', import.meta.url))
+
+test('project launchpad marks only legacy apps as AI upgrade candidates', () => {
+  const project = { id: 'proj_legacy', name: 'Legacy app', type: 'fullstack' }
+  assert.deepEqual(resolveProjectAiStatus(project, []), {
+    aiReady: false,
+    aiUpgradeAvailable: true
+  })
+
+  assert.deepEqual(resolveProjectAiStatus(project, [{
+    appId: 'worldbase.local.proj_legacy',
+    aiReady: true
+  }]), {
+    aiReady: true,
+    aiUpgradeAvailable: false
+  })
+
+  assert.deepEqual(resolveProjectAiStatus(project, [{
+    appId: 'worldbase.local.proj_legacy',
+    aiReady: false
+  }]), {
+    aiReady: false,
+    aiUpgradeAvailable: false
+  })
+
+  assert.deepEqual(resolveProjectAiStatus({ id: 'web_demo', kind: 'web' }, []), {
+    aiReady: false,
+    aiUpgradeAvailable: false
+  })
+})
+
+test('project AI status can match a managed app by project tag', () => {
+  assert.deepEqual(resolveProjectAiStatus({ id: 'proj_tagged' }, [{
+    appId: 'worldbase.local.custom-id',
+    tags: ['worldbase.scaffold', 'proj_tagged'],
+    aiReady: true
+  }]), {
+    aiReady: true,
+    aiUpgradeAvailable: false
+  })
+})
 
 function application (overrides = {}) {
   return {

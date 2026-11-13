@@ -35,6 +35,7 @@ const showAddMenu = ref(false)
 const showTabActions = ref(false)
 /** Live instance of the active tab body; action ids map to its exposed methods. */
 const tabBodyRef = ref<{ [key: string]: () => unknown } | null>(null)
+const tabContextMenu = ref<{ tab: WorkspaceTabInstance; x: number; y: number } | null>(null)
 
 // The actions menu sits 6px below its button; without a grace timer the menu
 // closes the instant the pointer crosses that gap, making it unreachable.
@@ -66,6 +67,7 @@ let resizeStartX = 0
 let resizeStartWidth = 0
 let resizing = false
 let layoutObserver: ResizeObserver | null = null
+let tabsScrollObserver: ResizeObserver | null = null
 
 const activeTab = computed<WorkspaceTabInstance | null>(() => {
   return props.tabs.find(tab => tab.id === props.activeTabId) || null
@@ -247,8 +249,6 @@ function onTabMouseDown (event: MouseEvent, tabId: string): void {
   emit('closeTab', tabId)
 }
 
-const tabContextMenu = ref<{ tab: WorkspaceTabInstance; x: number; y: number } | null>(null)
-
 const CONTEXT_MENU_MIN_WIDTH = 176
 const CONTEXT_MENU_EST_HEIGHT = 116
 
@@ -312,7 +312,6 @@ const TABS_FADE_WIDTH = 24
 const tabsScrollRef = ref<HTMLElement | null>(null)
 const tabsCanScrollLeft = ref(false)
 const tabsCanScrollRight = ref(false)
-let tabsScrollObserver: ResizeObserver | null = null
 
 function updateTabsScrollState (): void {
   const el = tabsScrollRef.value

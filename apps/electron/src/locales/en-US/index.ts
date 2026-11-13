@@ -384,6 +384,8 @@ const enUS: MessageSchema = {
     deleteProjectConfirm: 'Delete project "{name}"? This cannot be undone.',
     appAppearance: 'App appearance',
     app: 'App',
+    aiReadyHint: 'AI can directly use this app',
+    aiUpgradeHint: 'Available for AI upgrade',
     appName: 'App name',
     appNamePlaceholder: 'Enter app name',
     icon: 'Icon',

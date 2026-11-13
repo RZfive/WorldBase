@@ -28,6 +28,7 @@ interface BrowserPageEmulationRequest {
   media?: 'screen' | 'print'
   colorScheme?: 'light' | 'dark' | 'no-preference'
   reducedMotion?: 'reduce' | 'no-preference'
+  autoDarkMode?: boolean
   userAgent?: string
   viewport?: BrowserPageEmulationViewportRequest
   reset?: boolean
@@ -41,6 +42,7 @@ interface BrowserPageEmulationResult {
     media?: string
     colorScheme?: string
     reducedMotion?: string
+    autoDarkMode?: boolean
     userAgent?: string | null
     viewport?: {
       width: number
@@ -49,6 +51,16 @@ interface BrowserPageEmulationResult {
       mobile: boolean
     }
   }
+}
+
+interface BrowserPageThemeRequest {
+  webContentsId: number
+  colorScheme: 'light' | 'dark'
+  autoDarkMode?: boolean
+}
+
+interface BrowserPageThemeResult {
+  ok: true
 }
 
 type WorkspaceTabControlRequest = import('./shared/workspace-control-types.js').WorkspaceTabControlRequest
@@ -1271,6 +1283,7 @@ interface ElectronAPI {
   dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => Promise<BrowserPageKeyDispatchResult>
   getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => Promise<BrowserAutomationNetworkEntry[]>
   emulateBrowserPage: (request: BrowserPageEmulationRequest) => Promise<BrowserPageEmulationResult>
+  setBrowserPageTheme: (request: BrowserPageThemeRequest) => Promise<BrowserPageThemeResult>
   getAboutInfo: () => Promise<AppAboutInfo>
   getAppUpdateState: () => Promise<AppUpdateState>
   getAppUpdateConfig: () => Promise<AppUpdateConfig>

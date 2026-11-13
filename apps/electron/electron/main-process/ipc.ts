@@ -450,6 +450,7 @@ interface BrowserPageEmulationRequest {
   media?: 'screen' | 'print'
   colorScheme?: 'light' | 'dark' | 'no-preference'
   reducedMotion?: 'reduce' | 'no-preference'
+  autoDarkMode?: boolean
   userAgent?: string
   viewport?: {
     width: number
@@ -468,15 +469,27 @@ interface BrowserPageEmulationResult {
     media?: string
     colorScheme?: string
     reducedMotion?: string
+    autoDarkMode?: boolean
     userAgent?: string | null
     viewport?: BrowserPageEmulationViewport
   }
+}
+
+interface BrowserPageThemeRequest {
+  webContentsId: number
+  colorScheme: 'light' | 'dark'
+  autoDarkMode?: boolean
+}
+
+interface BrowserPageThemeResult {
+  ok: true
 }
 
 interface PageEmulationState {
   media?: 'screen' | 'print'
   colorScheme?: 'light' | 'dark' | 'no-preference'
   reducedMotion?: 'reduce' | 'no-preference'
+  autoDarkMode?: boolean
   userAgent?: string
   viewport?: BrowserPageEmulationViewport
 }
@@ -486,12 +499,21 @@ interface PageEmulationSession {
   refs: number
   emulation: PageEmulationState | null
   emulationActive: boolean
+  hostTheme: PageHostTheme | null
   cleanup: () => void
+}
+
+interface PageHostTheme {
+  colorScheme: 'light' | 'dark'
+  autoDarkMode: boolean
 }
 
 // One ref for active emulation plus one per in-flight screenshot. The debugger
 // is detached only when the last ref is released.
 const pageEmulationSessions = new Map<number, PageEmulationSession>()
+// Host chrome theme survives debugger resets and screenshots, so page media
+// and Chromium auto-dark mode stay aligned with the application theme.
+const pageHostThemes = new Map<number, PageHostTheme>()
 
 interface PageEmulationTargetOperations {
   queue: Promise<unknown>
@@ -584,6 +606,7 @@ function acquirePageEmulationSession (target: WebContents): { session: PageEmula
     refs: 0,
     emulation: null,
     emulationActive: false,
+    hostTheme: pageHostThemes.get(webContentsId) ?? null,
     cleanup: () => {}
   }
 
@@ -594,6 +617,7 @@ function acquirePageEmulationSession (target: WebContents): { session: PageEmula
   }
   const onDestroyed = () => {
     forget()
+    pageHostThemes.delete(webContentsId)
     debuggerSession.removeListener('detach', onDetached)
     try {
       if (debuggerSession.isAttached()) debuggerSession.detach()
@@ -637,15 +661,18 @@ function releasePageEmulationSessionRef (webContentsId: number, session: PageEmu
     return
   }
   session.refs = Math.max(0, session.refs - 1)
-  if (session.refs > 0) return
+  if (session.refs > 0 || session.hostTheme) return
   closePageEmulationSession(webContentsId, session)
 }
 
 function rebuildPageEmulationSession (target: WebContents, session: PageEmulationSession): PageEmulationSession | null {
+  const hostTheme = session.hostTheme
   closePageEmulationSession(target.id, session)
   if (target.isDestroyed()) return null
   try {
-    return acquirePageEmulationSession(target).session
+    const rebuilt = acquirePageEmulationSession(target).session
+    rebuilt.hostTheme = hostTheme
+    return rebuilt
   } catch {
     return null
   }
@@ -707,6 +734,32 @@ interface PageEmulationApplyOptions {
   isCurrent?: () => boolean
 }
 
+function pageHostThemeState (hostTheme: PageHostTheme | null): PageEmulationState {
+  if (!hostTheme) return {}
+  return {
+    colorScheme: hostTheme.colorScheme,
+    autoDarkMode: hostTheme.autoDarkMode
+  }
+}
+
+function effectivePageEmulationState (
+  session: PageEmulationSession,
+  state: PageEmulationState | null
+): PageEmulationState {
+  const hostTheme = pageHostThemeState(session.hostTheme)
+  if (!state) return hostTheme
+  const autoDarkMode = state.autoDarkMode ?? (
+    state.colorScheme === 'light' ? false : hostTheme.autoDarkMode
+  )
+  return {
+    ...state,
+    ...(state.colorScheme === undefined && hostTheme.colorScheme !== undefined
+      ? { colorScheme: hostTheme.colorScheme }
+      : {}),
+    ...(autoDarkMode !== undefined ? { autoDarkMode } : {})
+  }
+}
+
 async function applyPageEmulation (
   debuggerSession: ElectronDebugger,
   state: PageEmulationState,
@@ -739,6 +792,28 @@ async function applyPageEmulation (
     media: state.media ?? '',
     features
   })
+  checkCurrent()
+  if (state.autoDarkMode !== undefined) {
+    try {
+      await sendCommand('Emulation.setAutoDarkModeOverride', {
+        enabled: state.autoDarkMode
+      })
+    } catch (error) {
+      // Color-scheme emulation above is the critical path. Auto dark is a
+      // best-effort fallback for light-only sites and varies across Chromium
+      // builds, so an unsupported protocol command must not break theming.
+      console.warn('[pageAutomation] auto dark mode override is unavailable:', error)
+    }
+  } else if (options.clearNamedMediaFeatures) {
+    // Auto dark is a Chromium rendering override, not a CSS media feature.
+    // Clear it explicitly while resetting so a detached debugger is not needed
+    // just to restore normal page colors.
+    try {
+      await sendCommand('Emulation.setAutoDarkModeOverride', { enabled: false })
+    } catch (error) {
+      console.warn('[pageAutomation] failed to clear auto dark mode override:', error)
+    }
+  }
   checkCurrent()
   await sendCommand('Emulation.setUserAgentOverride', {
     userAgent: state.userAgent ?? ''
@@ -838,10 +913,14 @@ async function resetPageEmulationMedia (
   timeoutMs: number | undefined,
   isCurrent: () => boolean
 ): Promise<void> {
-  const expected = readSystemMediaBaseline()
+  const systemBaseline = readSystemMediaBaseline()
+  const expected: PageMediaState = session.hostTheme
+    ? { ...systemBaseline, colorScheme: session.hostTheme.colorScheme }
+    : systemBaseline
+  const resetState = pageHostThemeState(session.hostTheme)
   const clearAndVerify = async (debuggerSession: ElectronDebugger): Promise<boolean> => {
     assertPageEmulationCurrent(isCurrent)
-    await applyPageEmulation(debuggerSession, {}, timeoutMs, {
+    await applyPageEmulation(debuggerSession, resetState, timeoutMs, {
       clearNamedMediaFeatures: true,
       isCurrent
     })
@@ -871,6 +950,7 @@ function toEmulatedResult (state: PageEmulationState | null): BrowserPageEmulati
     ...(state.media ? { media: state.media } : {}),
     ...(state.colorScheme ? { colorScheme: state.colorScheme } : {}),
     ...(state.reducedMotion ? { reducedMotion: state.reducedMotion } : {}),
+    ...(state.autoDarkMode !== undefined ? { autoDarkMode: state.autoDarkMode } : {}),
     userAgent: state.userAgent ?? null,
     ...(state.viewport ? { viewport: { ...state.viewport } } : {})
   }
@@ -1308,6 +1388,48 @@ export function setupIPC (): void {
     return (browserNetworkLogs.get(webContentsId) || []).slice(-limit).reverse()
   })
 
+  ipcMain.handle('pageAutomation:setTheme', async (event: IpcMainInvokeEvent, rawRequest: unknown): Promise<BrowserPageThemeResult> => {
+    if (!rawRequest || typeof rawRequest !== 'object' || Array.isArray(rawRequest)) {
+      throw new Error('Invalid page theme request.')
+    }
+
+    const request = rawRequest as Partial<BrowserPageThemeRequest>
+    const webContentsId = request.webContentsId
+    if (typeof webContentsId !== 'number' || !Number.isInteger(webContentsId) || webContentsId <= 0) {
+      throw new Error('Invalid page surface id for theme sync.')
+    }
+    if (request.colorScheme !== 'light' && request.colorScheme !== 'dark') {
+      throw new Error('Unsupported page theme color scheme.')
+    }
+    if (request.autoDarkMode !== undefined && typeof request.autoDarkMode !== 'boolean') {
+      throw new Error('Invalid page auto dark mode flag.')
+    }
+
+    const target = webContents.fromId(webContentsId)
+    if (!target || target.isDestroyed()) {
+      throw new Error('The requested page surface is not available.')
+    }
+    assertPageSurfaceOwnedBySender(target, event.sender)
+
+    const hostTheme: PageHostTheme = {
+      colorScheme: request.colorScheme,
+      autoDarkMode: request.autoDarkMode ?? request.colorScheme === 'dark'
+    }
+    pageHostThemes.set(webContentsId, hostTheme)
+    return await enqueuePageEmulationOperation(webContentsId, async (isCurrent) => {
+      assertPageEmulationCurrent(isCurrent)
+      const { session } = acquirePageEmulationSession(target)
+      session.hostTheme = hostTheme
+      const effectiveState = effectivePageEmulationState(
+        session,
+        session.emulationActive ? session.emulation : null
+      )
+      await applyPageEmulation(session.debugger, effectiveState, undefined, { isCurrent })
+      assertPageEmulationCurrent(isCurrent)
+      return { ok: true }
+    })
+  })
+
   ipcMain.handle('pageAutomation:emulate', async (event: IpcMainInvokeEvent, rawRequest: unknown): Promise<BrowserPageEmulationResult> => {
     if (!rawRequest || typeof rawRequest !== 'object' || Array.isArray(rawRequest)) {
       throw new Error('Invalid page emulation request.')
@@ -1339,6 +1461,9 @@ export function setupIPC (): void {
     }
     if (request.reset !== undefined && typeof request.reset !== 'boolean') {
       throw new Error('Invalid emulation reset flag.')
+    }
+    if (request.autoDarkMode !== undefined && typeof request.autoDarkMode !== 'boolean') {
+      throw new Error('Invalid page auto dark mode flag.')
     }
 
     const userAgent = request.userAgent
@@ -1410,7 +1535,7 @@ export function setupIPC (): void {
           await resetPageEmulationMedia(target, webContentsId, session, request.timeoutMs, isCurrent)
           assertPageEmulationCurrent(isCurrent)
           const liveSession = getPageEmulationSession(webContentsId)
-          if (liveSession) {
+          if (liveSession && !liveSession.hostTheme) {
             closePageEmulationSession(webContentsId, liveSession)
             closed = true
           }
@@ -1438,13 +1563,19 @@ export function setupIPC (): void {
     const hasOverrides = request.media !== undefined ||
       request.colorScheme !== undefined ||
       request.reducedMotion !== undefined ||
+      request.autoDarkMode !== undefined ||
       userAgent !== undefined ||
       viewport !== undefined
     if (!hasOverrides) {
       return await enqueuePageEmulationOperation(webContentsId, async (isCurrent) => {
         assertPageEmulationCurrent(isCurrent)
         const session = getPageEmulationSession(webContentsId)
-        return { ok: true, emulated: toEmulatedResult(session?.emulationActive ? session.emulation : null) }
+        return {
+          ok: true,
+          emulated: toEmulatedResult(session
+            ? effectivePageEmulationState(session, session.emulationActive ? session.emulation : null)
+            : null)
+        }
       })
     }
 
@@ -1465,18 +1596,32 @@ export function setupIPC (): void {
       if (request.media !== undefined) nextState.media = request.media
       if (request.colorScheme !== undefined) nextState.colorScheme = request.colorScheme
       if (request.reducedMotion !== undefined) nextState.reducedMotion = request.reducedMotion
+      if (request.autoDarkMode !== undefined) nextState.autoDarkMode = request.autoDarkMode
       if (userAgent !== undefined) nextState.userAgent = userAgent
       if (viewport !== undefined) nextState.viewport = viewport
 
       try {
-        await applyPageEmulation(session.debugger, nextState, request.timeoutMs, { isCurrent })
+        await applyPageEmulation(
+          session.debugger,
+          effectivePageEmulationState(session, nextState),
+          request.timeoutMs,
+          { isCurrent }
+        )
         assertPageEmulationCurrent(isCurrent)
         session.emulation = nextState
-        return { ok: true, emulated: toEmulatedResult(nextState) }
+        return {
+          ok: true,
+          emulated: toEmulatedResult(effectivePageEmulationState(session, nextState))
+        }
       } catch (error) {
         if (!(error instanceof PageEmulationSupersededError) && isCurrent()) {
           try {
-            await applyPageEmulation(session.debugger, previousState ?? {}, request.timeoutMs, { isCurrent })
+            await applyPageEmulation(
+              session.debugger,
+              effectivePageEmulationState(session, previousState),
+              request.timeoutMs,
+              { isCurrent }
+            )
           } catch { /* best effort */ }
         }
 

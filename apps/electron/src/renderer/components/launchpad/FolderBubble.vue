@@ -97,10 +97,21 @@ function resolveIcon (project: Project) {
                 @click="emit('selectProject', project)"
                 @contextmenu="emit('showMenu', { event: $event, target: project, kind: 'project' })"
               >
-                <div class="lp-app-icon">
+                <div
+                  class="lp-app-icon"
+                  :title="project.aiUpgradeAvailable
+                    ? $t('launchpad.aiUpgradeHint')
+                    : project.aiReady ? $t('launchpad.aiReadyHint') : undefined"
+                >
                   <img v-if="resolveIcon(project).kind === 'image'" :src="resolveIcon(project).value" alt="" class="lp-app-image" />
                   <span v-else class="lp-app-emoji">{{ resolveIcon(project).value }}</span>
                   <span v-if="project.runtime?.status === 'running'" class="lp-running-badge"></span>
+                  <span
+                    v-if="project.aiUpgradeAvailable"
+                    class="lp-ai-upgrade-badge"
+                    role="img"
+                    :aria-label="$t('launchpad.aiUpgradeHint')"
+                  >AI<span aria-hidden="true">↑</span></span>
                 </div>
                 <span class="lp-cell-name">{{ project.name || project.id }}</span>
               </div>

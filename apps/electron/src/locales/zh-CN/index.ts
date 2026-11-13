@@ -385,6 +385,8 @@ const zhCN = {
     deleteProjectConfirm: '确定删除项目「{name}」？此操作不可撤销。',
     appAppearance: '应用外观',
     app: '应用',
+    aiReadyHint: 'AI 可直接使用此应用的能力',
+    aiUpgradeHint: '可升级为 AI 可用应用',
     appName: '应用名称',
     appNamePlaceholder: '输入应用名称',
     icon: '图标',
