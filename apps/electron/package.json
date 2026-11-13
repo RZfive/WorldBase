@@ -47,7 +47,7 @@
     "test:rust-lan-routing": "node --experimental-strip-types --test tests/rust-lan-routing.test.mjs",
     "test:rust-project-log-routing": "node --experimental-strip-types --test tests/rust-project-log-routing.test.mjs",
     "test:provider-models": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/provider-model-service.test.mjs",
-    "test:renderer-navigation": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/renderer-navigation-performance.test.mjs tests/chat-history-performance.test.mjs tests/sidebar-performance.test.mjs",
+    "test:renderer-navigation": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/renderer-navigation-performance.test.mjs tests/chat-history-performance.test.mjs tests/sidebar-performance.test.mjs tests/attention-panel-layout.test.mjs",
     "test:message-branching": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-branching.test.mjs",
     "test:message-render-blocks": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-utils-blocks.test.mjs",
     "test:message-segments": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-segments.test.mjs",

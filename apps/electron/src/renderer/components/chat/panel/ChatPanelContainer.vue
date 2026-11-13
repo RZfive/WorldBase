@@ -2521,11 +2521,9 @@ watch(
      list, and the list reserves the dock height as bottom padding. */
   position: relative;
   width: calc(100% - (var(--chat-input-gutter, 16px) * 2));
-  max-height: min(42vh, 360px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--app-scrollbar) transparent;
+  /* Each attention card owns its scroll viewport. The zone itself must not
+     clip expanded cards or become a second scroll container. */
+  overflow: visible;
   margin: 0 auto 8px;
   padding: 0;
   display: flex;
