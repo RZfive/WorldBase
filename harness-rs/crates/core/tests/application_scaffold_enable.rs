@@ -154,6 +154,25 @@ async fn legacy_scaffold_manifest_with_template_tag_is_enabled() {
 }
 
 #[tokio::test]
+async fn legacy_write_risk_manifest_is_registered_and_enabled() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut legacy = manifest(PROJECT_ID, &["worldbase.scaffold", "next-crud"], None);
+    legacy["capabilities"][0]["risk"] = json!("write");
+    let (hub, _) = hub_with_manifest(&temp, PROJECT_ID, &legacy);
+
+    assert!(hub.auto_enable_scaffold_application(PROJECT_ID));
+    let app = hub
+        .application_registry
+        .get(APP_ID)
+        .expect("legacy manifest must still register");
+    assert!(app.enabled);
+    assert_eq!(
+        app.capabilities[0].risk,
+        worldbase_protocol::types::CapabilityRisk::WriteReversible
+    );
+}
+
+#[tokio::test]
 async fn manifest_without_scaffold_tag_stays_disabled() {
     let temp = tempfile::tempdir().expect("temp dir");
     let (hub, _) = hub_with_manifest(

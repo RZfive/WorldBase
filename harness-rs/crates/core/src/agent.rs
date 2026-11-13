@@ -1479,6 +1479,43 @@ fn local_app_capabilities_prompt(tools: &PromptToolContext<'_>) -> Option<String
     })
 }
 
+fn ai_application_upgrade_prompt(
+    tools: &PromptToolContext<'_>,
+    context: &ChatRunContext,
+) -> Option<String> {
+    if !tools.has("upgrade_project") {
+        return None;
+    }
+    let target_project = context
+        .target_project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty());
+    let target_rule = target_project
+        .map(|project_id| {
+            format!(
+                "- This conversation is bound to project `{project_id}`. Pass that exact ID to `upgrade_project`; never create a replacement project."
+            )
+        })
+        .unwrap_or_else(|| {
+            "- If the user names or selects an existing project, use its exact project ID with `upgrade_project`."
+                .to_string()
+        });
+    Some(format!(
+        "## AI application capabilities and upgrades\n\
+         - Requests such as “升级 AI 功能”, “让你可以使用这个应用”, “enable AI access”, or “make this app usable by AI” refer to the project's AI capability contract becoming discoverable and callable, not to changing the chat model or Electron version.\n\
+         - {target_rule}\n\
+         - Call `get_project_status` once for the target project and inspect `aiApplication`, especially `capabilityDetails`. Each entry states what the capability does, its input contract, risk, data scope, side effects, and timeout; treat that list as the authoritative description of what the project can do for AI.\n\
+         - Use `capabilityDetails` to match the user's business intent to concrete capabilities. When explaining what the app can do, summarize these capabilities and, when needed, verify discovery with `search_tools`; do not infer capability behavior from page UI, database tables, shell commands, or packaged binaries.\n\
+         - If the requested business operation is not covered by `capabilityDetails`, implement it in the project's domain/API/capability layer and update `.worldbase/app-capabilities.json` before enabling it. Never claim a capability exists or invent a tool name that is absent from the validated manifest.\n\
+         - Do not inspect or unpack `app.asar`, harness binaries, SQLite catalog internals, or guess registration behavior.\n\
+         - If `aiApplication.status` is `ready` or `invalid`, use `upgrade_project` with `ai_only: true` and no `dry_run`. This repairs legacy manifest fields and refreshes/enables the catalog without generating unrelated business or CRUD files.\n\
+         - If `aiApplication.status` is `upgrade_available`, use the full `upgrade_project` workflow without `ai_only` because the project lacks an AI capability manifest.\n\
+         - If the manifest is `invalid`, fix the exact file and error first, then rerun `upgrade_project` with `ai_only: true`. After it is `ready`, rebuild/restart the project when needed and prove discovery with `search_tools` using `source: \"app\"`.\n\
+         - Do not claim the app is AI-usable until `aiApplication.status` is `ready` and `search_tools` can discover or activate a capability. Report the concrete validation or invocation error instead of looping through exploratory commands."
+    ))
+}
+
 fn new_project_prompt(tools: &PromptToolContext<'_>, context: &ChatRunContext) -> Option<String> {
     let has_target_project = context
         .target_project_id
@@ -1658,6 +1695,7 @@ fn static_system_prompt_sections(
         mcp_tools_prompt(&tools),
         subagent_prompt(&tools),
         runtime_data_api_prompt(&tools),
+        ai_application_upgrade_prompt(&tools, context),
         local_app_capabilities_prompt(&tools),
         new_project_prompt(&tools, context),
     ]
@@ -3888,6 +3926,7 @@ mod tests {
         for section in [
             "## Editing existing projects",
             "## Build and runtime routing",
+            "## AI application capabilities and upgrades",
             "## Web and active-page tools",
             "## Operating-system Computer Use",
             "## Document tools",
@@ -3907,6 +3946,9 @@ mod tests {
         assert!(prompt.contains("`query_project_database` is read-only"));
         assert!(prompt.contains("Poll `get_project_command_status`"));
         assert!(prompt.contains("`upgrade_project`"));
+        assert!(prompt.contains("Do not inspect or unpack `app.asar`"));
+        assert!(prompt.contains("`aiApplication.status`"));
+        assert!(prompt.contains("source: \"app\""));
         for expected in ["`template`", "`entities`", "`features`", "`search_tools`"] {
             assert!(
                 prompt.contains(expected),
@@ -3927,6 +3969,36 @@ mod tests {
                 "low-level prompt detail must be removed: {removed}"
             );
         }
+    }
+
+    #[test]
+    fn ai_application_upgrade_prompt_names_the_bound_project_and_stops_binary_exploration() {
+        let tools = vec![
+            prompt_tool("upgrade_project", "Upgrade an existing project."),
+            prompt_tool("search_tools", "Discover tools."),
+            prompt_tool("get_project_status", "Read project status."),
+        ];
+        let context = ChatRunContext {
+            target_project_id: Some("proj_target".into()),
+            ..ChatRunContext::default()
+        };
+        let prompt = static_system_prompt_sections(
+            std::path::Path::new("/desktop-workspace"),
+            &context,
+            &tools,
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("## AI application capabilities and upgrades"));
+        assert!(prompt.contains("`proj_target`"));
+        assert!(prompt.contains("Call `get_project_status` once"));
+        assert!(prompt.contains("`capabilityDetails`"));
+        assert!(prompt.contains("what the project can do for AI"));
+        assert!(prompt.contains("If the requested business operation is not covered"));
+        assert!(prompt.contains("`ai_only: true`"));
+        assert!(prompt.contains("Do not inspect or unpack `app.asar`"));
+        assert!(prompt.contains("If the manifest is `invalid`"));
+        assert!(prompt.contains("Do not claim the app is AI-usable"));
     }
 
     #[test]

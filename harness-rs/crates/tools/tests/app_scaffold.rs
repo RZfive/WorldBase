@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use worldbase_project_runtime::{load_manifest, validate_manifest};
-use worldbase_tools::{HostBridge, ProjectCreateTool, ProjectUpgradeTool, Tool, ToolServices};
+use worldbase_tools::{
+    HostBridge, ProjectCreateTool, ProjectStatusTool, ProjectUpgradeTool, Tool, ToolServices,
+};
 
 struct Fixture {
     _temp: TempDir,
@@ -805,4 +807,178 @@ async fn app_scaffold_upgrade_result_reports_application() {
             "missing capability {expected}: {ids:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn project_status_explains_invalid_ai_manifests_and_upgrade_repairs_legacy_risks() {
+    let fixture = Fixture::new();
+    let (created, root) = fixture
+        .create(json!({
+            "name": "AI Manifest Repair",
+            "type": "fullstack",
+            "development_mode": true,
+            "build_and_start": false,
+            "template": "next-crud",
+            "entities": entity_expense_input(),
+            "features": ["core", "data", "crud-ui", "ai", "search"]
+        }))
+        .await;
+    let project_id = created["projectId"]
+        .as_str()
+        .expect("project id")
+        .to_string();
+    let manifest_path = root.join(".worldbase/app-capabilities.json");
+    let mut manifest: Value =
+        serde_json::from_str(&read_text(&root, ".worldbase/app-capabilities.json"))
+            .expect("parse manifest");
+    {
+        let capabilities = manifest["capabilities"]
+            .as_array_mut()
+            .expect("capabilities");
+        let writable = capabilities
+            .iter_mut()
+            .find(|capability| capability["risk"] == "write_reversible")
+            .expect("writable capability");
+        writable["risk"] = json!("unknown_risk");
+    }
+    std::fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+    )
+    .expect("write invalid manifest");
+
+    let status = ProjectStatusTool
+        .execute(json!({ "project_id": project_id }), &fixture.services)
+        .await
+        .expect("project status executes");
+    assert_eq!(status["aiApplication"]["status"], "invalid");
+    let errors = status["aiApplication"]["errors"]
+        .as_array()
+        .expect("manifest errors");
+    assert!(
+        errors.iter().any(|error| error
+            .as_str()
+            .is_some_and(|error| error.contains("unknown variant `unknown_risk`"))),
+        "status must expose the exact serde validation failure: {errors:?}"
+    );
+
+    {
+        let capabilities = manifest["capabilities"]
+            .as_array_mut()
+            .expect("capabilities");
+        let writable = capabilities
+            .iter_mut()
+            .find(|capability| capability["risk"] == "unknown_risk")
+            .expect("writable capability");
+        writable["risk"] = json!("write");
+    }
+    std::fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+    )
+    .expect("write legacy manifest");
+    let upgraded = ProjectUpgradeTool
+        .execute(json!({ "project_id": project_id }), &fixture.services)
+        .await
+        .expect("upgrade_project executes");
+    assert_eq!(upgraded["success"], true, "upgrade failed: {upgraded}");
+    assert_eq!(upgraded["ready"], true);
+    assert_eq!(upgraded["aiApplication"]["status"], "ready");
+    assert!(
+        upgraded["manifestRepairs"]
+            .as_array()
+            .is_some_and(|repairs| !repairs.is_empty()),
+        "upgrade should report the canonical risk repair: {upgraded}"
+    );
+    let repaired: Value =
+        serde_json::from_str(&read_text(&root, ".worldbase/app-capabilities.json"))
+            .expect("parse repaired manifest");
+    assert!(
+        repaired["capabilities"]
+            .as_array()
+            .expect("capabilities")
+            .iter()
+            .all(|capability| capability["risk"] != "write"),
+        "legacy risk must be persisted canonically: {repaired}"
+    );
+}
+
+#[tokio::test]
+async fn ai_only_upgrade_repairs_manifest_without_generating_business_files() {
+    let fixture = Fixture::new();
+    let (created, root) = fixture
+        .create(json!({
+            "name": "AI Only Upgrade",
+            "type": "fullstack",
+            "development_mode": true,
+            "build_and_start": false,
+            "template": "next-crud",
+            "entities": entity_expense_input(),
+            "features": ["core", "data", "crud-ui", "ai", "search"]
+        }))
+        .await;
+    let project_id = created["projectId"]
+        .as_str()
+        .expect("project id")
+        .to_string();
+    let removed_business_file = root.join("app/api/expenses/route.ts");
+    assert!(removed_business_file.is_file());
+    std::fs::remove_file(&removed_business_file).expect("remove generated business route");
+
+    let manifest_path = root.join(".worldbase/app-capabilities.json");
+    let mut manifest: Value =
+        serde_json::from_str(&read_text(&root, ".worldbase/app-capabilities.json"))
+            .expect("parse manifest");
+    {
+        let capabilities = manifest["capabilities"]
+            .as_array_mut()
+            .expect("capabilities");
+        let writable = capabilities
+            .iter_mut()
+            .find(|capability| capability["risk"] == "write_reversible")
+            .expect("writable capability");
+        writable["risk"] = json!("write");
+    }
+    std::fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+    )
+    .expect("write legacy manifest");
+
+    let upgraded = ProjectUpgradeTool
+        .execute(
+            json!({ "project_id": project_id, "ai_only": true }),
+            &fixture.services,
+        )
+        .await
+        .expect("ai-only upgrade executes");
+    assert_eq!(upgraded["success"], true, "upgrade failed: {upgraded}");
+    assert_eq!(upgraded["mode"], "ai_only");
+    assert_eq!(upgraded["aiApplication"]["status"], "ready");
+    let capability_details = upgraded["aiApplication"]["capabilityDetails"]
+        .as_array()
+        .expect("capability details");
+    assert!(!capability_details.is_empty());
+    assert!(capability_details.iter().all(|capability| {
+        capability.get("id").and_then(Value::as_str).is_some()
+            && capability.get("title").and_then(Value::as_str).is_some()
+            && capability
+                .get("description")
+                .and_then(Value::as_str)
+                .is_some()
+            && capability.get("risk").and_then(Value::as_str).is_some()
+    }));
+    assert_eq!(upgraded["created"], json!([]));
+    assert!(
+        !removed_business_file.exists(),
+        "ai-only upgrade must not recreate or modify unrelated business scaffold files"
+    );
+    let repaired: Value =
+        serde_json::from_str(&read_text(&root, ".worldbase/app-capabilities.json"))
+            .expect("parse repaired manifest");
+    assert!(repaired["capabilities"]
+        .as_array()
+        .expect("capabilities")
+        .iter()
+        .all(|capability| capability["risk"] != "write"));
 }

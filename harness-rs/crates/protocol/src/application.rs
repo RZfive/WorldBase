@@ -23,8 +23,13 @@ pub enum ToolVisibility {
 pub enum CapabilityRisk {
     #[default]
     Read,
+    /// Legacy manifests used `write`; normalize it to the current reversible
+    /// write risk so existing local applications remain loadable.
+    #[serde(alias = "write")]
     WriteReversible,
+    #[serde(alias = "destructive", alias = "delete")]
     WriteDestructive,
+    #[serde(alias = "external")]
     ExternalEffect,
 }
 
@@ -557,6 +562,23 @@ mod tests {
         assert_eq!(descriptor.visibility, ToolVisibility::AlwaysOn);
         assert!(descriptor.source.is_none());
         assert!(descriptor.tags.is_empty());
+    }
+
+    #[test]
+    fn capability_risk_accepts_legacy_write_aliases() {
+        assert_eq!(
+            serde_json::from_str::<CapabilityRisk>("\"write\"").expect("legacy write risk"),
+            CapabilityRisk::WriteReversible
+        );
+        assert_eq!(
+            serde_json::from_str::<CapabilityRisk>("\"destructive\"")
+                .expect("legacy destructive risk"),
+            CapabilityRisk::WriteDestructive
+        );
+        assert_eq!(
+            serde_json::from_str::<CapabilityRisk>("\"external\"").expect("legacy external risk"),
+            CapabilityRisk::ExternalEffect
+        );
     }
 
     #[test]

@@ -97,7 +97,11 @@ pub fn list_manifests(projects_root: &Path) -> Result<Vec<(String, AppManifest)>
             }
             Ok(None) => {}
             Err(error) => {
-                tracing::warn!(project = %project_id, error = %error, "skipping invalid app manifest");
+                tracing::warn!(
+                    project = %project_id,
+                    error = %format!("{error:#}"),
+                    "skipping invalid app manifest"
+                );
             }
         }
     }

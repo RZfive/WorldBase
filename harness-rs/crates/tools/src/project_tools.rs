@@ -115,6 +115,122 @@ const AI_MANIFEST_PATH: &str = ".worldbase/app-capabilities.json";
 const AI_INTEGRATION_DOC_PATH: &str = "AI_INTEGRATION.md";
 const AI_CONTRACT_TEST_PATH: &str = "tests/capability_contract/example.test.mjs";
 
+fn ai_application_status(root: &Path) -> Value {
+    let manifest_path = root.join(AI_MANIFEST_PATH);
+    if !manifest_path.is_file() {
+        return json!({
+            "status": "upgrade_available",
+            "manifestPath": AI_MANIFEST_PATH,
+            "errors": [],
+            "recommendedAction": "upgrade_project",
+        });
+    }
+
+    match worldbase_project_runtime::load_manifest(root) {
+        Ok(Some(manifest)) => {
+            let capability_ids = manifest
+                .capabilities
+                .iter()
+                .map(|capability| capability.id.clone())
+                .collect::<Vec<_>>();
+            let capability_details = manifest
+                .capabilities
+                .iter()
+                .map(|capability| {
+                    json!({
+                        "id": capability.id,
+                        "title": capability.title,
+                        "description": capability.description,
+                        "risk": capability.risk,
+                        "permissions": capability.permissions,
+                        "dataScopes": capability.data_scopes,
+                        "sideEffects": capability.side_effects,
+                        "idempotent": capability.idempotent,
+                        "deadlineMs": capability.deadline_ms,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let ai_ready =
+                manifest.ai_integration.as_deref() != Some("none") && !capability_ids.is_empty();
+            json!({
+                "status": if ai_ready { "ready" } else { "disabled" },
+                "manifestPath": AI_MANIFEST_PATH,
+                "appId": manifest.app.id,
+                "capabilities": capability_ids,
+                "capabilityDetails": capability_details,
+                "errors": [],
+                "recommendedAction": if ai_ready { "none" } else { "review_ai_integration" },
+            })
+        }
+        Ok(None) => json!({
+            "status": "upgrade_available",
+            "manifestPath": AI_MANIFEST_PATH,
+            "errors": [],
+            "recommendedAction": "upgrade_project",
+        }),
+        Err(error) => json!({
+            "status": "invalid",
+            "manifestPath": AI_MANIFEST_PATH,
+            "errors": [format!("{error:#}")],
+            "recommendedAction": "upgrade_project",
+        }),
+    }
+}
+
+/// Repair well-known legacy capability-risk values in place. Custom fields,
+/// capability IDs and operation names are preserved; unknown values still fail
+/// strict manifest validation and are surfaced to the model.
+fn repair_legacy_capability_risks(root: &Path, dry_run: bool) -> Result<Vec<String>> {
+    let manifest_path = root.join(AI_MANIFEST_PATH);
+    if !manifest_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let mut manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(&manifest_path)
+            .map_err(|error| anyhow::anyhow!("read {AI_MANIFEST_PATH}: {error}"))?,
+    )
+    .map_err(|error| anyhow::anyhow!("parse {AI_MANIFEST_PATH}: {error}"))?;
+    let mut repairs = Vec::new();
+    if let Some(capabilities) = manifest
+        .get_mut("capabilities")
+        .and_then(Value::as_array_mut)
+    {
+        for capability in capabilities {
+            let Some(record) = capability.as_object_mut() else {
+                continue;
+            };
+            let Some(current) = record
+                .get("risk")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+            else {
+                continue;
+            };
+            let normalized = match current.as_str() {
+                "write" | "writeReversible" => "write_reversible",
+                "destructive" | "delete" | "writeDestructive" => "write_destructive",
+                "external" | "externalEffect" => "external_effect",
+                _ => continue,
+            };
+            let capability_id = record
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>")
+                .to_string();
+            record.insert("risk".into(), Value::String(normalized.into()));
+            repairs.push(format!("{capability_id}: risk {current} -> {normalized}"));
+        }
+    }
+    if !repairs.is_empty() && !dry_run {
+        std::fs::write(
+            &manifest_path,
+            format!("{}\n", serde_json::to_string_pretty(&manifest)?),
+        )
+        .map_err(|error| anyhow::anyhow!("write {AI_MANIFEST_PATH}: {error}"))?;
+    }
+    Ok(repairs)
+}
+
 fn ai_integration_enabled(input: &Value) -> Result<bool> {
     match input.get("ai_integration") {
         None | Some(Value::Null) => Ok(true),
@@ -755,7 +871,7 @@ fn metadata_project_value(services: &ToolServices, project_id: &str) -> Value {
 
 /// Describe the WorldBase local application a scaffold plan produces. This is
 /// pure information: nothing is started, registered, or health-checked here.
-fn application_info(project_id: &str, plan_meta: &Value, manifest_exists: bool) -> Value {
+fn application_info(project_id: &str, plan_meta: &Value, ai_status: &Value) -> Value {
     let ai_integration = plan_meta.get("aiIntegration");
     let ai_enabled = ai_integration
         .and_then(|value| value.get("enabled"))
@@ -772,11 +888,28 @@ fn application_info(project_id: &str, plan_meta: &Value, manifest_exists: bool) 
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let status = ai_status
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("upgrade_available");
+    let actual_capabilities = ai_status
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| capabilities.into_iter().map(Value::String).collect());
     json!({
-        "appId": format!("worldbase.local.{project_id}"),
-        "registered": manifest_exists,
-        "enabled": manifest_exists && ai_enabled,
-        "capabilities": capabilities,
+        "appId": ai_status
+            .get("appId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("worldbase.local.{project_id}")),
+        "status": status,
+        "registered": matches!(status, "ready" | "disabled"),
+        "enabled": status == "ready" && ai_enabled,
+        "capabilities": actual_capabilities,
+        "manifestPath": ai_status.get("manifestPath").cloned().unwrap_or_else(|| json!(AI_MANIFEST_PATH)),
+        "errors": ai_status.get("errors").cloned().unwrap_or_else(|| json!([])),
+        "recommendedAction": ai_status.get("recommendedAction").cloned().unwrap_or_else(|| json!("none")),
     })
 }
 
@@ -1032,13 +1165,10 @@ impl Tool for ProjectCreateTool {
         let project = metadata_project_value(services, &project_id);
         let root = services.projects.project_root(&project_id)?;
         write_scaffold_files(&root, &ai_files)?;
-        let application = scaffold_meta.as_ref().map(|plan_meta| {
-            application_info(
-                &project_id,
-                plan_meta,
-                root.join(AI_MANIFEST_PATH).is_file(),
-            )
-        });
+        let ai_status = ai_application_status(&root);
+        let application = scaffold_meta
+            .as_ref()
+            .map(|plan_meta| application_info(&project_id, plan_meta, &ai_status));
 
         // Electron initializes declared SQLite tables before any lifecycle
         // work.  The Rust control plane owns that same schema operation.
@@ -1530,15 +1660,16 @@ impl Tool for ProjectUpgradeTool {
     }
 
     fn description(&self) -> &str {
-        "Upgrade an existing project with the deterministic application scaffold. Creates only files that are missing; existing file content is never overwritten, and metadata/SQLite columns are extended additively."
+        "Make an existing managed project AI-usable by repairing legacy AI capability manifests and adding missing application-scaffold files. Existing project files are never overwritten; the result reports manifest validation errors and authoritative AI readiness."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "project_id": { "type": "string", "description": "Project ID to upgrade" },
+                "project_id": { "type": "string", "description": "Existing project ID to make AI-capable or upgrade" },
                 "dry_run": { "type": "boolean", "description": "When true, report the files that would be created without writing anything. Defaults to false." },
+                "ai_only": { "type": "boolean", "description": "Only repair, validate, and enable AI capability integration. Do not generate or modify business/CRUD scaffold files. Use this when the user asks to make an existing app usable by AI." },
                 "template": { "type": "string", "enum": ["next-crud", "next-dashboard", "node-api", "blank"], "description": "Override the template. Defaults to the project's recorded template or next-crud." },
                 "features": { "type": "array", "items": { "type": "string" }, "description": "Override the feature list for the generated app." }
             },
@@ -1568,10 +1699,34 @@ impl Tool for ProjectUpgradeTool {
             .get("dry_run")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let ai_only = input
+            .get("ai_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let root = services.projects.project_root(&project_id)?;
         let meta = services.projects.project_meta(&project_id)?;
         let plan_input = upgrade_scaffold_input(&project_id, &meta, &input)?;
         let scaffold_plan = worldbase_scaffold::plan(&plan_input)?;
+        let manifest_repairs = repair_legacy_capability_risks(&root, dry_run)?;
+
+        if ai_only {
+            let ai_status = ai_application_status(&root);
+            let application = application_info(&project_id, &scaffold_plan.meta, &ai_status);
+            let ai_ready = ai_status.get("status").and_then(Value::as_str) == Some("ready");
+            return Ok(json!({
+                "success": dry_run || !plan_input.ai_integration || ai_ready,
+                "ready": ai_ready,
+                "projectId": project_id,
+                "dryRun": dry_run,
+                "mode": "ai_only",
+                "created": [],
+                "skipped": [],
+                "manifestRepairs": manifest_repairs,
+                "warnings": scaffold_plan.warnings,
+                "application": application,
+                "aiApplication": ai_status,
+            }));
+        }
 
         let mut warnings = scaffold_plan.warnings.clone();
         if plan_input.entities.is_empty() {
@@ -1646,20 +1801,34 @@ impl Tool for ProjectUpgradeTool {
             }
         }
 
-        let application = application_info(
-            &project_id,
-            &scaffold_plan.meta,
-            root.join(AI_MANIFEST_PATH).is_file(),
-        );
+        let ai_status = ai_application_status(&root);
+        let application = application_info(&project_id, &scaffold_plan.meta, &ai_status);
+        let ai_ready = ai_status.get("status").and_then(Value::as_str) == Some("ready");
+        if plan_input.ai_integration && !dry_run && !ai_ready {
+            let errors = ai_status
+                .get("errors")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for error in errors {
+                if let Some(error) = error.as_str() {
+                    warnings.push(format!("AI application manifest is invalid: {error}"));
+                }
+            }
+        }
 
         Ok(json!({
-            "success": true,
+            "success": dry_run || !plan_input.ai_integration || ai_ready,
+            "ready": ai_ready,
             "projectId": project_id,
             "dryRun": dry_run,
+            "mode": "full",
             "created": created,
             "skipped": skipped,
+            "manifestRepairs": manifest_repairs,
             "warnings": warnings,
             "application": application,
+            "aiApplication": ai_status,
         }))
     }
 }
@@ -2192,7 +2361,7 @@ impl Tool for ProjectStatusTool {
     }
 
     fn description(&self) -> &str {
-        "Get the current project runtime status, port, PID, start time, dependency/build state, and the most recent structured runtime failure summary."
+        "Get the current project runtime status, port, PID, dependency/build state, AI application manifest readiness/errors, and the most recent structured runtime failure summary."
     }
 
     fn input_schema(&self) -> Value {
@@ -2295,6 +2464,18 @@ impl Tool for ProjectStatusTool {
         );
 
         let mut result = status.as_object().cloned().unwrap_or_default();
+        let ai_application = root
+            .as_deref()
+            .map(ai_application_status)
+            .unwrap_or_else(|| json!({"status": "unknown", "errors": []}));
+        result.insert("aiApplication".into(), ai_application.clone());
+        result.insert(
+            "recommended_ai_action".into(),
+            ai_application
+                .get("recommendedAction")
+                .cloned()
+                .unwrap_or_else(|| json!("none")),
+        );
         if let Some(framework) = framework {
             result.insert("framework".into(), json!(framework));
         }
