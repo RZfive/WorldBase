@@ -36,11 +36,13 @@ pub mod lightapp_tool;
 pub mod mcp_tools;
 pub mod memory_tools;
 pub mod project_tools;
+pub mod recall_context;
 pub mod schedule_tools;
 pub mod search_tools;
 pub mod skill_tools;
 pub mod subagent;
 pub mod todo;
+pub mod transcript_tools;
 pub mod web;
 pub mod work_file_guard;
 pub mod work_mode;
@@ -92,6 +94,7 @@ pub use project_tools::{
     ProjectListTool, ProjectRestartServerTool, ProjectStartServerTool, ProjectStatusTool,
     ProjectUpgradeTool,
 };
+pub use recall_context::RecallContextTool;
 pub use schedule_tools::{ScheduleCreateTool, ScheduleDeleteTool, ScheduleListTool};
 pub use search_tools::SearchToolsTool;
 pub use skill_tools::{SkillListTool, SkillRunTool};
@@ -100,6 +103,7 @@ pub use subagent::{
     SubagentTaskResult, SubagentTaskStatus, SubagentTokenUsage,
 };
 pub use todo::{TodoReadTool, TodoWriteTool};
+pub use transcript_tools::{ReadTranscriptRangeTool, SearchTranscriptTool};
 pub use web::{FetchWebpageTool, WebFetchTool, WebSearchTool};
 pub use worldbase_search::{glob as search_glob, grep as search_grep, GrepHit};
 
@@ -567,6 +571,9 @@ fn mobile_tool_supported(name: &str) -> bool {
                 | "memory_add"
                 | "memory_search"
                 | "memory_delete"
+                | "recall_context"
+                | "read_transcript_range"
+                | "search_transcript"
                 | "skill_list"
                 | "skill_run"
                 | "list_skills"
@@ -713,6 +720,9 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(MemoryAddTool),
         Arc::new(MemorySearchTool),
         Arc::new(MemoryDeleteTool),
+        Arc::new(RecallContextTool),
+        Arc::new(ReadTranscriptRangeTool),
+        Arc::new(SearchTranscriptTool),
         Arc::new(SkillListTool),
         Arc::new(SkillRunTool),
         Arc::new(ScheduleCreateTool),
@@ -1199,11 +1209,14 @@ mod tests {
             "read_current_page",
             "read_document",
             "read_file",
+            "read_transcript_range",
+            "recall_context",
             "run_skill",
             "save_current_page_as_document",
             "schedule_create",
             "schedule_delete",
             "schedule_list",
+            "search_transcript",
             "search_tools",
             "skill_list",
             "skill_run",

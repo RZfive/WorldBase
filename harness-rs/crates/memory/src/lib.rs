@@ -16,13 +16,19 @@ use worldbase_protocol::types::{
     WorkspaceMemoryEntry, WorkspaceMemorySearchOptions,
 };
 
+mod compaction_metrics;
+mod context_store;
 mod embedding;
 mod embedding_service;
 mod embedding_store;
 mod ingest;
 mod search;
+mod transcript_store;
 mod vector;
+pub use compaction_metrics::CompactionMetricRecord;
+pub use context_store::StoredCompactionCheckpoint;
 pub use search::{is_personal_memory_query, merge_memory_recall, personal_profile_category_terms};
+pub use transcript_store::TranscriptHit;
 
 pub use embedding::{
     EmbeddingProvider, FakeEmbeddingProvider, OpenAIEmbeddingProvider, EMBEDDING_PREPROCESS_VERSION,
@@ -442,6 +448,10 @@ impl Store {
                 "CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at DESC, id DESC);\n                 CREATE INDEX IF NOT EXISTS idx_images_folder ON images(folder);",
             )?;
         }
+
+        context_store::migrate_context_store(&conn)?;
+        transcript_store::migrate_transcript_store(&conn)?;
+
         let memory_path = memory_database_path(path);
         if let Some(dir) = memory_path.parent() {
             std::fs::create_dir_all(dir)
@@ -1677,10 +1687,17 @@ impl Store {
         })
     }
 
+    /// Return up to `limit` most recent messages in chronological order.
     pub fn list_messages(&self, conversation_id: &str, limit: u32) -> Result<Vec<ChatMessage>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT * FROM messages WHERE conversation_id = ?1 ORDER BY id ASC LIMIT ?2",
+            "SELECT * FROM (
+                SELECT * FROM messages
+                WHERE conversation_id = ?1
+                ORDER BY id DESC
+                LIMIT ?2
+             )
+             ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![conversation_id, limit], Self::row_to_message)?;
         let messages: Vec<_> = rows.filter_map(|r| r.ok()).collect();
@@ -3651,6 +3668,36 @@ mod tests {
         let msgs = store.list_messages(&conv.id, 100).unwrap();
         assert_eq!(msgs[1].tool_calls.len(), 1);
         assert_eq!(msgs[1].tool_results[0].content, "数据");
+    }
+
+    #[test]
+    fn list_messages_returns_the_most_recent_limit_in_chronological_order() {
+        let store = temp_store();
+        let conversation = store.create_conversation("recent", None).unwrap();
+        for index in 1..=5 {
+            store
+                .append_message(
+                    &conversation.id,
+                    &ChatMessage {
+                        id: 0,
+                        role: Role::User,
+                        content: format!("message-{index}"),
+                        parts: vec![],
+                        tool_calls: vec![],
+                        tool_results: vec![],
+                        created_at: None,
+                    },
+                )
+                .unwrap();
+        }
+
+        let messages = store.list_messages(&conversation.id, 3).unwrap();
+        let contents = messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(contents, vec!["message-3", "message-4", "message-5"]);
     }
 
     #[test]
