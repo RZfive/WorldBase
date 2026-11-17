@@ -48,6 +48,10 @@ pub struct ProjectRuntime {
     /// twice.
     gateway_health_check: tokio::sync::Mutex<()>,
     app_tokens: Mutex<HashMap<String, String>>,
+    /// Serialize app-token recovery. Parallel capability calls can observe the
+    /// same stale runtime; the first one restarts it while the others wait and
+    /// then retry against the replacement process.
+    app_token_recovery: tokio::sync::Mutex<()>,
     app_manifests: Mutex<HashMap<String, AppManifest>>,
     app_leases: Mutex<HashMap<String, RuntimeLease>>,
 }
@@ -1103,6 +1107,7 @@ impl ProjectRuntime {
             restart_counts: Mutex::new(Default::default()),
             gateway_health_check: tokio::sync::Mutex::new(()),
             app_tokens: Mutex::new(Default::default()),
+            app_token_recovery: tokio::sync::Mutex::new(()),
             app_manifests: Mutex::new(Default::default()),
             app_leases: Mutex::new(Default::default()),
         }
@@ -1683,14 +1688,18 @@ impl ProjectRuntime {
             launch.port,
             launch.node_env,
         )?;
-        if let Some(token) = self.app_token(project_id) {
-            let app_id = self
-                .app_manifest(project_id)
-                .ok()
-                .flatten()
-                .map(|manifest| manifest.app.id)
-                .filter(|app_id| !app_id.trim().is_empty())
-                .unwrap_or_else(|| project_id.to_string());
+        // App tokens are scoped to this ProjectRuntime instance. Issue one
+        // before every managed-app spawn, regardless of whether the caller is
+        // the capability bridge, the project lifecycle tools, or the UI.
+        // Otherwise a process started outside ensure_app_ready can run without
+        // WORLDBASE_APP_TOKEN and reject the host's first capability call.
+        if let Some(manifest) = self.app_manifest(project_id).ok().flatten() {
+            let token = self.ensure_app_token(project_id)?;
+            let app_id = if manifest.app.id.trim().is_empty() {
+                project_id.to_string()
+            } else {
+                manifest.app.id
+            };
             command
                 .env("WORLDBASE_APP_TOKEN", token)
                 .env("WORLDBASE_APP_ID", app_id);
@@ -2606,5 +2615,86 @@ mod tests {
         let body = reqwest::get(&info.url).await.unwrap().text().await.unwrap();
         assert_eq!(body, format!("runtime-project:{}", info.port));
         assert!(rt.stop_dev("runtime-project").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn managed_app_spawn_issues_token_and_recovers_token_rotation() {
+        if bundled_node().or_else(|| which("node")).is_none() {
+            return;
+        }
+
+        const TOKEN_AWARE_SERVER: &str = r#"
+const http = require('http');
+const token = process.env.WORLDBASE_APP_TOKEN;
+const appId = process.env.WORLDBASE_APP_ID;
+const server = http.createServer((req, res) => {
+  if (req.url === '/worldbase/capabilities/invoke' && req.method === 'POST') {
+    if (req.headers.authorization !== `Bearer ${token}`) {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ status: 'error', errorCode: 'permission_required', message: 'invalid app token' }));
+      return;
+    }
+    req.on('data', () => {});
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', data: { appId } }));
+    });
+    return;
+  }
+  res.writeHead(200, { 'content-type': 'text/plain' });
+  res.end('ok');
+});
+server.listen(Number(process.env.PORT), process.env.HOSTNAME);
+"#;
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = ProjectRuntime::new(dir.path().to_path_buf());
+        let project = dir.path().join("token-app");
+        tokio::fs::create_dir_all(project.join(".worldbase"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            project.join(".worldbase/app-capabilities.json"),
+            include_str!("../tests/fixtures/valid-manifest.json"),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(project.join("server.js"), TOKEN_AWARE_SERVER)
+            .await
+            .unwrap();
+
+        // This is the path used by start_project_server: it must issue and
+        // inject a token even when nobody has invoked the capability bridge yet.
+        rt.start_dev("token-app").await.unwrap();
+        assert!(rt.app_token("token-app").is_some());
+
+        let ctx = worldbase_protocol::types::CallContext::default();
+        let first = rt
+            .invoke_app_capability("token-app", "tasks.health", json!({}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(first.status, "ok");
+        let first_pid = rt.status("token-app").await.unwrap()["pid"]
+            .as_u64()
+            .unwrap();
+
+        // Simulate an app-server restart: the process keeps the old token while
+        // the new runtime instance has a different token in memory.
+        let replacement = uuid::Uuid::new_v4().simple().to_string();
+        rt.app_tokens
+            .lock()
+            .unwrap()
+            .insert("token-app".into(), replacement);
+
+        let second = rt
+            .invoke_app_capability("token-app", "tasks.health", json!({}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(second.status, "ok");
+        let replacement_pid = rt.status("token-app").await.unwrap()["pid"]
+            .as_u64()
+            .unwrap();
+        assert_ne!(replacement_pid, first_pid);
+        assert!(rt.stop_dev("token-app").await.unwrap());
     }
 }

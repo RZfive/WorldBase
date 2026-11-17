@@ -40,6 +40,28 @@ fn invocation_timeout_ms(ctx: &CallContext) -> u64 {
     }
 }
 
+fn is_app_token_rejection(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("invalid app token") || message.contains("app rpc authentication was rejected")
+}
+
+fn app_runtime_pid(status: &Value) -> Option<u64> {
+    status.get("pid").and_then(Value::as_u64)
+}
+
+fn app_runtime_port(status: &Value) -> Result<u16> {
+    status
+        .get("port")
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| {
+            anyhow!(
+                "{}: app runtime port is unavailable",
+                error_code::APP_START_FAILED
+            )
+        })
+}
+
 pub async fn invoke_at(
     port: u16,
     token: &str,
@@ -311,6 +333,35 @@ impl ProjectRuntime {
             .cloned()
     }
 
+    /// Restart a running managed app once after its RPC layer rejects the
+    /// current token. A stale process can outlive this ProjectRuntime instance
+    /// (for example across an app-server restart), so repairing only the token
+    /// map is insufficient: the process must be respawned with the current
+    /// token in its environment.
+    ///
+    /// The recovery lock and PID check make parallel capability calls converge
+    /// on one restart. Callers that lose the race observe a changed PID and
+    /// retry against the already-replaced process instead of restarting again.
+    async fn restart_app_runtime_after_token_rejection(
+        &self,
+        project_id: &str,
+        failed_pid: Option<u64>,
+    ) -> Result<bool> {
+        let _guard = self.app_token_recovery.lock().await;
+        let status = self.status(project_id).await?;
+        let current_pid = app_runtime_pid(&status);
+        if failed_pid.is_some() && current_pid.is_some() && current_pid != failed_pid {
+            return Ok(false);
+        }
+
+        self.ensure_app_token(project_id)?;
+        let _ = self.stop_dev(project_id).await?;
+        self.start_dev(project_id)
+            .await
+            .map_err(|error| anyhow!("{}: {error}", error_code::APP_START_FAILED))?;
+        Ok(true)
+    }
+
     pub async fn app_health(&self, project_id: &str) -> Result<AppHealth> {
         let checked_at = Some(worldbase_protocol::event::now_rfc3339());
         let manifest = match self.app_manifest(project_id) {
@@ -345,11 +396,7 @@ impl ProjectRuntime {
                     });
                 };
                 let token = self.ensure_app_token(project_id)?;
-                let Some(port) = status
-                    .get("port")
-                    .and_then(Value::as_u64)
-                    .and_then(|port| u16::try_from(port).ok())
-                else {
+                let Ok(port) = app_runtime_port(&status) else {
                     return Ok(AppHealth {
                         status: "failed".into(),
                         detail: Some("app runtime port is missing".into()),
@@ -430,6 +477,7 @@ impl ProjectRuntime {
 
         let started_at = tokio::time::Instant::now();
         let mut start_attempted = false;
+        let mut token_recovery_attempted = false;
         loop {
             let status = self.status(project_id).await?;
             let state = status
@@ -441,13 +489,21 @@ impl ProjectRuntime {
                     let health = self.app_health(project_id).await?;
                     match health.status.as_str() {
                         "ready" => break,
-                        "failed" => bail!(
-                            "{}: {}",
-                            error_code::APP_UNHEALTHY,
-                            health
+                        "failed" => {
+                            let detail = health
                                 .detail
-                                .unwrap_or_else(|| "app health check failed".into())
-                        ),
+                                .unwrap_or_else(|| "app health check failed".into());
+                            if !token_recovery_attempted && is_app_token_rejection(&detail) {
+                                token_recovery_attempted = true;
+                                self.restart_app_runtime_after_token_rejection(
+                                    project_id,
+                                    app_runtime_pid(&status),
+                                )
+                                .await?;
+                                continue;
+                            }
+                            bail!("{}: {}", error_code::APP_UNHEALTHY, detail);
+                        }
                         _ => {}
                     }
                 }
@@ -512,20 +568,33 @@ impl ProjectRuntime {
                 manifest.app.id
             );
         }
-        let token = self.ensure_app_token(project_id)?;
+        let mut token = self.ensure_app_token(project_id)?;
         self.ensure_app_ready(project_id).await?;
-        let status = self.status(project_id).await?;
-        let port = status
-            .get("port")
-            .and_then(Value::as_u64)
-            .and_then(|port| u16::try_from(port).ok())
-            .ok_or_else(|| {
-                anyhow!(
-                    "{}: app runtime port is unavailable",
-                    error_code::APP_START_FAILED
-                )
-            })?;
-        invoke_with_runtime(port, &token, &manifest, capability_id, input, ctx, true).await
+        let mut status = self.status(project_id).await?;
+        let mut port = app_runtime_port(&status)?;
+        let mut result = invoke_with_runtime(
+            port,
+            &token,
+            &manifest,
+            capability_id,
+            input.clone(),
+            ctx,
+            true,
+        )
+        .await;
+
+        if matches!(&result, Err(error) if is_app_token_rejection(&error.to_string())) {
+            self.restart_app_runtime_after_token_rejection(project_id, app_runtime_pid(&status))
+                .await?;
+            self.ensure_app_ready(project_id).await?;
+            token = self.ensure_app_token(project_id)?;
+            status = self.status(project_id).await?;
+            port = app_runtime_port(&status)?;
+            result =
+                invoke_with_runtime(port, &token, &manifest, capability_id, input, ctx, true).await;
+        }
+
+        result
     }
 
     pub async fn discover_app_manifest(&self, project_id: &str) -> Result<Option<AppManifest>> {
