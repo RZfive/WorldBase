@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use worldbase_protocol::types::ToolDescriptor;
 
+pub mod application;
+pub mod catalog;
 pub mod coding_apply;
 pub mod coding_diagnose;
 pub mod coding_edit;
@@ -34,14 +36,22 @@ pub mod lightapp_tool;
 pub mod mcp_tools;
 pub mod memory_tools;
 pub mod project_tools;
+pub mod recall_context;
 pub mod schedule_tools;
+pub mod search_tools;
 pub mod skill_tools;
 pub mod subagent;
 pub mod todo;
+pub mod transcript_tools;
 pub mod web;
 pub mod work_file_guard;
 pub mod work_mode;
 
+pub use application::{
+    ApplicationCapabilityProvider, CapabilityTool, ElectronHostCapabilityProvider,
+    ManagedAppCapabilityProvider, McpCapabilityProvider, NativeToolCapabilityProvider,
+};
+pub use catalog::ToolCatalogRuntime;
 pub use command::ExecuteCommandTool;
 pub use compat_tools::{
     AnalyzeProjectDataTool, CallProjectApiTool, ClearProjectBuildFlagTool, CreateAgentGroupTool,
@@ -82,14 +92,18 @@ pub use memory_tools::{MemoryAddTool, MemoryDeleteTool, MemorySearchTool};
 pub use project_tools::{
     ProjectCreateTool, ProjectDevRestartTool, ProjectDevStartTool, ProjectDevStopTool,
     ProjectListTool, ProjectRestartServerTool, ProjectStartServerTool, ProjectStatusTool,
+    ProjectUpgradeTool,
 };
+pub use recall_context::RecallContextTool;
 pub use schedule_tools::{ScheduleCreateTool, ScheduleDeleteTool, ScheduleListTool};
+pub use search_tools::SearchToolsTool;
 pub use skill_tools::{SkillListTool, SkillRunTool};
 pub use subagent::{
     SubagentRunRequest, SubagentRunResponse, SubagentRuntime, SubagentTaskRequest,
     SubagentTaskResult, SubagentTaskStatus, SubagentTokenUsage,
 };
 pub use todo::{TodoReadTool, TodoWriteTool};
+pub use transcript_tools::{ReadTranscriptRangeTool, SearchTranscriptTool};
 pub use web::{FetchWebpageTool, WebFetchTool, WebSearchTool};
 pub use worldbase_search::{glob as search_glob, grep as search_grep, GrepHit};
 
@@ -130,6 +144,12 @@ pub struct ToolServices {
     /// platform before an Agent-specific allow/deny policy is applied.
     /// Agent Workspace uses it to avoid offering Electron-only tools on mobile.
     pub visible_tool_catalog: Option<Arc<Vec<ToolDescriptor>>>,
+    /// Run-scoped catalog used by `search_tools` to discover and atomically
+    /// activate application/MCP/skill capabilities.
+    pub catalog_runtime: Option<Arc<dyn crate::catalog::ToolCatalogRuntime>>,
+    /// Conversation that owns this tool call. Direct `tool.call` requests have
+    /// no conversation and leave it unset.
+    pub conversation_id: Option<String>,
     pub store: Arc<worldbase_memory::Store>,
     /// Shared memory embedding queue. Present in chat runs; test fixtures may
     /// leave it unset. Enables semantic (vector) recall in memory_search.
@@ -326,6 +346,24 @@ pub trait Tool: Send + Sync {
     fn electron_native(&self) -> bool {
         false
     }
+    /// Always-on tools enter every model request; discoverable tools only
+    /// enter after `search_tools` activates them for this run.
+    fn visibility(&self) -> worldbase_protocol::types::ToolVisibility {
+        worldbase_protocol::types::ToolVisibility::AlwaysOn
+    }
+    /// `builtin`, `mcp:<server>`, `skill:<name>`, `app:<app_id>`.
+    fn source(&self) -> Option<&str> {
+        None
+    }
+    fn tags(&self) -> &[String] {
+        &[]
+    }
+    fn risk(&self) -> Option<worldbase_protocol::types::CapabilityRisk> {
+        None
+    }
+    fn output_schema(&self) -> Option<Value> {
+        None
+    }
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value>;
 }
 
@@ -379,6 +417,26 @@ impl Tool for AliasTool {
         self.inner.electron_native()
     }
 
+    fn visibility(&self) -> worldbase_protocol::types::ToolVisibility {
+        self.inner.visibility()
+    }
+
+    fn source(&self) -> Option<&str> {
+        self.inner.source()
+    }
+
+    fn tags(&self) -> &[String] {
+        self.inner.tags()
+    }
+
+    fn risk(&self) -> Option<worldbase_protocol::types::CapabilityRisk> {
+        self.inner.risk()
+    }
+
+    fn output_schema(&self) -> Option<Value> {
+        self.inner.output_schema()
+    }
+
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         self.inner.execute(input, services).await
     }
@@ -393,6 +451,14 @@ impl dyn Tool {
             domain: self.domain().to_string(),
             permission: self.permission().to_string(),
             electron_native: self.electron_native(),
+            visibility: self.visibility(),
+            source: self.source().map(ToOwned::to_owned),
+            app_id: None,
+            capability_id: None,
+            risk: self.risk(),
+            tags: self.tags().to_vec(),
+            output_schema: self.output_schema(),
+            manifest_hash: None,
         }
     }
 }
@@ -443,6 +509,26 @@ impl Tool for MobileInstallMcpServerTool {
         self.inner.electron_native()
     }
 
+    fn visibility(&self) -> worldbase_protocol::types::ToolVisibility {
+        self.inner.visibility()
+    }
+
+    fn source(&self) -> Option<&str> {
+        self.inner.source()
+    }
+
+    fn tags(&self) -> &[String] {
+        self.inner.tags()
+    }
+
+    fn risk(&self) -> Option<worldbase_protocol::types::CapabilityRisk> {
+        self.inner.risk()
+    }
+
+    fn output_schema(&self) -> Option<Value> {
+        self.inner.output_schema()
+    }
+
     async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
         ensure_mobile_mcp_transport(&input)?;
         self.inner.execute(input, services).await
@@ -463,9 +549,11 @@ fn ensure_mobile_mcp_transport(input: &Value) -> Result<()> {
 /// compatibility tools do not silently leak into the mobile model contract.
 fn mobile_tool_supported(name: &str) -> bool {
     name.starts_with("mcp__")
+        || name.starts_with("app__")
         || matches!(
             name,
-            "read_file"
+            "search_tools"
+                | "read_file"
                 | "write_file"
                 | "edit_file"
                 | "list_dir"
@@ -483,6 +571,9 @@ fn mobile_tool_supported(name: &str) -> bool {
                 | "memory_add"
                 | "memory_search"
                 | "memory_delete"
+                | "recall_context"
+                | "read_transcript_range"
+                | "search_transcript"
                 | "skill_list"
                 | "skill_run"
                 | "list_skills"
@@ -601,6 +692,7 @@ pub(crate) use arg_str as require_str;
 /// 注册全部内置工具。
 pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(SearchToolsTool),
         Arc::new(ReadFileTool),
         Arc::new(WriteFileTool),
         Arc::new(EditFileTool),
@@ -628,6 +720,9 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(MemoryAddTool),
         Arc::new(MemorySearchTool),
         Arc::new(MemoryDeleteTool),
+        Arc::new(RecallContextTool),
+        Arc::new(ReadTranscriptRangeTool),
+        Arc::new(SearchTranscriptTool),
         Arc::new(SkillListTool),
         Arc::new(SkillRunTool),
         Arc::new(ScheduleCreateTool),
@@ -649,6 +744,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(ComputerActionTool),
         Arc::new(ProjectListTool),
         Arc::new(ProjectCreateTool),
+        Arc::new(ProjectUpgradeTool),
         Arc::new(ProjectStartServerTool),
         Arc::new(ProjectRestartServerTool),
         Arc::new(ProjectDevStartTool),
@@ -1113,11 +1209,15 @@ mod tests {
             "read_current_page",
             "read_document",
             "read_file",
+            "read_transcript_range",
+            "recall_context",
             "run_skill",
             "save_current_page_as_document",
             "schedule_create",
             "schedule_delete",
             "schedule_list",
+            "search_transcript",
+            "search_tools",
             "skill_list",
             "skill_run",
             "spawn_subagents",
@@ -1304,6 +1404,8 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store,
             memory_queue: None,
             memory_scopes: Vec::new(),
@@ -1350,6 +1452,8 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store,
             memory_queue: None,
             memory_scopes: Vec::new(),

@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { useI18n } from "vue-i18n";
 import { resolveProjectIcon } from "../../utils/project-icon";
 import { normalizeWebUrlInput } from "../../utils/web-app";
+import { watchSystemThemeChange } from "../../utils/theme";
 import type {
   BrowserAutomationAction,
   BrowserAutomationArticle,
@@ -1553,6 +1554,7 @@ async function recoverPageHostAfterScreenshotTimeout(): Promise<void> {
           "Recovered page readiness",
         );
         if (!webview.isLoading?.() && (readyState === "interactive" || readyState === "complete")) {
+          void syncPageThemeToGuest(webview);
           syncFromWebview();
           emitStateChange();
           return;
@@ -2300,6 +2302,44 @@ function applyBackgroundHostMediaPolicy(webview: WebviewLikeElement): void {
   try {
     webview.setAudioMuted?.(true);
   } catch {}
+}
+
+function resolveHostColorScheme(): "light" | "dark" {
+  const appliedTheme = document.documentElement.dataset.theme;
+  if (appliedTheme === "light" || appliedTheme === "dark") return appliedTheme;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+let lastAppliedPageThemeKey = "";
+
+async function syncPageThemeToGuest(webview = webviewRef.value): Promise<void> {
+  if (!webview || typeof webview.getWebContentsId !== "function") return;
+
+  let webContentsId: number;
+  try {
+    webContentsId = webview.getWebContentsId();
+  } catch {
+    return;
+  }
+  if (!webContentsId) return;
+
+  const colorScheme = resolveHostColorScheme();
+  const themeKey = `${webContentsId}:${colorScheme}`;
+  if (themeKey === lastAppliedPageThemeKey) return;
+  lastAppliedPageThemeKey = themeKey;
+
+  try {
+    await window.electronAPI?.setBrowserPageTheme?.({
+      webContentsId,
+      colorScheme,
+      // Chromium auto-dark is the fallback for sites that only ship a light
+      // theme. Sites with native dark styles still use prefers-color-scheme.
+      autoDarkMode: colorScheme === "dark",
+    });
+  } catch (error) {
+    if (lastAppliedPageThemeKey === themeKey) lastAppliedPageThemeKey = "";
+    console.warn("[browser-webview] failed to sync page theme", { appId: props.appId, error });
+  }
 }
 
 function focusWebviewForInput(webview: WebviewLikeElement): void {
@@ -3747,6 +3787,7 @@ function attachWebviewListeners() {
 
   const handleDomReady = () => {
     applyBackgroundHostMediaPolicy(webview);
+    void syncPageThemeToGuest(webview);
     void installDiagnosticsHooks();
   };
 
@@ -3897,6 +3938,8 @@ function attachWebviewListeners() {
 }
 
 let detachListeners: (() => void) | null = null;
+let hostThemeObserver: MutationObserver | null = null;
+let stopSystemThemeWatcher: (() => void) | null = null;
 
 watch(
   () => props.url,
@@ -3943,8 +3986,19 @@ onMounted(async () => {
   browserPageContextMenuCleanup = window.electronAPI?.onBrowserPageContextMenu?.((payload) => {
     void handleBrowserPageContextMenu(payload);
   }) || null;
+  hostThemeObserver = new MutationObserver(() => {
+    void syncPageThemeToGuest();
+  });
+  hostThemeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-theme"],
+  });
+  stopSystemThemeWatcher = watchSystemThemeChange(() => {
+    void syncPageThemeToGuest();
+  });
   await nextTick();
   detachListeners = attachWebviewListeners();
+  void syncPageThemeToGuest();
   emitStateChange();
 });
 
@@ -3953,6 +4007,10 @@ onUnmounted(() => {
   window.removeEventListener("blur", hideAllContextMenus);
   browserPageContextMenuCleanup?.();
   browserPageContextMenuCleanup = null;
+  hostThemeObserver?.disconnect();
+  hostThemeObserver = null;
+  stopSystemThemeWatcher?.();
+  stopSystemThemeWatcher = null;
   hideAddressContextMenu();
   hidePageContextMenu();
   detachListeners?.();
@@ -4088,7 +4146,7 @@ onUnmounted(() => {
   flex-direction: column;
   width: 100%;
   height: 100%;
-  background: #fff;
+  background: var(--app-main-surface);
 }
 
 .browser-view-bar {
@@ -4098,11 +4156,11 @@ onUnmounted(() => {
   align-items: center;
   gap: 12px;
   flex-shrink: 0;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  border-bottom: 1px solid var(--app-border);
   background: linear-gradient(
     180deg,
-    rgba(248, 250, 252, 0.98),
-    rgba(241, 245, 249, 0.98)
+    color-mix(in srgb, var(--app-panel) 96%, transparent),
+    var(--app-panel)
   );
 }
 
@@ -4113,7 +4171,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--app-input-bg);
   overflow: hidden;
   flex-shrink: 0;
 }
@@ -4148,7 +4206,7 @@ onUnmounted(() => {
 .browser-view-title {
   flex: 0 1 auto;
   max-width: 34%;
-  color: #0f172a;
+  color: var(--app-text-strong);
   font-size: 0.88rem;
   font-weight: 600;
 }
@@ -4164,19 +4222,19 @@ onUnmounted(() => {
   min-width: 0;
   height: 30px;
   padding: 0 10px;
-  border: 1px solid rgba(148, 163, 184, 0.36);
+  border: 1px solid var(--app-input-border);
   border-radius: 8px;
   outline: none;
-  background: rgba(255, 255, 255, 0.92);
-  color: #475569;
+  background: var(--app-input-bg);
+  color: var(--app-text-soft);
   font-size: 0.78rem;
   line-height: 30px;
 }
 
 .browser-view-url-input:focus {
-  border-color: rgba(37, 99, 235, 0.55);
-  background: #fff;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+  border-color: color-mix(in srgb, var(--app-accent) 68%, transparent);
+  background: var(--app-input-bg);
+  box-shadow: 0 0 0 3px var(--app-accent-soft);
 }
 
 .browser-address-context-menu {
@@ -4184,10 +4242,10 @@ onUnmounted(() => {
   z-index: 5000;
   min-width: 120px;
   padding: 4px;
-  border: 1px solid rgba(148, 163, 184, 0.32);
+  border: 1px solid var(--app-border-strong);
   border-radius: 10px;
-  background: #ffffff;
-  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.18);
+  background: var(--app-panel-strong);
+  box-shadow: var(--shadow-2);
 }
 
 .browser-address-context-action {
@@ -4197,14 +4255,14 @@ onUnmounted(() => {
   border: none;
   border-radius: 7px;
   background: transparent;
-  color: #0f172a;
+  color: var(--app-text-strong);
   font-size: 0.84rem;
   cursor: pointer;
   text-align: left;
 }
 
 .browser-address-context-action:hover {
-  background: rgba(241, 245, 249, 0.95);
+  background: var(--app-panel-muted);
 }
 
 .browser-page-context-menu {
@@ -4212,16 +4270,16 @@ onUnmounted(() => {
   z-index: 5000;
   min-width: 120px;
   padding: 4px;
-  border: 1px solid rgba(148, 163, 184, 0.32);
+  border: 1px solid var(--app-border-strong);
   border-radius: 10px;
-  background: #ffffff;
-  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.18);
+  background: var(--app-panel-strong);
+  box-shadow: var(--shadow-2);
 }
 
 .browser-page-context-divider {
   height: 1px;
   margin: 4px 8px;
-  background: rgba(148, 163, 184, 0.28);
+  background: var(--app-border-strong);
 }
 
 .browser-view-stage {
@@ -4232,6 +4290,7 @@ onUnmounted(() => {
   align-items: flex-start;
   justify-content: center;
   overflow: auto;
+  background: var(--app-main-surface);
 }
 
 .browser-view-webview {
@@ -4239,5 +4298,6 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   border: none;
+  background: var(--app-main-surface);
 }
 </style>

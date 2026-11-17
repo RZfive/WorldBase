@@ -108,7 +108,11 @@ static SYNC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn content_hash_of(text: &str) -> String {
     let digest = Sha256::digest(text.as_bytes());
-    digest.iter().take(16).map(|byte| format!("{byte:02x}")).collect()
+    digest
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub(crate) fn document_id_for(source_type: &str, source_id: &str) -> String {
@@ -182,7 +186,16 @@ impl Store {
                 "SELECT id, content_hash, active_generation_id, status, scope_type, scope_id
                  FROM embedding_documents WHERE source_type = ?1 AND source_id = ?2",
                 params![source_type, source_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .ok();
 
@@ -204,7 +217,9 @@ impl Store {
                 .ok()
             });
 
-        if let Some((_, existing_hash, active_generation, status, old_scope_type, old_scope_id)) = &existing {
+        if let Some((_, existing_hash, active_generation, status, old_scope_type, old_scope_id)) =
+            &existing
+        {
             if *existing_hash == hash
                 && status == "indexed"
                 && old_scope_type == scope_type
@@ -248,7 +263,9 @@ impl Store {
                 scope_id,
                 embedding_text,
                 hash,
-                existing.as_ref().and_then(|(_, _, active, _, _, _)| active.clone()),
+                existing
+                    .as_ref()
+                    .and_then(|(_, _, active, _, _, _)| active.clone()),
                 now,
                 now
             ],
@@ -271,11 +288,7 @@ impl Store {
     /// 记录一条审计事件（design §5.1 `memory_events`）。
     pub fn record_memory_event(&self, event_type: &str, entry_id: Option<&str>, detail_json: &str) {
         let sequence = SYNC_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let id = format!(
-            "evt_{}{:x}",
-            now_iso(),
-            sequence
-        );
+        let id = format!("evt_{}{:x}", now_iso(), sequence);
         let _ = self.memory_conn.lock().unwrap().execute(
             "INSERT INTO memory_events (id, entry_id, event_type, detail_json, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -338,8 +351,8 @@ impl Store {
 
     pub fn list_embedding_generations(&self) -> Result<Vec<EmbeddingGenerationRow>> {
         let conn = self.memory_conn.lock().unwrap();
-        let mut statement = conn
-            .prepare("SELECT * FROM embedding_generations ORDER BY created_at DESC")?;
+        let mut statement =
+            conn.prepare("SELECT * FROM embedding_generations ORDER BY created_at DESC")?;
         let rows = statement.query_map([], row_to_generation)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -520,7 +533,13 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        Ok(rows.into_iter().map(|mut job| { job.status = "running".into(); job }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|mut job| {
+                job.status = "running".into();
+                job
+            })
+            .collect())
     }
 
     pub fn update_embedding_job_status(
@@ -535,7 +554,14 @@ impl Store {
             "UPDATE embedding_jobs
              SET status = ?2, attempts = ?3, next_retry_at = ?4, error_message = ?5, updated_at = ?6
              WHERE id = ?1",
-            params![id, status, attempts, next_retry_at, error_message, now_iso()],
+            params![
+                id,
+                status,
+                attempts,
+                next_retry_at,
+                error_message,
+                now_iso()
+            ],
         )?;
         Ok(())
     }
@@ -556,8 +582,7 @@ impl Store {
         let mut conn = self.memory_conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let documents: Vec<(String, String)> = {
-            let mut statement =
-                tx.prepare("SELECT id, status FROM embedding_documents")?;
+            let mut statement = tx.prepare("SELECT id, status FROM embedding_documents")?;
             let rows = statement
                 .query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -717,7 +742,11 @@ impl Store {
     /// 按需打开派生向量库。只有当向量文件已存在（某 generation 曾被创建）
     /// 时才会成功；没有 embedding 配置时绝不创建该文件。
     pub fn open_vector_index(&self) -> Option<super::vector::VectorIndex> {
-        if !self.memory_path.with_file_name("memory-vector.sqlite").exists() {
+        if !self
+            .memory_path
+            .with_file_name("memory-vector.sqlite")
+            .exists()
+        {
             return None;
         }
         super::vector::VectorIndex::open(&self.memory_path).ok()

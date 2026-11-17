@@ -1,0 +1,48 @@
+import { capabilities } from "./capabilities.mjs";
+
+export const MAX_INPUT_BYTES = 1024 * 1024;
+
+function fail(errorCode, message) {
+  return { status: "error", errorCode, message };
+}
+
+function byteLength(value) {
+  return new TextEncoder().encode(value).length;
+}
+
+export async function invokeCapability(request) {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    return fail("input_schema_invalid", "invoke request must be an object");
+  }
+  const capabilityId = request.capabilityId;
+  if (typeof capabilityId !== "string" || capabilityId.trim().length === 0) {
+    return fail("input_schema_invalid", "capabilityId is required");
+  }
+  const capability = capabilities[capabilityId];
+  if (!capability) {
+    return fail("capability_not_found", `unknown capability: ${capabilityId}`);
+  }
+  const input = request.input ?? {};
+  let serialized;
+  try {
+    serialized = JSON.stringify(input);
+  } catch {
+    return fail("input_schema_invalid", "input must be JSON serializable");
+  }
+  if (!serialized || byteLength(serialized) > MAX_INPUT_BYTES) {
+    return fail("input_schema_invalid", "input exceeds the 1 MiB limit");
+  }
+  if (
+    typeof request.deadline === "number" &&
+    request.deadline > 0 &&
+    Date.now() > request.deadline
+  ) {
+    return fail("operation_timeout", "deadline exceeded before invocation");
+  }
+  try {
+    return { status: "ok", data: await capability.invoke(input) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return fail("provider_unavailable", message);
+  }
+}

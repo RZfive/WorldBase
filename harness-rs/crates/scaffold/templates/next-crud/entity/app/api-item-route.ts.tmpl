@@ -1,0 +1,54 @@
+import { NextResponse } from 'next/server'
+import type { Update{{entity_pascal}}Input } from '@/shared/schema'
+import {
+  get{{entity_pascal}},
+  remove{{entity_pascal}},
+  update{{entity_pascal}}
+} from '@/domain/{{entity_name}}-service'
+
+export const dynamic = 'force-dynamic'
+
+interface {{entity_pascal}}RouteContext {
+  params: Promise<{ id: string }>
+}
+
+function errorResponse (error: unknown, status: number) {
+  return NextResponse.json(
+    { error: error instanceof Error ? error.message : String(error) },
+    { status }
+  )
+}
+
+export async function GET (_request: Request, context: {{entity_pascal}}RouteContext) {
+  try {
+    const { id } = await context.params
+    const item = await get{{entity_pascal}}(id)
+    if (!item) {
+      return NextResponse.json({ error: {{entity_title_ts}} + ' not found' }, { status: 404 })
+    }
+    return NextResponse.json(item)
+  } catch (error) {
+    return errorResponse(error, 500)
+  }
+}
+
+export async function PUT (request: Request, context: {{entity_pascal}}RouteContext) {
+  try {
+    const { id } = await context.params
+    const input = await request.json() as Update{{entity_pascal}}Input
+    const item = await update{{entity_pascal}}(id, input)
+    return NextResponse.json(item)
+  } catch (error) {
+    return errorResponse(error, 400)
+  }
+}
+
+export async function DELETE (_request: Request, context: {{entity_pascal}}RouteContext) {
+  try {
+    const { id } = await context.params
+    await remove{{entity_pascal}}(id)
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    return errorResponse(error, 400)
+  }
+}

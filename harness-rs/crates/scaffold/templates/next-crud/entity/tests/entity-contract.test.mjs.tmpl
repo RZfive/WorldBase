@@ -1,0 +1,43 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+
+function read (path) {
+  return readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
+}
+
+const domainFunctions = [
+  'list{{entity_plural_pascal}}',
+  'get{{entity_pascal}}',
+  'create{{entity_pascal}}',
+  'update{{entity_pascal}}',
+  'remove{{entity_pascal}}',
+  'search{{entity_plural_pascal}}'
+]
+
+test('{{entity_name}} domain service exposes the SPEC functions', () => {
+  const source = read('src/domain/{{entity_name}}-service.ts')
+  for (const name of domainFunctions) {
+    assert.match(source, new RegExp(`export async function ${name}\\s*\\(`), name)
+  }
+})
+
+test('{{entity_name}} repository exposes CRUD functions', () => {
+  const source = read('src/server/data/repositories/{{entity_name}}.ts')
+  for (const name of domainFunctions) {
+    assert.match(source, new RegExp(`export async function ${name}\\s*\\(`), name)
+  }
+})
+
+test('{{entity_name}} collection route exports GET and POST', () => {
+  const source = read('app/api/{{table_name}}/route.ts')
+  assert.match(source, /export async function GET\s*\(/)
+  assert.match(source, /export async function POST\s*\(/)
+})
+
+test('{{entity_name}} item route exports GET, PUT, and DELETE', () => {
+  const source = read('app/api/{{table_name}}/[id]/route.ts')
+  assert.match(source, /export async function GET\s*\(/)
+  assert.match(source, /export async function PUT\s*\(/)
+  assert.match(source, /export async function DELETE\s*\(/)
+})

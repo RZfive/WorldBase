@@ -8,6 +8,7 @@ import '../../core/glass.dart';
 import '../../core/ios_ui.dart';
 import '../../core/memory_compaction.dart';
 import '../../core/providers.dart';
+import 'application_catalog_page.dart';
 import 'daily_suggestions_page.dart';
 
 /// 我的 Tab：设置层级与 Electron 桌面端一致（降级项除外）：
@@ -86,6 +87,13 @@ class SettingsTab extends ConsumerWidget {
           IosSection(
             header: '扩展与连接',
             children: [
+              const SettingsEntry(
+                icon: CupertinoIcons.square_grid_2x2_fill,
+                iconColor: iosPurple,
+                title: '应用 / Applications',
+                subtitle: '应用目录 · 能力 · 信任与健康（只读）',
+                page: ApplicationCatalogPage(),
+              ),
               SettingsEntry(
                 icon: CupertinoIcons.cube_box_fill,
                 iconColor: iosPink,

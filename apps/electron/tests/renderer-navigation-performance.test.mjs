@@ -74,9 +74,24 @@ test('explicit grant opens settings once but never re-probes or mutates the star
 })
 
 const MessageList = await loadSetupComponent(new URL('../src/renderer/components/chat/messages/MessageList.vue', import.meta.url))
+const WorkspacePanel = await loadSetupComponent(new URL('../src/renderer/components/workspace/WorkspacePanel.vue', import.meta.url))
 const history = (prefix = 'chat', count = 40) => Array.from({ length: count }, (_, i) => ({ id: `${prefix}-${i}`, role: i % 2 ? 'assistant' : 'user', content: `Message ${i}` }))
 const props = (messages = history()) => ({ messages, isLoading: false, filePreview: { active: false } })
 const viewport = () => ({ clientHeight: 600, clientWidth: 1000, scrollTop: 0, scrollHeight: 100_000 })
+
+test('workspace panel setup can run its immediate visibility watcher without TDZ failures', async t => {
+  const fixture = rendererFixture(t)
+  const mounted = fixture.mount(WorkspacePanel, {
+    visible: true,
+    tabs: [],
+    activeTabId: null,
+    workspaceWidth: 980
+  })
+  await flush()
+  assert.equal(mounted.state.tabsCanScrollLeft, false)
+  assert.equal(mounted.state.tabsCanScrollRight, false)
+  assert.equal(mounted.state.tabContextMenu, null)
+})
 
 test('message list renders the complete selected conversation without virtual row ranges', async t => {
   const fixture = rendererFixture(t)

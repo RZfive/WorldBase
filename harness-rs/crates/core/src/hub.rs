@@ -1,6 +1,7 @@
 //! Hub：harness 全部服务的编排中心。一个进程一个 Hub；
 //! stdio / WS / in-process transport 共享同一实例与同一 dispatcher。
 
+use crate::application::ApplicationRegistry;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,9 +13,14 @@ use worldbase_protocol::event::StreamChannel;
 use worldbase_protocol::types::{Capabilities, ChatRunContext, ProviderConfig, ScheduleEntry};
 use worldbase_scheduler::Scheduler;
 use worldbase_skills::SkillRegistry;
-use worldbase_tools::{filter_tools, Tool, ToolServices};
+use worldbase_tools::{filter_tools, Tool, ToolCatalogRuntime, ToolServices};
 
 static TOOL_RESULT_CLEANUP_ONCE: std::sync::Once = std::sync::Once::new();
+
+/// Fixed tag the application scaffold writes into generated manifests. It is
+/// the marker that distinguishes a WorldBase-managed scaffold application from
+/// an arbitrary managed project.
+const SCAFFOLD_APPLICATION_TAG: &str = "worldbase.scaffold";
 
 /// 一次 chat 运行的句柄（用于 abort 与事件续传）。
 pub struct RunHandle {
@@ -70,6 +76,13 @@ pub struct Hub {
     /// 宿主反向请求挂起表（host.request → host.respond）。
     pub pending_host_requests:
         std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>,
+    /// Canonical application catalog (built-in, managed, MCP applications).
+    pub application_registry: Arc<ApplicationRegistry>,
+    /// stream_id → run-scoped catalog. Removed with the run.
+    pub run_tool_catalogs: std::sync::Mutex<HashMap<String, Arc<dyn ToolCatalogRuntime>>>,
+    /// run capability token → stream_id. The token only identifies the run
+    /// catalog; it does not grant any permission by itself.
+    pub run_tokens: std::sync::Mutex<HashMap<String, String>>,
 }
 
 struct PendingHostRequestGuard<'a> {
@@ -101,6 +114,19 @@ impl Hub {
         let skills = Arc::new(SkillRegistry::new(SkillRegistry::default_dirs(&workspace)));
         let scheduler = Arc::new(Scheduler::new(store.clone()));
         let memory_queue = worldbase_memory::MemoryEmbeddingQueue::new(store.clone());
+        let application_registry = ApplicationRegistry::new(store.clone());
+        let tools = worldbase_tools::builtin_tools();
+        application_registry.set_reserved_tool_names(
+            tools
+                .iter()
+                .map(|tool| tool.name().to_string())
+                .collect::<std::collections::HashSet<_>>(),
+        );
+        let host_provider: Arc<dyn worldbase_tools::ApplicationCapabilityProvider> = Arc::new(
+            worldbase_tools::ElectronHostCapabilityProvider::new("worldbase.host"),
+        );
+        application_registry.register_builtin_apps(&tools, host_provider);
+        application_registry.refresh_light_apps();
         let hub = Arc::new(Self {
             workspace: workspace.clone(),
             store,
@@ -115,7 +141,7 @@ impl Hub {
             projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(
                 workspace.clone(),
             )),
-            tools: worldbase_tools::builtin_tools(),
+            tools,
             streams: std::sync::Mutex::new(HashMap::new()),
             runs: std::sync::Mutex::new(HashMap::new()),
             pending_permissions: std::sync::Mutex::new(HashMap::new()),
@@ -123,8 +149,159 @@ impl Hub {
             event_tx,
             custom_provider: std::sync::Mutex::new(None),
             pending_host_requests: std::sync::Mutex::new(HashMap::new()),
+            application_registry,
+            run_tool_catalogs: std::sync::Mutex::new(HashMap::new()),
+            run_tokens: std::sync::Mutex::new(HashMap::new()),
         });
+        hub.refresh_managed_applications();
         Ok(hub)
+    }
+
+    /// Re-scan managed projects for `.worldbase/app-capabilities.json` and
+    /// update the canonical application catalog. Invalid manifests are logged
+    /// and skipped; they never become executable.
+    pub fn refresh_managed_applications(&self) {
+        let manifests = match self.projects.list_app_manifests() {
+            Ok(manifests) => manifests,
+            Err(error) => {
+                tracing::warn!(%error, "failed to scan managed application manifests");
+                return;
+            }
+        };
+        let mut entries = Vec::new();
+        for (project_id, manifest) in manifests {
+            if manifest.runtime.kind != worldbase_protocol::types::RuntimeKind::ManagedProject {
+                tracing::warn!(
+                    project_id = %project_id,
+                    app_id = %manifest.app.id,
+                    "skipping project manifest that does not declare managed_project runtime"
+                );
+                continue;
+            }
+            let Ok(hash) = crate::application::manifest_hash(&manifest) else {
+                continue;
+            };
+            let provider: Arc<dyn worldbase_tools::ApplicationCapabilityProvider> =
+                Arc::new(worldbase_tools::ManagedAppCapabilityProvider::new(
+                    self.projects.clone(),
+                    project_id.clone(),
+                    hash,
+                ));
+            // `refresh_managed_projects` keys its catalog slice by application
+            // id and prunes records whose app id is absent. Scaffold apps use
+            // `worldbase.local.<project_id>`, so keying by project id here
+            // would immediately prune the record that was just registered.
+            entries.push((manifest.app.id.clone(), manifest, provider));
+        }
+        if let Err(error) = self.application_registry.refresh_managed_projects(entries) {
+            tracing::warn!(%error, "failed to refresh managed applications");
+        }
+    }
+
+    /// Enable the managed application generated by the application scaffold so
+    /// `search_tools` can discover its capabilities without a manual toggle.
+    ///
+    /// Enabling only touches the catalog and its persisted flag. It never
+    /// starts the project runtime: capability invocation keeps using the
+    /// existing `ensure_ready` auto-start path, which acquires its lease on
+    /// first use. Returns `true` only when a scaffold-tagged manifest that has
+    /// not declared `aiIntegration: "none"` was found and enabled.
+    pub fn auto_enable_scaffold_application(&self, project_id: &str) -> bool {
+        let manifest = match self.projects.app_manifest(project_id) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(
+                    %project_id,
+                    %error,
+                    "failed to read app manifest for scaffold auto-enable"
+                );
+                return false;
+            }
+        };
+        let project_id = project_id.trim();
+        let is_scaffold = manifest
+            .app
+            .tags
+            .iter()
+            .any(|tag| tag == SCAFFOLD_APPLICATION_TAG)
+            || (manifest.app.id == format!("worldbase.local.{project_id}")
+                && manifest.app.tags.iter().any(|tag| {
+                    matches!(
+                        tag.as_str(),
+                        "next-crud" | "next-dashboard" | "node-api" | "blank"
+                    )
+                }));
+        if !is_scaffold {
+            return false;
+        }
+        if manifest.ai_integration.as_deref() == Some("none") {
+            return false;
+        }
+        if let Err(error) = self
+            .application_registry
+            .set_enabled(&manifest.app.id, true)
+        {
+            tracing::warn!(
+                %project_id,
+                app_id = %manifest.app.id,
+                %error,
+                "failed to auto-enable scaffold application"
+            );
+            return false;
+        }
+        self.application_registry.invalidate();
+        true
+    }
+
+    /// Register the catalog and token for one agent run. A stream owns at most
+    /// one catalog; re-registering replaces it and drops any stale token.
+    pub fn register_run_catalog(
+        &self,
+        stream_id: &str,
+        token: &str,
+        catalog: Arc<dyn ToolCatalogRuntime>,
+    ) {
+        let token = token.trim();
+        let mut catalogs = self.run_tool_catalogs.lock().unwrap();
+        let mut tokens = self.run_tokens.lock().unwrap();
+        tokens.retain(|_, mapped_stream| mapped_stream != stream_id);
+        catalogs.insert(stream_id.to_string(), catalog);
+        if !token.is_empty() {
+            tokens.insert(token.to_string(), stream_id.to_string());
+        }
+    }
+
+    /// Resolve a run catalog from the short-lived token returned by chat.send.
+    pub fn lookup_run_catalog(&self, token: &str) -> Option<Arc<dyn ToolCatalogRuntime>> {
+        let stream_id = self.run_tokens.lock().unwrap().get(token.trim()).cloned()?;
+        self.run_tool_catalogs
+            .lock()
+            .unwrap()
+            .get(&stream_id)
+            .cloned()
+    }
+
+    /// Remove the catalog and every token that resolves to this stream.
+    pub fn remove_run_catalog(&self, stream_id: &str) {
+        self.run_tool_catalogs.lock().unwrap().remove(stream_id);
+        self.run_tokens
+            .lock()
+            .unwrap()
+            .retain(|_, mapped_stream| mapped_stream != stream_id);
+    }
+
+    /// Resolve the token currently assigned to a stream (chat.send exposes it
+    /// before the async agent loop has finished building the catalog).
+    pub fn run_capability_token_for_stream(&self, stream_id: &str) -> Option<String> {
+        let tokens = self.run_tokens.lock().unwrap();
+        if let Some(token) = tokens.get(stream_id) {
+            return Some(token.clone());
+        }
+        tokens
+            .iter()
+            .find(|(_, mapped_stream)| mapped_stream.as_str() == stream_id)
+            .map(|(token, _)| token.clone())
     }
 
     /// 发起宿主反向请求（ask_user / page_automation），等待 host.respond。
@@ -367,6 +544,8 @@ impl Hub {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store: self.store.clone(),
             memory_queue: Some(self.memory_queue.clone()),
             memory_scopes: Vec::new(),

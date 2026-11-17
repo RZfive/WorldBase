@@ -1,0 +1,110 @@
+import { NextResponse } from "next/server";
+
+import { invokeCapability } from "../../../../src/ai/invoke";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const MAX_REQUEST_BYTES = 1024 * 1024;
+
+function errorResponse(errorCode: string, message: string, status: number) {
+  return NextResponse.json({ status: "error", errorCode, message }, { status });
+}
+
+export async function POST(request: Request): Promise<Response> {
+  const authorization = request.headers.get("authorization") ?? "";
+  const expectedAuthorization = `Bearer ${process.env.WORLDBASE_APP_TOKEN}`;
+  if (
+    !process.env.WORLDBASE_APP_TOKEN ||
+    authorization !== expectedAuthorization
+  ) {
+    return errorResponse("permission_required", "invalid app token", 401);
+  }
+
+  const raw = await request.text();
+  if (new TextEncoder().encode(raw).length > MAX_REQUEST_BYTES) {
+    return errorResponse(
+      "input_schema_invalid",
+      "request exceeds the 1 MiB limit",
+      413,
+    );
+  }
+
+  let envelope: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return errorResponse(
+        "input_schema_invalid",
+        "request body must be a JSON object",
+        400,
+      );
+    }
+    envelope = parsed as Record<string, unknown>;
+  } catch {
+    return errorResponse("input_schema_invalid", "invalid JSON body", 400);
+  }
+
+  if (envelope.protocolVersion !== 1) {
+    return errorResponse(
+      "input_schema_invalid",
+      "protocolVersion must be 1",
+      400,
+    );
+  }
+
+  const deadline = envelope.deadline;
+  if (
+    typeof deadline !== "number" ||
+    !Number.isFinite(deadline) ||
+    deadline <= 0
+  ) {
+    return errorResponse(
+      "input_schema_invalid",
+      "deadline must be a positive epoch millisecond value",
+      400,
+    );
+  }
+  if (Date.now() > deadline) {
+    return errorResponse("operation_timeout", "deadline exceeded", 408);
+  }
+
+  const capabilityId = envelope.capabilityId;
+  if (typeof capabilityId !== "string" || capabilityId.trim().length === 0) {
+    return errorResponse(
+      "input_schema_invalid",
+      "capabilityId is required",
+      400,
+    );
+  }
+
+  const result = await invokeCapability({
+    capabilityId,
+    input: envelope.input ?? {},
+    callId: typeof envelope.callId === "string" ? envelope.callId : undefined,
+    deadline,
+    idempotencyKey:
+      typeof envelope.idempotencyKey === "string"
+        ? envelope.idempotencyKey
+        : undefined,
+  });
+
+  if (result.status === "ok") {
+    return NextResponse.json({
+      status: "ok",
+      data: result.data,
+      ...(result.warnings ? { warnings: result.warnings } : {}),
+    });
+  }
+
+  const status =
+    result.errorCode === "capability_not_found" ||
+    result.errorCode === "record_not_found"
+      ? 404
+      : result.errorCode === "operation_timeout"
+        ? 408
+        : result.errorCode === "input_schema_invalid"
+          ? 400
+          : 500;
+  return NextResponse.json(result, { status });
+}

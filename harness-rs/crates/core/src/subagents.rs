@@ -119,6 +119,24 @@ impl CoreSubagentRuntime {
 
         let child_depth = self.nesting_depth + 1;
         let mut context = self.context.clone();
+        // The parent may have activated more discoverable tools after this
+        // runtime was created. Refresh at spawn time; the child's own catalog
+        // intersects this list with its policy, so inheritance never widens.
+        let parent_active_tools = {
+            let catalogs = self.hub.run_tool_catalogs.lock().unwrap();
+            catalogs
+                .get(&self.parent_stream_id)
+                .map(|catalog| catalog.active_tool_names())
+                .unwrap_or_default()
+        };
+        context.inherited_tool_names = normalized_strings(
+            &context
+                .inherited_tool_names
+                .iter()
+                .cloned()
+                .chain(parent_active_tools)
+                .collect::<Vec<_>>(),
+        );
         context.allowed_tool_names = intersect_allowed_tool_names(
             &context.allowed_tool_names,
             task.allowed_tools.as_deref(),

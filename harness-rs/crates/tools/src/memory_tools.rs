@@ -414,6 +414,8 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store: store.clone(),
             memory_queue: None,
             memory_scopes: scopes,

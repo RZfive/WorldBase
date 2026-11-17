@@ -168,8 +168,9 @@ void main() {
     expect(init['protocolVersion'], '1.0');
     final availableTools = init['availableTools'] as List;
     final toolNames = availableTools.map((t) => (t as Map)['name']).toSet();
-    expect(toolNames, hasLength(52), reason: 'mobile 工具面必须是显式、稳定的可执行集合');
+    expect(toolNames, hasLength(53), reason: 'mobile 工具面必须是显式、稳定的可执行集合');
     expect(toolNames, contains('read_file'));
+    expect(toolNames, contains('search_tools'));
     expect(toolNames, contains('ask_user'), reason: 'webview/交互能力应开放 host 域工具');
     expect(toolNames, contains('read_current_page'));
     expect(

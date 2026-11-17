@@ -2,15 +2,15 @@
 //!
 //! chat 与 run 走 in-process dispatcher（全能力）；serve 启动 axum WS/HTTP。
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use futures::StreamExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use worldbase_core::dispatcher::ConnectionContext;
 use worldbase_core::Hub;
+use worldbase_project_runtime::{list_manifests, load_manifest, validate_manifest};
 use worldbase_protocol::event::{EventFrame, EventKind};
-use worldbase_protocol::types::Capabilities;
+use worldbase_protocol::types::{AppManifest, Capabilities};
 
 #[derive(Parser)]
 #[command(name = "worldbase")]
@@ -47,6 +47,19 @@ enum Commands {
         #[arg(short, long, default_value = ".")]
         workspace: PathBuf,
     },
+    /// 应用能力清单
+    App {
+        #[command(subcommand)]
+        command: AppCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AppCommand {
+    /// 校验 manifest 文件或项目目录
+    Validate { path: PathBuf },
+    /// 列出目录下的应用
+    List { dir: PathBuf },
 }
 
 #[tokio::main]
@@ -87,8 +100,86 @@ async fn main() -> Result<()> {
                 other => anyhow::bail!("unknown projects action: {other}"),
             }
         }
+        Commands::App { command } => match command {
+            AppCommand::Validate { path } => match validate_app(&path) {
+                Ok(errors) if errors.is_empty() => println!("valid\t{}", path.display()),
+                Ok(errors) => {
+                    for error in errors {
+                        eprintln!("error: {error}");
+                    }
+                    std::process::exit(1);
+                }
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    std::process::exit(1);
+                }
+            },
+            AppCommand::List { dir } => {
+                for entry in collect_app_entries(&dir)? {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        entry.app_id,
+                        entry.name,
+                        entry.version,
+                        entry.path.display()
+                    );
+                }
+            }
+        },
     }
     Ok(())
+}
+
+fn manifest_path(path: &Path) -> Result<PathBuf> {
+    if path.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    if path.is_dir() {
+        let candidate = path.join(".worldbase/app-capabilities.json");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        anyhow::bail!("app manifest not found: {}", candidate.display());
+    }
+    anyhow::bail!("path not found: {}", path.display())
+}
+
+fn validate_app(path: &Path) -> Result<Vec<String>> {
+    let manifest_path = manifest_path(path)?;
+    let text = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read app manifest {}", manifest_path.display()))?;
+    let manifest: AppManifest = serde_json::from_str(&text)
+        .with_context(|| format!("parse app manifest {}", manifest_path.display()))?;
+    let mut errors = match validate_manifest(&manifest) {
+        Ok(()) => Vec::new(),
+        Err(errors) => errors,
+    };
+    if errors.is_empty() && path.is_dir() {
+        if let Err(error) = load_manifest(path) {
+            errors.push(error.to_string());
+        }
+    }
+    Ok(errors)
+}
+
+struct AppListEntry {
+    app_id: String,
+    name: String,
+    version: String,
+    path: PathBuf,
+}
+
+fn collect_app_entries(dir: &Path) -> Result<Vec<AppListEntry>> {
+    anyhow::ensure!(dir.is_dir(), "not a directory: {}", dir.display());
+    Ok(list_manifests(dir)?
+        .into_iter()
+        .map(|(project_id, manifest)| AppListEntry {
+            app_id: manifest.app.id,
+            name: manifest.app.name,
+            version: manifest.app.version,
+            path: dir.join(project_id),
+        })
+        .collect())
 }
 
 async fn build_hub(workspace: &PathBuf) -> Result<Arc<Hub>> {
@@ -235,5 +326,101 @@ fn print_event(frame: &EventFrame) {
         EventKind::Start { model } => println!("[模型] {model}"),
         EventKind::Notice { text } => println!("[通知] {text}"),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_manifest() -> serde_json::Value {
+        serde_json::json!({
+            "schemaVersion": 1,
+            "app": {
+                "id": "worldbase.local.demo",
+                "name": "Demo",
+                "version": "0.1.0",
+                "trustLevel": "untrusted"
+            },
+            "runtime": { "kind": "managed_project" },
+            "capabilities": [{
+                "id": "example.search",
+                "operation": "example.search",
+                "risk": "read",
+                "inputSchema": { "type": "object" }
+            }]
+        })
+    }
+
+    fn write_project_manifest(root: &Path, manifest: &serde_json::Value) {
+        let manifest_dir = root.join(".worldbase");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(
+            manifest_dir.join("app-capabilities.json"),
+            serde_json::to_string_pretty(manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_a_manifest_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("app-capabilities.json");
+        std::fs::write(&path, serde_json::to_string(&valid_manifest()).unwrap()).unwrap();
+        assert!(validate_app(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn validate_accepts_a_project_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        write_project_manifest(temp.path(), &valid_manifest());
+        assert!(validate_app(temp.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn validate_reports_each_manifest_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("app-capabilities.json");
+        let invalid = serde_json::json!({
+            "schemaVersion": 2,
+            "app": { "id": "bad id!", "version": "" },
+            "runtime": { "kind": "managed_project" },
+            "capabilities": []
+        });
+        std::fs::write(&path, serde_json::to_string(&invalid).unwrap()).unwrap();
+        let errors = validate_app(&path).unwrap();
+        assert!(errors.iter().any(|error| error.contains("schemaVersion")));
+        assert!(errors.iter().any(|error| error.contains("invalid app id")));
+        assert!(errors.iter().any(|error| error.contains("app.version")));
+        assert!(errors.iter().any(|error| error.contains("capability")));
+    }
+
+    #[test]
+    fn validate_rejects_missing_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = validate_app(temp.path()).unwrap_err();
+        assert!(error.to_string().contains("app manifest not found"));
+    }
+
+    #[test]
+    fn list_prints_app_identity_and_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let alpha = temp.path().join("proj_alpha");
+        let beta = temp.path().join("proj_beta");
+        write_project_manifest(&alpha, &valid_manifest());
+        let mut beta_manifest = valid_manifest();
+        beta_manifest["app"]["id"] = serde_json::json!("worldbase.local.beta");
+        beta_manifest["app"]["name"] = serde_json::json!("Beta");
+        write_project_manifest(&beta, &beta_manifest);
+
+        let entries = collect_app_entries(temp.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].app_id, "worldbase.local.demo");
+        assert_eq!(entries[0].name, "Demo");
+        assert_eq!(entries[0].version, "0.1.0");
+        assert_eq!(entries[0].path, alpha);
+        assert_eq!(entries[1].app_id, "worldbase.local.beta");
+        assert_eq!(entries[1].name, "Beta");
+        assert_eq!(entries[1].path, beta);
     }
 }

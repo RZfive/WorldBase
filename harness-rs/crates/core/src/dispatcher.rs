@@ -133,6 +133,19 @@ pub async fn dispatch(
         })),
         TOOL_CALL => tool_call(hub, ctx, params).await,
 
+        APPLICATION_LIST => application_list(hub, params),
+        APPLICATION_GET => application_get(hub, params),
+        APPLICATION_SET_ENABLED => application_set_enabled(hub, params),
+        APPLICATION_REFRESH => application_refresh(hub),
+        APPLICATION_GRANTS_LIST => application_grants_list(hub, params),
+        APPLICATION_GRANTS_SAVE => application_grants_save(hub, params),
+        APPLICATION_GRANTS_REVOKE => application_grants_revoke(hub, params),
+        APPLICATION_AUDIT_LIST => application_audit_list(hub, params),
+        APPLICATION_SEARCH => application_search(hub, params).await,
+        APPLICATION_ACTIVATE => application_activate(hub, params).await,
+        APPLICATION_INVOKE => application_invoke(hub, ctx, params).await,
+        APPLICATION_HOST_STATE_CHANGED => application_host_state_changed(hub, params),
+
         SETTINGS_GET => settings_get(hub, params),
         SETTINGS_SET => settings_set(hub, params),
         PERMISSIONS_COMPUTER_USE => Ok(worldbase_tools::computer_use::permission_status()),
@@ -931,9 +944,11 @@ async fn chat_send(
         p.context.clone(),
     )
     .map_err(internal)?;
+    let run_capability_token = Some(run.run_capability_token.clone());
     Ok(serde_json::to_value(ChatSendResult {
         stream_id: run.stream_id,
         user_message_seq: 0,
+        run_capability_token,
     })
     .unwrap())
 }
@@ -976,6 +991,285 @@ fn chat_respond(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
 
 // ---------- tools ----------
 
+struct RunCallState {
+    stream_id: String,
+    capabilities: Capabilities,
+    interactive: bool,
+    auto_approve: bool,
+    abort: CancellationToken,
+    services: worldbase_tools::ToolServices,
+}
+
+struct AppCallIdentity {
+    app_id: String,
+    capability_id: String,
+    risk: CapabilityRisk,
+}
+
+struct ResolvedTool {
+    tool: Arc<dyn worldbase_tools::Tool>,
+    risk: Option<CapabilityRisk>,
+    app_call: Option<AppCallIdentity>,
+}
+
+fn application_error(code: &str, message: impl Into<String>) -> ErrorObject {
+    ErrorObject::with_data(
+        worldbase_protocol::rpc::SERVER_ERROR,
+        message,
+        json!({ "code": code }),
+    )
+}
+
+fn run_stream_for_token(hub: &Hub, token: &str) -> Option<String> {
+    let tokens = hub.run_tokens.lock().unwrap();
+    if let Some(stream_id) = tokens.get(token) {
+        return Some(stream_id.clone());
+    }
+    tokens
+        .iter()
+        .find(|(_, stream_id)| stream_id.as_str() == token)
+        .map(|(stream_id, _)| stream_id.clone())
+}
+
+fn run_call_state_for_token(
+    hub: &Arc<Hub>,
+    token: &str,
+    catalog: Arc<dyn worldbase_tools::ToolCatalogRuntime>,
+) -> Result<RunCallState, ErrorObject> {
+    let stream_id = run_stream_for_token(hub, token).ok_or_else(|| {
+        application_error(
+            worldbase_protocol::types::error_code::RUN_CAPABILITY_TOKEN_INVALID,
+            "run capability token is not registered",
+        )
+    })?;
+    let (conversation_id, capabilities, interactive, context, abort) = {
+        let runs = hub.runs.lock().unwrap();
+        let run = runs.get(&stream_id).ok_or_else(|| {
+            application_error(
+                worldbase_protocol::types::error_code::RUN_CAPABILITY_TOKEN_INVALID,
+                "run capability token refers to an ended run",
+            )
+        })?;
+        (
+            run.conversation_id.clone(),
+            run.capabilities.clone(),
+            run.interactive,
+            run.context.clone(),
+            run.abort.clone(),
+        )
+    };
+    let folder_workspace = context
+        .workspace_root
+        .as_deref()
+        .filter(|root| !root.trim().is_empty())
+        .map(PathBuf::from);
+    let mut services = hub.services_for_run(
+        folder_workspace,
+        context.target_project_id.clone(),
+        context.allowed_mcp_server_ids.clone(),
+    );
+    services.memory_scopes = context
+        .memory_scopes
+        .iter()
+        .map(|scope| MemorySearchScopeEntry {
+            scope_type: scope.scope_type.clone(),
+            scope_id: scope.scope_id.clone(),
+        })
+        .collect();
+    services.abort = Some(abort.clone());
+    services.set_current_stream(&stream_id);
+    services.catalog_runtime = Some(catalog);
+    services.conversation_id = Some(conversation_id.clone());
+    Ok(RunCallState {
+        stream_id,
+        capabilities,
+        interactive,
+        auto_approve: context.auto_approve_permissions,
+        abort,
+        services,
+    })
+}
+
+async fn resolve_run_tool(
+    hub: &Arc<Hub>,
+    name: &str,
+    state: &RunCallState,
+    catalog: &Arc<dyn worldbase_tools::ToolCatalogRuntime>,
+) -> Result<ResolvedTool, ErrorObject> {
+    let active = catalog.active_tool_names();
+    let is_active = active.iter().any(|active| active == name);
+    if let Some(tool) = hub
+        .tools_for(&state.capabilities)
+        .into_iter()
+        .find(|tool| tool.name() == name)
+    {
+        if tool.visibility() == ToolVisibility::Discoverable && !is_active {
+            return Err(application_error(
+                worldbase_protocol::types::error_code::CAPABILITY_NOT_ACTIVE,
+                format!("capability is not active in this run: {name}"),
+            ));
+        }
+        return Ok(ResolvedTool {
+            risk: tool.risk(),
+            tool,
+            app_call: None,
+        });
+    }
+    if name.starts_with("app__") {
+        let (app, capability, provider) = hub
+            .application_registry
+            .find_capability(name)
+            .ok_or_else(|| {
+                application_error(
+                    worldbase_protocol::types::error_code::CAPABILITY_NOT_FOUND,
+                    format!("unknown application capability: {name}"),
+                )
+            })?;
+        if !app.enabled {
+            return Err(application_error(
+                worldbase_protocol::types::error_code::APP_NOT_ENABLED,
+                format!("application is disabled: {}", app.app_id),
+            ));
+        }
+        if capability.availability != CapabilityAvailability::Available {
+            return Err(application_error(
+                worldbase_protocol::types::error_code::CAPABILITY_NOT_ACTIVE,
+                format!("application capability is unavailable: {name}"),
+            ));
+        }
+        if !is_active {
+            return Err(application_error(
+                worldbase_protocol::types::error_code::CAPABILITY_NOT_ACTIVE,
+                format!("capability is not active in this run: {name}"),
+            ));
+        }
+        let risk = capability.risk;
+        let app_call = AppCallIdentity {
+            app_id: app.app_id.clone(),
+            capability_id: capability.capability_id.clone(),
+            risk,
+        };
+        let tool: Arc<dyn worldbase_tools::Tool> = Arc::new(worldbase_tools::CapabilityTool::new(
+            provider, app, capability,
+        ));
+        return Ok(ResolvedTool {
+            tool,
+            risk: Some(risk),
+            app_call: Some(app_call),
+        });
+    }
+    if name.starts_with("mcp__") && is_active {
+        let allowed = state.services.allowed_mcp_server_ids();
+        let dynamic =
+            worldbase_tools::dynamic_mcp_tools(hub.mcp.list_tools_for(allowed.as_ref()).await);
+        if let Some(tool) = dynamic.into_iter().find(|tool| tool.name() == name) {
+            return Ok(ResolvedTool {
+                risk: tool.risk(),
+                tool,
+                app_call: None,
+            });
+        }
+    }
+    Err(ErrorObject::invalid_params(format!("unknown tool: {name}")))
+}
+
+fn tool_policy_for(
+    hub: &Hub,
+    name: &str,
+    tool: &dyn worldbase_tools::Tool,
+    app_call: Option<&AppCallIdentity>,
+) -> String {
+    if let Some(policy) = hub
+        .store
+        .get_setting("permissions")
+        .ok()
+        .flatten()
+        .and_then(|p| p.get(name).and_then(|v| v.as_str()).map(String::from))
+    {
+        return policy;
+    }
+    if let Some(app_call) = app_call {
+        let grants = hub
+            .application_registry
+            .list_grants(Some(&app_call.app_id))
+            .unwrap_or_default();
+        return crate::application::policy::effective_policy(
+            app_call.risk,
+            &app_call.app_id,
+            &app_call.capability_id,
+            &grants,
+        )
+        .to_string();
+    }
+    tool.permission().to_string()
+}
+
+fn approved_root_for_tool(
+    services: &worldbase_tools::ToolServices,
+    args: &Value,
+) -> Option<PathBuf> {
+    services.folder_workspace.clone().or_else(|| {
+        let project_id = args
+            .get("project_id")
+            .or_else(|| args.get("project"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| services.target_project_id.clone());
+        project_id.and_then(|id| services.projects.project_root(&id).ok())
+    })
+}
+
+fn record_application_call(
+    hub: &Hub,
+    app_call: Option<&AppCallIdentity>,
+    conversation_id: Option<String>,
+    status: &str,
+    duration_ms: u64,
+) {
+    let Some(app_call) = app_call else {
+        return;
+    };
+    let _ = hub.application_registry.record_call(ApplicationCallAudit {
+        call_id: uuid::Uuid::new_v4().to_string(),
+        conversation_id,
+        app_id: app_call.app_id.clone(),
+        capability_id: app_call.capability_id.clone(),
+        status: status.to_string(),
+        duration_ms,
+        approval_id: None,
+        created_at: String::new(),
+    });
+}
+
+fn should_refresh_application_catalog(name: &str, success: bool) -> bool {
+    success && matches!(name, "create_project" | "upgrade_project")
+}
+
+/// `create_project` reports the generated project in its result payload, in
+/// both the camelCase and snake_case spellings used by host bridges.
+fn project_id_from_tool_result(result: &Value) -> Option<String> {
+    result
+        .get("projectId")
+        .or_else(|| result.get("project_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// `upgrade_project` only names its target in the tool input. Capture it
+/// before `execute` consumes the arguments.
+fn project_id_from_tool_input(input: &Value) -> Option<String> {
+    input
+        .get("project_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 async fn tool_call(
     hub: &Arc<Hub>,
     ctx: &ConnectionContext,
@@ -1002,42 +1296,491 @@ async fn tool_call(
     if !args.is_object() {
         return Err(params_err("tool arguments must be an object"));
     }
-    let tools = hub.tools_for(&ctx.effective_capabilities());
-    let tool = tools
-        .iter()
-        .find(|t| t.name() == name)
-        .ok_or_else(|| ErrorObject::invalid_params(format!("unknown tool: {name}")))?;
+    let run_token =
+        non_empty_string_alias(&params, &["runCapabilityToken", "run_capability_token"])?;
+    // `upgrade_project` names its target only in the tool input and `execute`
+    // consumes `args`; keep the project id for the post-refresh auto-enable.
+    let upgrade_project_id = if name == "upgrade_project" {
+        project_id_from_tool_input(&args)
+    } else {
+        None
+    };
 
-    let policy = hub
-        .store
-        .get_setting("permissions")
-        .ok()
-        .flatten()
-        .and_then(|p| p.get(name).and_then(|v| v.as_str()).map(String::from))
-        .unwrap_or_else(|| tool.permission().to_string());
-    let allowed = crate::permissions::check(
+    let (resolved, policy, permission_stream, interactive, auto_approve, abort, services) =
+        if let Some(token) = run_token {
+            let catalog = hub.lookup_run_catalog(token).ok_or_else(|| {
+                application_error(
+                    worldbase_protocol::types::error_code::RUN_CAPABILITY_TOKEN_INVALID,
+                    "run capability token is invalid or expired",
+                )
+            })?;
+            let state = run_call_state_for_token(hub, token, catalog.clone())?;
+            let resolved = resolve_run_tool(hub, name, &state, &catalog).await?;
+            let policy = tool_policy_for(
+                hub,
+                name,
+                resolved.tool.as_ref(),
+                resolved.app_call.as_ref(),
+            );
+            (
+                resolved,
+                policy,
+                state.stream_id,
+                state.interactive,
+                state.auto_approve,
+                Some(state.abort),
+                state.services,
+            )
+        } else {
+            if name.starts_with("app__") {
+                return Err(application_error(
+                    worldbase_protocol::types::error_code::RUN_CAPABILITY_TOKEN_REQUIRED,
+                    format!("runCapabilityToken is required for application capability: {name}"),
+                ));
+            }
+            let tools = hub.tools_for(&ctx.effective_capabilities());
+            let tool = tools
+                .iter()
+                .find(|t| t.name() == name)
+                .cloned()
+                .ok_or_else(|| ErrorObject::invalid_params(format!("unknown tool: {name}")))?;
+            if tool.visibility() == ToolVisibility::Discoverable {
+                return Err(application_error(
+                    worldbase_protocol::types::error_code::CAPABILITY_NOT_ACTIVE,
+                    format!("capability is not active without a run capability token: {name}"),
+                ));
+            }
+            let resolved = ResolvedTool {
+                risk: tool.risk(),
+                tool,
+                app_call: None,
+            };
+            let policy = tool_policy_for(hub, name, resolved.tool.as_ref(), None);
+            let mut services = hub.services();
+            services.visible_tool_catalog = Some(Arc::new(worldbase_tools::descriptors(&tools)));
+            services.set_current_stream("tool-call");
+            (
+                resolved,
+                policy,
+                "tool-call".to_string(),
+                ctx.effective_interactive(),
+                false,
+                None,
+                services,
+            )
+        };
+
+    let approved_root = approved_root_for_tool(&services, &args);
+    let allowed = crate::permissions::check_with_risk(
         hub,
-        "tool-call",
+        &permission_stream,
         &policy,
         name,
         &args,
-        None,
-        ctx.effective_interactive(),
-        false,
-        None,
+        approved_root.as_deref(),
+        interactive,
+        auto_approve,
+        abort.as_ref(),
+        resolved.risk,
     )
     .await;
     if !allowed {
-        return Err(ErrorObject::new(
-            worldbase_protocol::rpc::SERVER_ERROR,
+        record_application_call(
+            hub,
+            resolved.app_call.as_ref(),
+            services.conversation_id.clone(),
+            "denied",
+            0,
+        );
+        return Err(application_error(
+            worldbase_protocol::types::error_code::PERMISSION_REQUIRED,
             format!("permission denied: {name}"),
         ));
     }
-    let mut services = hub.services();
-    services.visible_tool_catalog = Some(Arc::new(worldbase_tools::descriptors(&tools)));
-    services.set_current_stream("tool-call");
-    let value = tool.execute(args, &services).await.map_err(internal)?;
-    Ok(value)
+
+    let started = std::time::Instant::now();
+    let result = match abort.as_ref() {
+        Some(abort) => {
+            tokio::select! {
+                biased;
+                _ = abort.cancelled() => Err(anyhow::anyhow!("tool execution aborted: {name}")),
+                result = resolved.tool.execute(args, &services) => result,
+            }
+        }
+        None => resolved.tool.execute(args, &services).await,
+    };
+    let status = if result.is_ok() { "ok" } else { "error" };
+    record_application_call(
+        hub,
+        resolved.app_call.as_ref(),
+        services.conversation_id.clone(),
+        status,
+        started.elapsed().as_millis() as u64,
+    );
+    if should_refresh_application_catalog(name, result.is_ok()) {
+        hub.refresh_managed_applications();
+        hub.application_registry.invalidate();
+        // Scaffold-generated applications are discoverable as soon as their
+        // manifest is on disk. Enable them here so `search_tools` can find the
+        // capabilities without a manual toggle; the runtime stays stopped and
+        // starts lazily through the existing `ensure_ready` path on first call.
+        let project_id = match name {
+            "create_project" => result.as_ref().ok().and_then(project_id_from_tool_result),
+            "upgrade_project" => upgrade_project_id,
+            _ => None,
+        };
+        let dry_run = result
+            .as_ref()
+            .ok()
+            .and_then(|value| value.get("dryRun"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !dry_run {
+            if let Some(project_id) = project_id {
+                // The helper invalidates the catalog itself when it enables.
+                let _ = hub.auto_enable_scaffold_application(&project_id);
+            }
+        }
+    }
+    result.map_err(internal)
+}
+
+// ---------- applications ----------
+
+fn application_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    hub.application_registry.refresh_light_apps();
+    hub.refresh_managed_applications();
+    let source = optional_string_param_strict(&params, &["source"], "source")?;
+    let enabled_only = optional_bool_param(
+        &params,
+        &["enabledOnly", "enabled_only"],
+        false,
+        "enabledOnly",
+    )?;
+    let mut applications = hub.application_registry.list();
+    if let Some(source) = source.as_deref() {
+        applications.retain(|app| app.source_id == source || app.app_id == source);
+    }
+    if enabled_only {
+        applications.retain(|app| app.enabled);
+    }
+    Ok(json!({
+        "applications": applications,
+        "catalogVersion": hub.application_registry.version(),
+    }))
+}
+
+fn application_get(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let app_id = required_string_param(&params, &["appId", "app_id", "id"], "appId")?;
+    Ok(json!({
+        "application": hub.application_registry.get(app_id),
+        "catalogVersion": hub.application_registry.version(),
+    }))
+}
+
+fn application_set_enabled(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let app_id = required_string_param(&params, &["appId", "app_id", "id"], "appId")?;
+    let enabled = required_bool_param(&params, &["enabled"], "enabled")?;
+    hub.application_registry
+        .set_enabled(app_id, enabled)
+        .map_err(|error| {
+            application_error("app_not_found", format!("unknown application: {error}"))
+        })?;
+    Ok(json!({
+        "application": hub.application_registry.get(app_id),
+        "catalogVersion": hub.application_registry.version(),
+    }))
+}
+
+fn application_refresh(hub: &Arc<Hub>) -> Result<Value, ErrorObject> {
+    hub.application_registry.refresh_light_apps();
+    hub.refresh_managed_applications();
+    hub.application_registry.invalidate();
+    Ok(json!({
+        "applications": hub.application_registry.list(),
+        "catalogVersion": hub.application_registry.version(),
+    }))
+}
+
+fn application_grants_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let app_id = optional_string_param_strict(&params, &["appId", "app_id"], "appId")?;
+    let grants = hub
+        .application_registry
+        .list_grants(app_id.as_deref())
+        .map_err(internal)?;
+    Ok(json!({ "grants": grants }))
+}
+
+fn application_grants_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let app_id = required_string_param(&params, &["appId", "app_id"], "appId")?;
+    let capability_pattern = optional_string_param_strict(
+        &params,
+        &[
+            "capabilityPattern",
+            "capability_pattern",
+            "capabilityId",
+            "capability_id",
+        ],
+        "capabilityPattern",
+    )?
+    .unwrap_or_else(|| "*".to_string());
+    let permissions = string_array_param(&params, &["permissions"], "permissions")?;
+    let data_scope =
+        string_array_param(&params, &["dataScope", "data_scope", "scopes"], "dataScope")?;
+    let mode = optional_string_param_strict(&params, &["mode"], "mode")?
+        .unwrap_or_else(|| "ask".to_string());
+    if !matches!(mode.as_str(), "allow" | "ask" | "deny") {
+        return Err(params_err("mode must be allow, ask or deny"));
+    }
+    let grant = ApplicationGrant {
+        id: optional_string_param_strict(&params, &["id"], "id")?.unwrap_or_default(),
+        app_id: app_id.to_string(),
+        capability_pattern,
+        permissions,
+        data_scope,
+        mode,
+        expires_at: optional_string_param_strict(
+            &params,
+            &["expiresAt", "expires_at"],
+            "expiresAt",
+        )?,
+        created_at: optional_string_param_strict(
+            &params,
+            &["createdAt", "created_at"],
+            "createdAt",
+        )?
+        .unwrap_or_default(),
+    };
+    let grant = hub
+        .application_registry
+        .save_grant(grant)
+        .map_err(internal)?;
+    Ok(json!({ "grant": grant }))
+}
+
+fn application_grants_revoke(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let grant_id = required_string_param(&params, &["grantId", "grant_id", "id"], "grantId")?;
+    let revoked = hub
+        .application_registry
+        .revoke_grant(grant_id)
+        .map_err(internal)?;
+    Ok(json!({ "revoked": revoked }))
+}
+
+fn application_audit_list(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let app_id = optional_string_param_strict(&params, &["appId", "app_id"], "appId")?;
+    let limit = usize::try_from(optional_u64_param(&params, &["limit"], 50, "limit")?)
+        .unwrap_or(50)
+        .clamp(1, 500);
+    let audits = hub
+        .application_registry
+        .list_audit(app_id.as_deref(), limit)
+        .map_err(internal)?;
+    Ok(json!({ "audits": audits }))
+}
+
+fn require_run_catalog(
+    hub: &Arc<Hub>,
+    params: &Value,
+) -> Result<Arc<dyn worldbase_tools::ToolCatalogRuntime>, ErrorObject> {
+    let token = non_empty_string_alias(params, &["runCapabilityToken", "run_capability_token"])?
+        .ok_or_else(|| {
+            application_error(
+                worldbase_protocol::types::error_code::RUN_CAPABILITY_TOKEN_REQUIRED,
+                "runCapabilityToken is required",
+            )
+        })?;
+    hub.lookup_run_catalog(token).ok_or_else(|| {
+        application_error(
+            worldbase_protocol::types::error_code::RUN_CAPABILITY_TOKEN_INVALID,
+            "run capability token is invalid or expired",
+        )
+    })
+}
+
+fn application_search_params(params: &Value) -> Result<ApplicationSearchParams, ErrorObject> {
+    let max_results = optional_u64_value(params, &["maxResults", "max_results"], "maxResults")?
+        .map(|value| usize::try_from(value).map_err(|_| params_err("maxResults is too large")))
+        .transpose()?;
+    Ok(ApplicationSearchParams {
+        task: optional_string_param_strict(params, &["task"], "task")?,
+        query: optional_string_param_strict(params, &["query"], "query")?.unwrap_or_default(),
+        app_id: optional_string_param_strict(params, &["appId", "app_id"], "appId")?,
+        source: optional_string_param_strict(params, &["source"], "source")?,
+        max_results,
+    })
+}
+
+async fn application_search(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let catalog = require_run_catalog(hub, &params)?;
+    let search = application_search_params(&params)?;
+    let result = catalog.search_and_activate(search).await.map_err(|error| {
+        application_error(
+            worldbase_protocol::types::error_code::PROVIDER_UNAVAILABLE,
+            error.to_string(),
+        )
+    })?;
+    Ok(serde_json::to_value(result).unwrap())
+}
+
+async fn application_activate(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let catalog = require_run_catalog(hub, &params)?;
+    let tool_names =
+        string_array_param(&params, &["toolNames", "tool_names", "names"], "toolNames")?;
+    if tool_names.is_empty() {
+        return Err(params_err("toolNames must not be empty"));
+    }
+    let mut activated = Vec::new();
+    let mut rejected = Vec::new();
+    for tool_name in tool_names {
+        let search = ApplicationSearchParams {
+            query: tool_name.clone(),
+            max_results: Some(1),
+            ..Default::default()
+        };
+        let result = catalog.search_and_activate(search).await.map_err(|error| {
+            application_error(
+                worldbase_protocol::types::error_code::PROVIDER_UNAVAILABLE,
+                error.to_string(),
+            )
+        })?;
+        if result.activated.iter().any(|name| name == &tool_name) {
+            activated.push(tool_name);
+        } else {
+            rejected.push(ApplicationActivationRejection {
+                tool_name,
+                reason: worldbase_protocol::types::error_code::CAPABILITY_NOT_FOUND.to_string(),
+            });
+        }
+    }
+    let result = ApplicationActivateResult {
+        catalog_version: catalog.catalog_version(),
+        activated,
+        rejected,
+    };
+    Ok(serde_json::to_value(result).unwrap())
+}
+
+async fn application_invoke(
+    hub: &Arc<Hub>,
+    ctx: &ConnectionContext,
+    params: Value,
+) -> Result<Value, ErrorObject> {
+    let token = non_empty_string_alias(&params, &["runCapabilityToken", "run_capability_token"])?
+        .ok_or_else(|| {
+        application_error(
+            worldbase_protocol::types::error_code::RUN_CAPABILITY_TOKEN_REQUIRED,
+            "runCapabilityToken is required",
+        )
+    })?;
+    let tool_name = match non_empty_string_alias(&params, &["toolName", "tool_name", "name"])? {
+        Some(name) => name.to_string(),
+        None => {
+            let app_id = required_string_param(&params, &["appId", "app_id"], "appId")?;
+            let capability_id =
+                required_string_param(&params, &["capabilityId", "capability_id"], "capabilityId")?;
+            let capability = hub
+                .application_registry
+                .capabilities_for(app_id)
+                .into_iter()
+                .find(|capability| capability.capability_id == capability_id)
+                .ok_or_else(|| {
+                    application_error(
+                        worldbase_protocol::types::error_code::CAPABILITY_NOT_FOUND,
+                        format!("unknown application capability: {app_id}/{capability_id}"),
+                    )
+                })?;
+            capability.tool_name
+        }
+    };
+    let raw_args = ["args", "arguments", "input", "parameters"]
+        .into_iter()
+        .find_map(|key| params.get(key).filter(|value| !value.is_null()))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let args = if let Some(serialized) = raw_args.as_str() {
+        serde_json::from_str::<Value>(serialized)
+            .map_err(|error| params_err(format!("tool arguments must be valid JSON: {error}")))?
+    } else {
+        raw_args
+    };
+    if !args.is_object() {
+        return Err(params_err("tool arguments must be an object"));
+    }
+    tool_call(
+        hub,
+        ctx,
+        json!({
+            "name": tool_name,
+            "args": args,
+            "runCapabilityToken": token,
+        }),
+    )
+    .await
+}
+
+fn application_host_state_changed(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let host_capability_id = required_string_param(
+        &params,
+        &[
+            "hostCapabilityId",
+            "host_capability_id",
+            "capabilityId",
+            "capability_id",
+        ],
+        "hostCapabilityId",
+    )?;
+    let availability: CapabilityAvailability = params
+        .get("availability")
+        .cloned()
+        .ok_or_else(|| params_err("missing availability"))
+        .and_then(|value| {
+            serde_json::from_value(value).map_err(|error| params_err(error.to_string()))
+        })?;
+    let state_version = optional_u64_param(
+        &params,
+        &["stateVersion", "state_version"],
+        0,
+        "stateVersion",
+    )?;
+    let health_status = match availability {
+        CapabilityAvailability::Available => "ready",
+        CapabilityAvailability::Starting => "starting",
+        CapabilityAvailability::Unavailable => "unavailable",
+        CapabilityAvailability::Disabled => "disabled",
+    };
+    let mut updated = Vec::new();
+    for mut app in hub.application_registry.list() {
+        let mut matched = false;
+        for capability in &mut app.capabilities {
+            if capability.provider_ref == host_capability_id
+                || capability.capability_id == host_capability_id
+                || capability.tool_name == host_capability_id
+            {
+                capability.availability = availability;
+                matched = true;
+            }
+        }
+        if !matched {
+            continue;
+        }
+        app.health = AppHealth {
+            status: health_status.to_string(),
+            detail: Some(format!("host state version {state_version}")),
+            checked_at: Some(worldbase_protocol::event::now_rfc3339()),
+        };
+        if let Some(provider) = hub.application_registry.provider_for(&app.app_id) {
+            hub.application_registry
+                .register(app.clone(), provider)
+                .map_err(internal)?;
+            updated.push(app.app_id);
+        }
+    }
+    hub.application_registry.invalidate();
+    Ok(json!({
+        "updated": updated,
+        "catalogVersion": hub.application_registry.version(),
+    }))
 }
 
 // ---------- settings ----------
@@ -1430,11 +2173,10 @@ fn schedule_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
                 required_string_param(&params, &["cron"], "cron expression")?
             };
             let mut entry = match &requested_id {
-                Some(id) => {
-                    hub.scheduler
-                        .create_with_id(id, name, cron, task)
-                        .map_err(internal)?
-                }
+                Some(id) => hub
+                    .scheduler
+                    .create_with_id(id, name, cron, task)
+                    .map_err(internal)?,
                 None => hub.scheduler.create(name, cron, task).map_err(internal)?,
             };
             entry.enabled = enabled;
@@ -1474,11 +2216,10 @@ fn schedule_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
     } else {
         let cron = required_string_param(&params, &["cron"], "cron")?;
         let mut entry = match &requested_id {
-            Some(id) => {
-                hub.scheduler
-                    .create_with_id(id, name, cron, task)
-                    .map_err(internal)?
-            }
+            Some(id) => hub
+                .scheduler
+                .create_with_id(id, name, cron, task)
+                .map_err(internal)?,
             None => hub.scheduler.create(name, cron, task).map_err(internal)?,
         };
         entry.enabled = enabled;
@@ -1698,12 +2439,18 @@ fn schedule_update(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
 /// Accept Electron panel fields that exist on `ScheduleEntry` but have no
 /// dedicated scheduler semantics (hidden backing tasks, provider/model pinning,
 /// report linkage, and migrated next-run deadlines).
-fn apply_schedule_migration_fields(entry: &mut worldbase_protocol::types::ScheduleEntry, params: &Value) {
+fn apply_schedule_migration_fields(
+    entry: &mut worldbase_protocol::types::ScheduleEntry,
+    params: &Value,
+) {
     if let Some(hidden) = params.get("hidden").and_then(Value::as_bool) {
         entry.hidden = hidden;
     }
     // 显式 null = 清除钉扎（回归跟随默认供应商/模型）；缺省 = 不修改。
-    match params.get("providerId").or_else(|| params.get("provider_id")) {
+    match params
+        .get("providerId")
+        .or_else(|| params.get("provider_id"))
+    {
         Some(Value::Null) => entry.provider_id = None,
         _ => {
             if let Ok(Some(provider_id)) =
@@ -1721,7 +2468,9 @@ fn apply_schedule_migration_fields(entry: &mut worldbase_protocol::types::Schedu
             }
         }
     }
-    if let Ok(Some(last_report_id)) = optional_string_value(params, &["lastReportId", "last_report_id"]) {
+    if let Ok(Some(last_report_id)) =
+        optional_string_value(params, &["lastReportId", "last_report_id"])
+    {
         entry.last_report_id = Some(last_report_id.to_string());
     }
     // A migrated deadline is authoritative: the caller already computed it
@@ -1827,7 +2576,9 @@ async fn schedule_run(
         let (stream_id, conversation_id) = crate::agent::start_scheduled_task(hub.clone(), entry)
             .await
             .map_err(internal)?;
-        return Ok(json!({ "streamId": stream_id, "conversationId": conversation_id, "scheduleId": entry.id }));
+        return Ok(
+            json!({ "streamId": stream_id, "conversationId": conversation_id, "scheduleId": entry.id }),
+        );
     }
     let conv = hub
         .store
@@ -3128,10 +3879,7 @@ async fn doc_preview_ensure(hub: &Arc<Hub>, params: Value) -> Result<Value, Erro
         .and_then(|render| render.get("status"))
         .and_then(Value::as_str)
         == Some("ready");
-    if host_previewable
-        && render_ready
-        && render_kind != Some("structured")
-    {
+    if host_previewable && render_ready && render_kind != Some("structured") {
         // A legacy artifact can say `ready` while its cache file has been
         // removed (manual cleanup, workspace copy, or an interrupted write).
         // Only short-circuit when the durable bytes are actually readable;
@@ -3308,11 +4056,8 @@ fn doc_edit_source(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> 
 
 fn doc_draft_apply(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let id = document_id_param(&params)?;
-    let expected_sha = optional_string_param_strict(
-        &params,
-        &["sourceSha256", "source_sha256"],
-        "sourceSha256",
-    )?;
+    let expected_sha =
+        optional_string_param_strict(&params, &["sourceSha256", "source_sha256"], "sourceSha256")?;
     worldbase_tools::document_artifacts::apply_document_draft(
         &hub.workspace,
         id,
@@ -5589,6 +6334,62 @@ mod tests {
     };
 
     #[test]
+    fn application_catalog_refreshes_only_after_successful_scaffold_tools() {
+        assert!(super::should_refresh_application_catalog(
+            "create_project",
+            true
+        ));
+        assert!(super::should_refresh_application_catalog(
+            "upgrade_project",
+            true
+        ));
+        assert!(!super::should_refresh_application_catalog(
+            "create_project",
+            false
+        ));
+        assert!(!super::should_refresh_application_catalog(
+            "upgrade_project",
+            false
+        ));
+        assert!(!super::should_refresh_application_catalog(
+            "create_lightweight_app",
+            true
+        ));
+        assert!(!super::should_refresh_application_catalog(
+            "write_project_file",
+            true
+        ));
+    }
+
+    #[test]
+    fn scaffold_project_ids_are_extracted_from_tool_shapes() {
+        assert_eq!(
+            super::project_id_from_tool_result(&serde_json::json!({ "projectId": " proj_alpha " })),
+            Some("proj_alpha".to_string())
+        );
+        assert_eq!(
+            super::project_id_from_tool_result(&serde_json::json!({ "project_id": "proj_beta" })),
+            Some("proj_beta".to_string())
+        );
+        assert_eq!(
+            super::project_id_from_tool_result(&serde_json::json!({ "success": false })),
+            None
+        );
+        assert_eq!(
+            super::project_id_from_tool_result(&serde_json::json!({ "projectId": "  " })),
+            None
+        );
+        assert_eq!(
+            super::project_id_from_tool_input(&serde_json::json!({ "project_id": "proj_gamma" })),
+            Some("proj_gamma".to_string())
+        );
+        assert_eq!(
+            super::project_id_from_tool_input(&serde_json::json!({ "projectId": "proj_delta" })),
+            None
+        );
+    }
+
+    #[test]
     fn tool_policy_parses_electron_values_and_rejects_unknowns() {
         assert_eq!(
             super::parse_tool_policy(&serde_json::json!({})).unwrap(),
@@ -5603,7 +6404,8 @@ mod tests {
             worldbase_protocol::types::ScheduleToolPolicy::AutoApprove
         );
         assert_eq!(
-            super::parse_tool_policy(&serde_json::json!({ "tool_policy": "auto_approve" })).unwrap(),
+            super::parse_tool_policy(&serde_json::json!({ "tool_policy": "auto_approve" }))
+                .unwrap(),
             worldbase_protocol::types::ScheduleToolPolicy::AutoApprove
         );
         assert!(super::parse_tool_policy(&serde_json::json!({ "toolPolicy": "sudo" })).is_err());

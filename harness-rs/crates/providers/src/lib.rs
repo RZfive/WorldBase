@@ -20,6 +20,7 @@ use worldbase_protocol::types::ProviderConfig;
 
 pub mod anthropic;
 pub mod api_protocol;
+mod context_error;
 pub mod detect;
 pub mod entry;
 mod http;
@@ -35,6 +36,7 @@ mod urls;
 
 pub use anthropic::AnthropicProvider;
 pub use api_protocol::ApiProtocol;
+pub use context_error::is_context_overflow_error;
 pub use detect::{detect_protocol, DetectProtocolResult, ProtocolProbe};
 pub use entry::{
     create_provider_from_entry, generate_images, pixel_size, resolve_protocol, size_for,

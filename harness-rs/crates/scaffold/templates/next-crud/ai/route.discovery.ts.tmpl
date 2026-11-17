@@ -1,0 +1,29 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
+import { NextResponse } from "next/server";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+export async function GET(): Promise<Response> {
+  const projectRoot = process.env.THE_WORLD_PROJECT_ROOT ?? process.cwd();
+  const manifestPath = path.join(
+    projectRoot,
+    ".worldbase",
+    "app-capabilities.json",
+  );
+  try {
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    return NextResponse.json(manifest);
+  } catch {
+    return NextResponse.json(
+      {
+        status: "error",
+        errorCode: "manifest_invalid",
+        message: "app manifest is unavailable",
+      },
+      { status: 500 },
+    );
+  }
+}

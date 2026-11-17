@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "app": {
+    "id": "worldbase.tasks",
+    "name": "Tasks",
+    "version": "1.2.0",
+    "description": "Manage tasks and project plans",
+    "tags": ["tasks", "planning"],
+    "platforms": ["desktop"],
+    "trustLevel": "community"
+  },
+  "runtime": {
+    "kind": "managed_project",
+    "activation": "on-demand",
+    "healthCheck": "tasks.health"
+  },
+  "capabilities": [
+    {
+      "id": "tasks.search",
+      "title": "Search tasks",
+      "description": "Find tasks by query",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string" }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      },
+      "outputSchema": { "type": "object" },
+      "operation": "tasks.search",
+      "risk": "read",
+      "permissions": ["tasks.read"],
+      "dataScopes": ["selected_workspace"]
+    },
+    {
+      "id": "tasks.health",
+      "title": "Health",
+      "description": "Report application health",
+      "inputSchema": { "type": "object" },
+      "operation": "tasks.health",
+      "risk": "read"
+    }
+  ]
+}

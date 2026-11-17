@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const manifest = {{MANIFEST_JSON}};
+
+const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const target = join(projectRoot, ".worldbase", "app-capabilities.json");
+
+await mkdir(dirname(target), { recursive: true });
+await writeFile(target, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+console.log(`wrote ${target}`);

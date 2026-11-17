@@ -33,6 +33,7 @@ interface BrowserPageEmulationRequest {
   media?: 'screen' | 'print'
   colorScheme?: 'light' | 'dark' | 'no-preference'
   reducedMotion?: 'reduce' | 'no-preference'
+  autoDarkMode?: boolean
   userAgent?: string
   viewport?: BrowserPageEmulationViewportRequest
   reset?: boolean
@@ -46,6 +47,7 @@ interface BrowserPageEmulationResult {
     media?: string
     colorScheme?: string
     reducedMotion?: string
+    autoDarkMode?: boolean
     userAgent?: string | null
     viewport?: {
       width: number
@@ -54,6 +56,16 @@ interface BrowserPageEmulationResult {
       mobile: boolean
     }
   }
+}
+
+interface BrowserPageThemeRequest {
+  webContentsId: number
+  colorScheme: 'light' | 'dark'
+  autoDarkMode?: boolean
+}
+
+interface BrowserPageThemeResult {
+  ok: true
 }
 
 interface ChatMessage {
@@ -573,6 +585,7 @@ export interface ElectronAPI {
   dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => Promise<BrowserPageKeyDispatchResult>
   getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => Promise<BrowserAutomationNetworkEntry[]>
   emulateBrowserPage: (request: BrowserPageEmulationRequest) => Promise<BrowserPageEmulationResult>
+  setBrowserPageTheme: (request: BrowserPageThemeRequest) => Promise<BrowserPageThemeResult>
   onWorkspaceTabControl: (callback: (payload: WorkspaceTabControlRequestEnvelope) => void) => () => void
   resolveWorkspaceTabControl: (payload: WorkspaceTabControlResponseEnvelope) => void
   getAboutInfo: () => Promise<AppAboutInfo>
@@ -594,6 +607,24 @@ export interface ElectronAPI {
   deleteConversation: (id: string) => Promise<boolean>
   listAgents: () => Promise<AgentDefinition[]>
   listAgentToolDefinitions: () => Promise<Array<{ name: string; description: string }>>
+  applications: {
+    list: (query?: { appId?: string; source?: string }) => Promise<{ apps: ApplicationRecord[] }>
+    get: (appId: string) => Promise<ApplicationRecord | null>
+    setEnabled: (appId: string, enabled: boolean) => Promise<unknown>
+    refresh: (appId?: string) => Promise<unknown>
+    grants: {
+      list: (appId?: string) => Promise<{ grants: ApplicationGrant[] }>
+      save: (grant: ApplicationGrantInput) => Promise<unknown>
+      revoke: (grantId: string) => Promise<unknown>
+    }
+    audit: {
+      list: (options?: { appId?: string; limit?: number }) => Promise<{ audits: ApplicationCallAudit[] }>
+    }
+  }
+  lightapps: {
+    list: () => Promise<{ apps?: ApplicationLightApp[] }>
+    delete: (id: string) => Promise<unknown>
+  }
   getAgent: (id: string) => Promise<AgentDefinition | null>
   saveAgent: (agent: Partial<AgentDefinition>) => Promise<AgentDefinition>
   deleteAgent: (id: string) => Promise<boolean>
@@ -898,6 +929,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => ipcRenderer.invoke('pageAutomation:dispatchKey', request),
   getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => ipcRenderer.invoke('pageAutomation:getNetworkLog', webContentsId, limit),
   emulateBrowserPage: (request: BrowserPageEmulationRequest) => ipcRenderer.invoke('pageAutomation:emulate', request),
+  setBrowserPageTheme: (request: BrowserPageThemeRequest) => ipcRenderer.invoke('pageAutomation:setTheme', request),
   getAboutInfo: () => ipcRenderer.invoke('app:getAboutInfo'),
   getAppUpdateState: () => ipcRenderer.invoke('appUpdate:getState'),
   getAppUpdateConfig: () => ipcRenderer.invoke('appUpdate:getConfig'),
@@ -932,6 +964,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_e: Electron.IpcRendererEvent, event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => callback(event)
     ipcRenderer.on('agentWorkspace:changed', handler)
     return () => { ipcRenderer.removeListener('agentWorkspace:changed', handler) }
+  },
+  applications: {
+    list: (query?: { appId?: string; source?: string }) => ipcRenderer.invoke('applications:list', query),
+    get: (appId: string) => ipcRenderer.invoke('applications:get', appId),
+    setEnabled: (appId: string, enabled: boolean) => ipcRenderer.invoke('applications:setEnabled', appId, enabled),
+    refresh: (appId?: string) => ipcRenderer.invoke('applications:refresh', appId),
+    grants: {
+      list: (appId?: string) => ipcRenderer.invoke('applications:grants:list', appId),
+      save: (grant: ApplicationGrantInput) => ipcRenderer.invoke('applications:grants:save', grant),
+      revoke: (grantId: string) => ipcRenderer.invoke('applications:grants:revoke', grantId)
+    },
+    audit: {
+      list: (options?: { appId?: string; limit?: number }) => ipcRenderer.invoke('applications:audit:list', options)
+    }
+  },
+  lightapps: {
+    list: () => ipcRenderer.invoke('lightapp:list'),
+    delete: (id: string) => ipcRenderer.invoke('lightapp:delete', id)
   },
   listImConnectors: () => ipcRenderer.invoke('im:listConnectors'),
   listChannelBindings: () => ipcRenderer.invoke('im:listBindings'),

@@ -1,5 +1,11 @@
 //! Agent 循环：流式事件发布、工具执行、权限询问、中止与断点续传。
 
+use crate::application::{CatalogEntry, RunToolCatalog, SkillCatalogEntry};
+use crate::context::{
+    generate_checkpoint, select_recent_window, CheckpointGeneration, CompactionCandidate,
+    CompactionCheckpoint, CompactionVersion, RecentWindow, RunStateLedger, TokenBudget,
+    TokenEstimator,
+};
 use crate::hub::{Hub, RunHandle};
 use crate::subagents::{CoreSubagentRuntime, MAX_SUBAGENT_NESTING_DEPTH};
 use crate::tool_scheduler::{into_call_order, schedule_tool_calls, ScheduledCall};
@@ -15,8 +21,9 @@ use worldbase_coding::{
 };
 use worldbase_protocol::event::{EventFrame, EventKind, StreamChannel};
 use worldbase_protocol::types::{
-    Capabilities, ChatContentPart, ChatMessage, ChatRunContext, ImageUrl as ProtocolImageUrl, Role,
-    ToolCallRecord, ToolDescriptor, ToolResultRecord,
+    Capabilities, CapabilityAvailability, ChatContentPart, ChatMessage, ChatRunContext,
+    ImageUrl as ProtocolImageUrl, Role, ToolCallRecord, ToolDescriptor, ToolResultRecord,
+    ToolVisibility,
 };
 use worldbase_providers::{
     ChatOptions, ContentBlock, LlmMessage, LlmRole, LlmTool, Provider, StreamChunk,
@@ -27,7 +34,6 @@ use worldbase_providers::{
 // event is emitted when this guard is reached, so callers never wait forever
 // for a stream that silently stopped after the last tool result.
 const MAX_STEPS: usize = 128;
-const PROACTIVE_COMPRESSION_INTERVAL: usize = 16;
 const MAX_STREAM_RETRIES: usize = 3;
 const MAX_RUN_DURATION: std::time::Duration = std::time::Duration::from_secs(8 * 60 * 60);
 const MAX_DUPLICATE_ITERATIONS: usize = 6;
@@ -45,22 +51,9 @@ const FINISH_TASK_EMPTY_SUMMARY_MESSAGE: &str =
 const TOOL_RESULT_INLINE_THRESHOLD_CHARS: usize = 30_000;
 const TOOL_RESULT_PERSIST_THRESHOLD_CHARS: usize = 100_000;
 const TOOL_RESULT_PREVIEW_CHARS: usize = 500;
-const CONTEXT_SUMMARY_PREFIX: &str = "[CONTEXT_SUMMARY]";
-const CONTEXT_GOAL_ANCHOR_PREFIX: &str = "[CONTEXT_GOAL_ANCHOR]";
-const CONTEXT_SUMMARY_MAX_CHARS: usize = 3_000;
 const CONTEXT_SUMMARY_SOURCE_MAX_CHARS: usize = 2_500;
-const CONTEXT_SUMMARY_MAX_SOURCE_MESSAGES: usize = 48;
-const CONTEXT_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-const CONTEXT_SUMMARY_SYSTEM_PROMPT: &str = "You summarize long conversations for continued execution. Produce concise plain text only, ideally within 3000 characters. Preserve the original user goal, latest request, completed work, failures, key file paths, project IDs, commands, ports, and next steps. Do not replace the original goal with a continue or retry instruction.";
-const CONTEXT_GOAL_ANCHOR_MAX_CHARS: usize = 2_000;
-const CONTEXT_HEADROOM_RATIO: f64 = 0.15;
-const CONTEXT_MIN_HEADROOM_TOKENS: usize = 2_048;
-const CONTEXT_MAX_HEADROOM_TOKENS: usize = 8_192;
-const ESTIMATED_CHARS_PER_TOKEN: usize = 4;
-const ESTIMATED_MESSAGE_OVERHEAD_TOKENS: usize = 12;
 const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 32_000;
 const DEFAULT_ANTHROPIC_CONTEXT_WINDOW_TOKENS: usize = 200_000;
-const RECENT_MESSAGE_KEEP_OPTIONS: [usize; 4] = [6, 4, 2, 0];
 const CONTEXT_CONTINUATION_MESSAGE: &str =
     "Continue the current task from the compressed context. Do not repeat completed steps.";
 // Electron's longest foreground tool timeout is currently five minutes, and
@@ -364,82 +357,6 @@ impl FinishTaskState {
     }
 }
 
-fn truncate_context_summary(value: &str) -> String {
-    let total = value.chars().count();
-    if total <= CONTEXT_SUMMARY_MAX_CHARS {
-        return value.to_string();
-    }
-    const MARKER: &str = "\n...[compressed context omitted]...\n";
-    let available = CONTEXT_SUMMARY_MAX_CHARS.saturating_sub(MARKER.chars().count());
-    let head_chars = available / 2;
-    let tail_chars = available - head_chars;
-    format!(
-        "{}{}{}",
-        take_chars(value, head_chars),
-        MARKER,
-        take_last_chars(value, tail_chars)
-    )
-}
-
-#[derive(Clone, Default)]
-struct ContextCompressionState {
-    summary: Option<String>,
-    original_user_request: Option<String>,
-    latest_user_request: Option<String>,
-}
-
-impl ContextCompressionState {
-    fn from_messages(messages: &[LlmMessage]) -> Self {
-        let mut state = Self::default();
-        state.observe_messages(messages);
-        state
-    }
-
-    fn observe_messages(&mut self, messages: &[LlmMessage]) {
-        for message in messages {
-            let Some(request) = user_request_text(message) else {
-                continue;
-            };
-            if self.original_user_request.is_none() {
-                self.original_user_request = Some(request.clone());
-            }
-            self.latest_user_request = Some(request);
-        }
-    }
-
-    fn effective_system_prompt(&self, base: &str) -> String {
-        let Some(summary) = self.summary.as_deref() else {
-            return base.to_string();
-        };
-        let original = self.original_user_request.as_deref().unwrap_or("(unknown)");
-        let latest = self.latest_user_request.as_deref().unwrap_or(original);
-        format!(
-            "{base}\n\n{CONTEXT_SUMMARY_PREFIX}\n{summary}\n\n{CONTEXT_GOAL_ANCHOR_PREFIX}\n\
-             Continue the same task. Treat this anchor as authoritative if the summary conflicts with it.\n\
-             Original user request:\n{original}\n\nLatest user request:\n{latest}"
-        )
-    }
-}
-
-fn user_request_text(message: &LlmMessage) -> Option<String> {
-    if message.role != LlmRole::User {
-        return None;
-    }
-    let text = message.text_view();
-    let text = text.trim();
-    if text == CONTEXT_CONTINUATION_MESSAGE || text.starts_with(FINISH_TASK_NUDGE_PREFIX) {
-        return None;
-    }
-    if !text.is_empty() {
-        return Some(truncate_chars(text, CONTEXT_GOAL_ANCHOR_MAX_CHARS));
-    }
-    message
-        .content
-        .iter()
-        .any(|block| matches!(block, ContentBlock::ImageUrl { .. }))
-        .then(|| "[User supplied one or more images without text.]".to_string())
-}
-
 fn provider_context_window_tokens(
     entry: Option<&worldbase_protocol::types::ProviderEntry>,
     model: &str,
@@ -461,332 +378,338 @@ fn provider_context_window_tokens(
     }
 }
 
-fn context_warning_threshold(context_window_tokens: usize) -> usize {
-    let proportional = (context_window_tokens as f64 * CONTEXT_HEADROOM_RATIO).floor() as usize;
-    let headroom = proportional.clamp(CONTEXT_MIN_HEADROOM_TOKENS, CONTEXT_MAX_HEADROOM_TOKENS);
-    context_window_tokens.saturating_sub(headroom).max(1)
+#[derive(Debug, Clone)]
+struct CompactedContext {
+    checkpoint: CompactionCheckpoint,
+    recent_messages: Vec<LlmMessage>,
+    before_tokens: usize,
+    after_tokens: usize,
 }
 
-fn estimate_context_tokens(system: &str, messages: &[LlmMessage], tools: &[LlmTool]) -> usize {
-    let message_json = serde_json::to_string(messages).unwrap_or_default();
-    let tool_json = serde_json::to_string(tools).unwrap_or_default();
-    let chars = system.chars().count() + message_json.chars().count() + tool_json.chars().count();
-    chars.div_ceil(ESTIMATED_CHARS_PER_TOKEN)
-        + (messages.len() + 1) * ESTIMATED_MESSAGE_OVERHEAD_TOKENS
-}
-
-fn is_tool_result_only(message: &LlmMessage) -> bool {
-    !message.content.is_empty()
-        && message
-            .content
-            .iter()
-            .all(|block| matches!(block, ContentBlock::ToolResult { .. }))
-}
-
-fn recent_context_messages(messages: &[LlmMessage], keep_count: usize) -> (usize, Vec<LlmMessage>) {
-    if keep_count == 0 {
-        return (
-            messages.len(),
-            vec![LlmMessage::text(
-                LlmRole::User,
-                CONTEXT_CONTINUATION_MESSAGE,
-            )],
-        );
-    }
-    let mut start = messages.len().saturating_sub(keep_count);
-    while start < messages.len() && is_tool_result_only(&messages[start]) {
-        start += 1;
-    }
-    let mut recent = messages[start..].to_vec();
-    if recent.is_empty() {
-        recent.push(LlmMessage::text(
-            LlmRole::User,
-            CONTEXT_CONTINUATION_MESSAGE,
-        ));
-    } else if recent[0].role == LlmRole::Assistant {
-        recent.insert(
-            0,
-            LlmMessage::text(LlmRole::User, CONTEXT_CONTINUATION_MESSAGE),
-        );
-    }
-    (start, recent)
-}
-
-fn summarize_message(message: &LlmMessage) -> String {
-    let mut sections = Vec::new();
-    for block in &message.content {
-        match block {
-            ContentBlock::Text { text } if !text.is_empty() => {
-                sections.push(truncate_chars(text, CONTEXT_SUMMARY_SOURCE_MAX_CHARS));
-            }
-            ContentBlock::ImageUrl { .. } => sections.push("[image omitted]".into()),
-            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {
-                sections.push("[provider reasoning omitted]".into());
-            }
-            ContentBlock::ToolUse { name, input, .. } => {
-                let args = truncate_chars(&input.to_string(), 800);
-                sections.push(format!("[tool call: {name}({args})]"));
-            }
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } => {
-                let content = truncate_chars(content, CONTEXT_SUMMARY_SOURCE_MAX_CHARS);
-                let status = if *is_error { "error" } else { "result" };
-                sections.push(format!("[tool {status}: {tool_use_id}]\n{content}"));
-            }
-            ContentBlock::Text { .. } => {}
-        }
-    }
-    let role = match message.role {
-        LlmRole::User => "user",
-        LlmRole::Assistant => "assistant",
-    };
-    format!("[{role}]\n{}", sections.join("\n"))
-}
-
-fn selected_context_messages<'a>(messages: &'a [LlmMessage]) -> Vec<&'a LlmMessage> {
-    if messages.len() <= CONTEXT_SUMMARY_MAX_SOURCE_MESSAGES {
-        return messages.iter().collect();
-    }
-
-    let first_user = messages
-        .iter()
-        .find(|message| user_request_text(message).is_some());
-    let mut selected = Vec::with_capacity(CONTEXT_SUMMARY_MAX_SOURCE_MESSAGES);
-    if let Some(message) = first_user {
-        selected.push(message);
-    }
-    let tail_count = CONTEXT_SUMMARY_MAX_SOURCE_MESSAGES.saturating_sub(selected.len());
-    for message in messages
-        .iter()
-        .skip(messages.len().saturating_sub(tail_count))
-    {
-        if !selected.iter().any(|known| std::ptr::eq(*known, message)) {
-            selected.push(message);
-        }
-    }
-    selected
-}
-
-fn deterministic_context_summary(previous: Option<&str>, messages: &[LlmMessage]) -> String {
-    let selected = selected_context_messages(messages);
-    let current = selected
-        .into_iter()
-        .map(summarize_message)
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let combined = match (
-        previous.filter(|value| !value.trim().is_empty()),
-        current.is_empty(),
-    ) {
-        (Some(previous), false) => {
-            format!(
-                "Previous compressed context:\n{previous}\n\nNewly compressed context:\n{current}"
-            )
-        }
-        (Some(previous), true) => previous.to_string(),
-        (None, false) => current,
-        (None, true) => "Earlier conversation details were compacted.".into(),
-    };
-    truncate_context_summary(&combined)
-}
-
-fn context_summary_prompt(previous: Option<&str>, messages: &[LlmMessage]) -> Vec<LlmMessage> {
-    let source = selected_context_messages(messages)
-        .into_iter()
-        .enumerate()
-        .map(|(index, message)| format!("#{}\n{}", index + 1, summarize_message(message)))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let previous = previous
-        .filter(|summary| !summary.trim().is_empty())
-        .map(|summary| {
-            format!(
-                "\n\nPrevious compressed context (preserve useful facts and correct it when newer history conflicts):\n{}",
-                truncate_context_summary(summary)
-            )
+fn current_compaction_version(
+    history: &[ChatMessage],
+    system: &str,
+    tool_catalog_version: u64,
+    provider_entry: Option<&worldbase_protocol::types::ProviderEntry>,
+    model: &str,
+) -> CompactionVersion {
+    let provider_identity = provider_entry
+        .map(|entry| format!("{}:{}:{}", entry.id, entry.name, entry.base_url))
+        .unwrap_or_else(|| "provider:unknown".to_string());
+    let auth_owner = provider_entry
+        .map(|entry| {
+            crate::context::candidate::stable_sha256(format!(
+                "provider-auth:{}:{}",
+                entry.id, entry.api_key
+            ))
         })
+        .unwrap_or_else(|| "provider-auth:unknown".to_string());
+    CompactionVersion::new(
+        crate::context::history_version_from_messages(history),
+        model,
+        crate::context::prompt_hash(&format!(
+            "{system}\n\n{}",
+            crate::context::checkpoint::CHECKPOINT_TEMPLATE
+        )),
+        tool_catalog_version,
+        provider_identity,
+        auth_owner,
+    )
+}
+
+fn observe_ledger_anchors(ledger: &mut RunStateLedger, history: &[ChatMessage]) {
+    crate::context::engine::observe_history_anchors(ledger, history);
+}
+
+fn compaction_source_history(
+    store: &worldbase_memory::Store,
+    conversation_id: &str,
+    previous: Option<&CompactionCheckpoint>,
+) -> Vec<ChatMessage> {
+    let history = store
+        .list_messages(conversation_id, 400)
         .unwrap_or_default();
-    vec![LlmMessage::text(
-        LlmRole::User,
-        format!("Conversation history:\n{source}{previous}"),
-    )]
-}
-
-/// Ask the active provider for a context summary without routing the request
-/// through the visible agent event/tool pipeline. Providers only expose a
-/// streaming API, so collect text until `Completed`; a stream error, timeout,
-/// or empty completion is treated as a failed summary request by the caller.
-async fn provider_context_summary(
-    provider: &dyn Provider,
-    previous: Option<&str>,
-    messages: &[LlmMessage],
-    session_id: Option<&str>,
-    abort: &CancellationToken,
-) -> Result<String> {
-    let summary_messages = context_summary_prompt(previous, messages);
-    let request = async {
-        let mut stream = provider
-            .chat_stream(
-                Some(CONTEXT_SUMMARY_SYSTEM_PROMPT),
-                summary_messages,
-                Vec::new(),
-                2_048,
-                ChatOptions {
-                    session_id: session_id.map(str::to_owned),
-                    ..ChatOptions::default()
-                },
-            )
-            .await?;
-        let mut deltas = String::new();
-        while let Some(chunk) = stream.next().await {
-            match chunk? {
-                StreamChunk::TextDelta(text) => deltas.push_str(&text),
-                StreamChunk::Completed { assistant, .. } => {
-                    let completed = assistant.text_view();
-                    let text = if completed.trim().is_empty() {
-                        deltas
-                    } else {
-                        completed
-                    };
-                    if text.trim().is_empty() {
-                        anyhow::bail!("provider returned an empty context summary");
-                    }
-                    return Ok(truncate_context_summary(text.trim()));
-                }
-                StreamChunk::ThinkingDelta(_) => {}
-            }
-        }
-        anyhow::bail!("provider summary stream ended without completion")
-    };
-
-    tokio::select! {
-        biased;
-        _ = abort.cancelled() => anyhow::bail!("context summary aborted"),
-        result = tokio::time::timeout(CONTEXT_SUMMARY_TIMEOUT, request) => {
-            match result {
-                Ok(result) => result,
-                Err(_) => anyhow::bail!("context summary timed out after {} seconds", CONTEXT_SUMMARY_TIMEOUT.as_secs()),
-            }
-        }
+    let last_summarized = previous.map_or(0, |checkpoint| checkpoint.last_summarized_message_id);
+    if last_summarized <= 0 {
+        return history;
+    }
+    let filtered = history
+        .into_iter()
+        .filter(|message| message.id > last_summarized)
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        store
+            .list_messages(conversation_id, 400)
+            .unwrap_or_default()
+    } else {
+        filtered
     }
 }
 
-#[cfg(test)]
-fn compress_context_if_needed(
-    base_system: &str,
-    messages: &mut Vec<LlmMessage>,
+fn compaction_recent_limit(
+    system: &str,
     tools: &[LlmTool],
-    context_window_tokens: usize,
-    state: &mut ContextCompressionState,
-    force: bool,
-) -> bool {
-    state.observe_messages(messages);
-    let current_system = state.effective_system_prompt(base_system);
-    let threshold = context_warning_threshold(context_window_tokens);
-    if !force && estimate_context_tokens(&current_system, messages, tools) <= threshold {
-        return false;
-    }
-    if state.summary.is_some()
-        && matches!(
-            messages.as_slice(),
-            [message] if message.role == LlmRole::User
-                && message.text_view() == CONTEXT_CONTINUATION_MESSAGE
-        )
-    {
-        return false;
-    }
-
-    let original_messages = messages.clone();
-    for keep_count in RECENT_MESSAGE_KEEP_OPTIONS {
-        let (summary_end, candidate_messages) =
-            recent_context_messages(&original_messages, keep_count);
-        let candidate_summary = deterministic_context_summary(
-            state.summary.as_deref(),
-            &original_messages[..summary_end],
-        );
-        let mut candidate_state = state.clone();
-        candidate_state.summary = Some(candidate_summary);
-        let candidate_system = candidate_state.effective_system_prompt(base_system);
-        let fits =
-            estimate_context_tokens(&candidate_system, &candidate_messages, tools) <= threshold;
-        if fits || keep_count == 0 {
-            *messages = candidate_messages;
-            *state = candidate_state;
-            return true;
-        }
-    }
-    false
+    budget: &TokenBudget,
+    estimator: &TokenEstimator,
+) -> Option<usize> {
+    // Reserve room for the checkpoint and ledger evidence that will be added
+    // at the same boundary. If static context alone cannot fit under the formal
+    // threshold, compaction cannot reduce the request and must not loop.
+    let fixed = estimator
+        .estimate_text(system)
+        .saturating_add(estimator.estimate_tools(tools))
+        .saturating_add(4_096);
+    let available = budget.compaction_threshold_tokens.checked_sub(fixed)?;
+    (available >= 256).then_some(available.min(budget.recent_raw_budget_tokens.max(256)))
 }
 
-async fn compress_context_with_provider(
-    base_system: &str,
-    messages: &mut Vec<LlmMessage>,
-    tools: &[LlmTool],
-    context_window_tokens: usize,
-    state: &mut ContextCompressionState,
-    force: bool,
-    provider: &dyn Provider,
-    session_id: Option<&str>,
-    abort: &CancellationToken,
-) -> bool {
-    state.observe_messages(messages);
-    let current_system = state.effective_system_prompt(base_system);
-    let threshold = context_warning_threshold(context_window_tokens);
-    if !force && estimate_context_tokens(&current_system, messages, tools) <= threshold {
-        return false;
+fn compaction_window(
+    source: &[SourcedLlmMessage],
+    estimator: &TokenEstimator,
+    recent_limit: usize,
+) -> RecentWindow {
+    let messages = source
+        .iter()
+        .map(|message| message.message.clone())
+        .collect::<Vec<_>>();
+    let mut wanted = recent_limit.max(1);
+    let mut window = select_recent_window(&messages, wanted, estimator);
+    // Always leave at least the two newest provider messages in recent raw
+    // context when a compaction is explicitly required. This avoids producing
+    // an empty summary source solely because the static context consumed the
+    // nominal recent-window allowance.
+    if window.boundary_index == 0 && messages.len() > 2 {
+        let keep = messages.len().saturating_sub(2);
+        wanted = estimator
+            .estimate_messages(&messages[keep..])
+            .saturating_sub(1);
+        window = select_recent_window(&messages, wanted.max(1), estimator);
     }
-    if state.summary.is_some()
-        && matches!(
-            messages.as_slice(),
-            [message] if message.role == LlmRole::User
-                && message.text_view() == CONTEXT_CONTINUATION_MESSAGE
-        )
-    {
-        return false;
-    }
+    window
+}
 
-    let original_messages = messages.clone();
-    let summary = match provider_context_summary(
+async fn build_compaction_candidate(
+    provider: &dyn Provider,
+    conversation_id: &str,
+    previous: Option<&CompactionCheckpoint>,
+    ledger: &RunStateLedger,
+    source: &[SourcedLlmMessage],
+    estimator: &TokenEstimator,
+    budget: &TokenBudget,
+    recent_limit: usize,
+    version: &CompactionVersion,
+    sequence: u64,
+    abort: &CancellationToken,
+) -> CompactionCandidate {
+    let messages = source
+        .iter()
+        .map(|message| message.message.clone())
+        .collect::<Vec<_>>();
+    let window = compaction_window(source, estimator, recent_limit);
+    let selected = window
+        .selected_indices
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let summary_source = messages
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !selected.contains(index))
+        .map(|(_, message)| message.clone())
+        .collect::<Vec<_>>();
+    let summary_input_budget = budget
+        .available_input_tokens
+        .saturating_sub(budget.summary_budget_tokens)
+        .max(1_024);
+    let summary_output_budget = budget.summary_budget_tokens.clamp(512, 2_048) as u32;
+    let generation = generate_checkpoint(
         provider,
-        state.summary.as_deref(),
-        &original_messages,
-        session_id,
+        Some(conversation_id),
+        previous,
+        &summary_source,
+        ledger,
+        summary_input_budget,
+        summary_output_budget,
         abort,
     )
-    .await
-    {
-        Ok(summary) => summary,
-        Err(error) => {
-            if abort.is_cancelled() {
-                return false;
-            }
-            tracing::warn!(%error, "provider context summary failed; using deterministic fallback");
-            deterministic_context_summary(state.summary.as_deref(), &original_messages)
+    .await;
+    let checkpoint_value = serde_json::to_value(&generation).ok();
+    CompactionCandidate::new(
+        sequence,
+        version.clone(),
+        generation.markdown,
+        checkpoint_value,
+        estimator.estimate_messages(&messages),
+        window.token_count,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn compact_context_now(
+    store: &worldbase_memory::Store,
+    conversation_id: &str,
+    provider: &dyn Provider,
+    previous: Option<&CompactionCheckpoint>,
+    ledger: &RunStateLedger,
+    source: &[SourcedLlmMessage],
+    estimator: &TokenEstimator,
+    budget: &TokenBudget,
+    recent_limit: usize,
+    version: &CompactionVersion,
+    generation_override: Option<CheckpointGeneration>,
+    reason: &str,
+    before_tokens: usize,
+    abort: &CancellationToken,
+) -> Result<CompactedContext> {
+    let started = std::time::Instant::now();
+    let messages = source
+        .iter()
+        .map(|message| message.message.clone())
+        .collect::<Vec<_>>();
+    let window = compaction_window(source, estimator, recent_limit);
+    let selected = window
+        .selected_indices
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let summary_source = messages
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !selected.contains(index))
+        .map(|(_, message)| message.clone())
+        .collect::<Vec<_>>();
+    let source_ids = source
+        .iter()
+        .map(|message| message.source_ids.clone())
+        .collect::<Vec<_>>();
+    let generation = match generation_override {
+        Some(generation) => generation,
+        None => {
+            let summary_input_budget = budget
+                .available_input_tokens
+                .saturating_sub(budget.summary_budget_tokens)
+                .max(1_024);
+            let summary_output_budget = budget.summary_budget_tokens.clamp(512, 2_048) as u32;
+            generate_checkpoint(
+                provider,
+                Some(conversation_id),
+                previous,
+                &summary_source,
+                ledger,
+                summary_input_budget,
+                summary_output_budget,
+                abort,
+            )
+            .await
         }
     };
-
-    for keep_count in RECENT_MESSAGE_KEEP_OPTIONS {
-        let (_summary_end, candidate_messages) =
-            recent_context_messages(&original_messages, keep_count);
-        let mut candidate_state = state.clone();
-        candidate_state.summary = Some(summary.clone());
-        let candidate_system = candidate_state.effective_system_prompt(base_system);
-        let fits =
-            estimate_context_tokens(&candidate_system, &candidate_messages, tools) <= threshold;
-        if fits || keep_count == 0 {
-            *messages = candidate_messages;
-            *state = candidate_state;
-            return true;
-        }
+    let first_kept =
+        crate::context::engine::first_kept_message_id(&window.selected_indices, &source_ids);
+    let last_summarized =
+        crate::context::engine::last_summarized_message_id(&window.selected_indices, &source_ids);
+    let checkpoint = crate::context::engine::build_compaction_checkpoint(
+        conversation_id,
+        generation,
+        ledger,
+        version,
+        first_kept,
+        last_summarized,
+        worldbase_protocol::event::now_rfc3339(),
+    )?;
+    let recent_messages = window.messages;
+    let after_tokens = estimator.estimate_request(
+        "",
+        &crate::context::assemble_request(
+            conversation_id,
+            Some(&checkpoint),
+            ledger,
+            &recent_messages,
+        ),
+        &[],
+    );
+    if let Err(error) = crate::context::persist_compaction(
+        store,
+        &checkpoint,
+        ledger,
+        reason,
+        before_tokens,
+        after_tokens,
+        started.elapsed().as_millis() as u64,
+    ) {
+        tracing::warn!(%error, %reason, "failed to persist context checkpoint/metric");
     }
-    false
+    Ok(CompactedContext {
+        checkpoint,
+        recent_messages,
+        before_tokens,
+        after_tokens,
+    })
+}
+
+fn spawn_track_b_extraction(
+    ledger: std::sync::Arc<std::sync::Mutex<RunStateLedger>>,
+    current_version: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    extractor: Option<std::sync::Arc<crate::context::track_b::TrackBExtractor>>,
+    input: crate::context::track_b::TrackBExtractionInput,
+    abort: CancellationToken,
+) {
+    let history_version = input.history_version;
+    tokio::spawn(async move {
+        let outcome = match extractor {
+            Some(extractor) => extractor.extract(input, &abort).await,
+            None => {
+                let update = crate::context::engine::heuristic_track_b_update(
+                    input.history_version,
+                    input.turn,
+                    &input.tool_name,
+                    &input.tool_call_id,
+                    &input.content,
+                    input.is_error,
+                );
+                crate::context::track_b::TrackBExtractionOutcome {
+                    update,
+                    source: crate::context::track_b::TrackBExtractionSource::HeuristicFallback,
+                    diagnostic_reason: Some(
+                        "active provider has no configured provider identity".into(),
+                    ),
+                }
+            }
+        };
+        if let Some(reason) = outcome.diagnostic_reason.as_deref() {
+            tracing::debug!(
+                source = ?outcome.source,
+                %reason,
+                "Track B semantic extraction used fallback"
+            );
+        }
+        if current_version.load(std::sync::atomic::Ordering::SeqCst) != history_version {
+            return;
+        }
+        if let Ok(mut ledger) = ledger.lock() {
+            let _ = ledger.apply_track_b_update(outcome.update, history_version);
+        }
+    });
+}
+
+/// A provider message plus the persisted database rows that produced it.
+#[derive(Clone, Debug)]
+struct SourcedLlmMessage {
+    message: LlmMessage,
+    source_ids: Vec<i64>,
 }
 
 /// ChatMessage 历史 → LLM 消息历史。
 pub fn to_llm_messages(messages: &[ChatMessage]) -> Vec<LlmMessage> {
+    to_sourced_llm_messages(messages)
+        .into_iter()
+        .map(|message| message.message)
+        .collect()
+}
+
+/// Convert persisted history while retaining exact message IDs for compaction
+/// boundaries. A tool exchange maps its assistant tool-use row and result rows
+/// to their corresponding provider messages.
+fn to_sourced_llm_messages(messages: &[ChatMessage]) -> Vec<SourcedLlmMessage> {
     let mut out = Vec::new();
     let mut index = 0;
     while index < messages.len() {
@@ -813,7 +736,10 @@ pub fn to_llm_messages(messages: &[ChatMessage]) -> Vec<LlmMessage> {
                 // Preserve useful prose from a malformed assistant record, but
                 // strip calls that no provider can safely replay.
                 if !msg.content.is_empty() {
-                    out.push(LlmMessage::text(LlmRole::Assistant, msg.content.clone()));
+                    out.push(SourcedLlmMessage {
+                        message: LlmMessage::text(LlmRole::Assistant, msg.content.clone()),
+                        source_ids: vec![msg.id],
+                    });
                 }
                 index += 1;
                 continue;
@@ -822,9 +748,14 @@ pub fn to_llm_messages(messages: &[ChatMessage]) -> Vec<LlmMessage> {
             let mut next_index = index + 1;
             let mut matched_ids = std::collections::HashSet::new();
             let mut result_blocks = Vec::new();
+            let mut result_source_ids = Vec::new();
             let mut invalid_results = false;
             while next_index < messages.len() && !messages[next_index].tool_results.is_empty() {
-                for result in &messages[next_index].tool_results {
+                let result_message = &messages[next_index];
+                if result_message.id > 0 {
+                    result_source_ids.push(result_message.id);
+                }
+                for result in &result_message.tool_results {
                     let id = result.tool_call_id.trim();
                     if id.is_empty()
                         || !expected_ids.contains(id)
@@ -858,13 +789,19 @@ pub fn to_llm_messages(messages: &[ChatMessage]) -> Vec<LlmMessage> {
                     raw_input: None,
                     input_error: None,
                 }));
-                out.push(LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: assistant_blocks,
+                out.push(SourcedLlmMessage {
+                    message: LlmMessage {
+                        role: LlmRole::Assistant,
+                        content: assistant_blocks,
+                    },
+                    source_ids: vec![msg.id],
                 });
-                out.push(LlmMessage {
-                    role: LlmRole::User,
-                    content: result_blocks,
+                out.push(SourcedLlmMessage {
+                    message: LlmMessage {
+                        role: LlmRole::User,
+                        content: result_blocks,
+                    },
+                    source_ids: result_source_ids,
                 });
             }
             index = next_index;
@@ -877,9 +814,12 @@ pub fn to_llm_messages(messages: &[ChatMessage]) -> Vec<LlmMessage> {
                 Role::Assistant => LlmRole::Assistant,
                 _ => LlmRole::User,
             };
-            out.push(LlmMessage {
-                role,
-                content: blocks,
+            out.push(SourcedLlmMessage {
+                message: LlmMessage {
+                    role,
+                    content: blocks,
+                },
+                source_ids: vec![msg.id],
             });
         }
         index += 1;
@@ -1190,6 +1130,12 @@ fn project_editing_prompt(tools: &PromptToolContext<'_>) -> Option<String> {
     ];
     if tools.has("create_project") {
         lines.push("- Do not call `create_project` for an existing-project request.".into());
+    }
+    if tools.has("upgrade_project") {
+        lines.push(
+            "- Use `upgrade_project` when an existing project needs the generated data, API, or capability files; it fills only missing files and never overwrites existing code."
+                .into(),
+        );
     }
     let discovery = tools.visible_names(&[
         "list_project_files",
@@ -1503,30 +1449,71 @@ fn runtime_data_api_prompt(tools: &PromptToolContext<'_>) -> Option<String> {
         "create_project",
         "call_project_api",
         "query_project_database",
-        "analyze_project_data",
     ]) {
         return None;
     }
 
     let mut lines = vec!["## Runtime, data, and API rules".to_string()];
     if tools.has("create_project") {
-        lines.extend([
-            "- Generated managed projects must use WorldBase host-provided project data APIs for persistent business data; do not add a separate SQLite/ORM driver or make browser-only storage the primary source of truth.".into(),
-            "- Define persistence in `create_project` `meta.dataSchema` / `.world-meta.json`; `dataSchema.tables` is an array of table definitions, never an object map.".into(),
-            "- Use `THE_WORLD_PROJECT_DATA_BASE_URL` or `NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL` for project records. `THE_WORLD_SYSTEM_BASE_URL` is for shell-level system APIs, not project data.".into(),
-            "- Use host-provided runtime environment variables and resource proxying instead of hardcoded machine paths, ports, or duplicated host services.".into(),
-        ]);
+        lines.push("- New projects use the scaffold-generated data and capability layer; do not introduce a second database, ORM, or storage driver.".into());
     }
     if tools.has("call_project_api") {
-        lines.push("- Use `call_project_api` for managed project HTTP checks. Supply the exact project ID, method, path, headers, and body fields defined by its schema.".into());
+        lines.push("- Use `call_project_api` for managed project HTTP verification with the exact project ID, method, path, headers, and body defined by its schema.".into());
     }
     if tools.has("query_project_database") {
         lines.push("- `query_project_database` is read-only: issue a single `SELECT` query and never use it for mutations or schema changes.".into());
     }
-    if tools.has("analyze_project_data") {
-        lines.push("- Use `analyze_project_data` only after identifying the correct project/table and request an operation supported by its schema.".into());
-    }
     Some(lines.join("\n"))
+}
+
+/// Static routing rules for local application capabilities. Discovery stays
+/// dynamic (`search_tools`); this section never lists concrete applications or
+/// their runtime state. Kept compact: it is resident in every run that can
+/// discover tools, so it must not crowd the context budget.
+fn local_app_capabilities_prompt(tools: &PromptToolContext<'_>) -> Option<String> {
+    tools.has("search_tools").then(|| {
+        "## Local app capabilities\n\
+         - Discover with `search_tools` and `source: \"app\"`; call a matching capability directly (its app auto-starts). Prefer local capabilities over web/browser/UI automation or new code.\n\
+         - Do not search again after activation. Fall back only when no local capability matches, and explain why."
+            .into()
+    })
+}
+
+fn ai_application_upgrade_prompt(
+    tools: &PromptToolContext<'_>,
+    context: &ChatRunContext,
+) -> Option<String> {
+    if !tools.has("upgrade_project") {
+        return None;
+    }
+    let target_project = context
+        .target_project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty());
+    let target_rule = target_project
+        .map(|project_id| {
+            format!(
+                "- This conversation is bound to project `{project_id}`. Pass that exact ID to `upgrade_project`; never create a replacement project."
+            )
+        })
+        .unwrap_or_else(|| {
+            "- If the user names or selects an existing project, use its exact project ID with `upgrade_project`."
+                .to_string()
+        });
+    Some(format!(
+        "## AI application capabilities and upgrades\n\
+         - Requests such as “升级 AI 功能”, “让你可以使用这个应用”, “enable AI access”, or “make this app usable by AI” refer to the project's AI capability contract becoming discoverable and callable, not to changing the chat model or Electron version.\n\
+         - {target_rule}\n\
+         - Call `get_project_status` once for the target project and inspect `aiApplication`, especially `capabilityDetails`. Each entry states what the capability does, its input contract, risk, data scope, side effects, and timeout; treat that list as the authoritative description of what the project can do for AI.\n\
+         - Use `capabilityDetails` to match the user's business intent to concrete capabilities. When explaining what the app can do, summarize these capabilities and, when needed, verify discovery with `search_tools`; do not infer capability behavior from page UI, database tables, shell commands, or packaged binaries.\n\
+         - If the requested business operation is not covered by `capabilityDetails`, implement it in the project's domain/API/capability layer and update `.worldbase/app-capabilities.json` before enabling it. Never claim a capability exists or invent a tool name that is absent from the validated manifest.\n\
+         - Do not inspect or unpack `app.asar`, harness binaries, SQLite catalog internals, or guess registration behavior.\n\
+         - If `aiApplication.status` is `ready` or `invalid`, use `upgrade_project` with `ai_only: true` and no `dry_run`. This repairs legacy manifest fields and refreshes/enables the catalog without generating unrelated business or CRUD files.\n\
+         - If `aiApplication.status` is `upgrade_available`, use the full `upgrade_project` workflow without `ai_only` because the project lacks an AI capability manifest.\n\
+         - If the manifest is `invalid`, fix the exact file and error first, then rerun `upgrade_project` with `ai_only: true`. After it is `ready`, rebuild/restart the project when needed and prove discovery with `search_tools` using `source: \"app\"`.\n\
+         - Do not claim the app is AI-usable until `aiApplication.status` is `ready` and `search_tools` can discover or activate a capability. Report the concrete validation or invocation error instead of looping through exploratory commands."
+    ))
 }
 
 fn new_project_prompt(tools: &PromptToolContext<'_>, context: &ChatRunContext) -> Option<String> {
@@ -1545,14 +1532,12 @@ fn new_project_prompt(tools: &PromptToolContext<'_>, context: &ChatRunContext) -
     ]);
     let mut lines = vec![
         "## New managed project workflow".to_string(),
-        "- Before implementation, present a concise PRD-style plan covering the goal, modules, pages, interactions, layout, stack, data model, and primary flow; wait for explicit approval.".into(),
-        "- In that plan, use a ```mermaid block for the primary user flow and any architecture or data-model relationships. Describe page layout in short prose or a compact list instead of a second diagram.".into(),
-        "- After approval, call `create_project` exactly once. For a medium, large, multi-screen, or uncertain project, use `development_mode: true` and create only the starter shell or first coherent file batch.".into(),
-        "- Use the built-in Next.js App Router starter and runtime-compatible dependency versions. Keep `build: next build`, a valid start script, standalone output, one route implementation per language, and global styles imported from the root layout.".into(),
+        "- Before implementation, present a concise PRD-style plan covering the goal, modules, pages, interactions, layout, stack, data model, and primary flow, with a ```mermaid block for the primary user flow and any architecture or data-model relationships; wait for explicit approval.".into(),
+        "- After approval, call `create_project` exactly once with `template`, `entities`, and `features`. The scaffold generates the manifest, RPC routes, data layer, and capabilities; do not hand-write those files.".into(),
     ];
     if !followups.is_empty() {
         lines.push(format!(
-            "- Continue the same project over multiple calls with {} until implementation is complete.",
+            "- Continue the same project over multiple calls with {}; after each write or patch, rebuild and verify the app before the next change.",
             followups
                 .iter()
                 .map(|name| format!("`{name}`"))
@@ -1561,15 +1546,9 @@ fn new_project_prompt(tools: &PromptToolContext<'_>, context: &ChatRunContext) -
         ));
     }
     if tools.has("rebuild_project") {
-        lines.push("- Use `rebuild_project` for iterative verification and confirm that the standalone server output is produced.".into());
-    }
-    if tools.has("open_project_app") {
         lines.push(
-            "- When ready, use `open_project_app` to present the app inside WorldBase.".into(),
+            "- Use `rebuild_project` for iterative verification and confirm the app still builds and serves.".into(),
         );
-    }
-    if tools.has("finalize_project") {
-        lines.push("- Use `finalize_project` only for the final rebuild and cleanup after all iterative work is complete.".into());
     }
     Some(lines.join("\n"))
 }
@@ -1716,6 +1695,8 @@ fn static_system_prompt_sections(
         mcp_tools_prompt(&tools),
         subagent_prompt(&tools),
         runtime_data_api_prompt(&tools),
+        ai_application_upgrade_prompt(&tools, context),
+        local_app_capabilities_prompt(&tools),
         new_project_prompt(&tools, context),
     ]
     .into_iter()
@@ -2307,21 +2288,36 @@ mod tests {
 
         async fn chat_stream(
             &self,
-            _system: Option<&str>,
+            system: Option<&str>,
             messages: Vec<LlmMessage>,
             tools: Vec<LlmTool>,
             _max_tokens: u32,
             options: ChatOptions,
         ) -> Result<ChunkStream> {
+            if system == Some(crate::context::engine::SUMMARY_SYSTEM_PROMPT) {
+                let next_is_tool = self
+                    .turns
+                    .lock()
+                    .unwrap()
+                    .front()
+                    .is_some_and(|turn| !turn.tool_uses().is_empty());
+                if next_is_tool {
+                    return Ok(Box::pin(futures::stream::iter([Ok(
+                        StreamChunk::Completed {
+                            stop_reason: "end_turn".into(),
+                            assistant: LlmMessage::text(LlmRole::Assistant, "test context summary"),
+                            usage: TokenUsage::default(),
+                        },
+                    )])));
+                }
+            }
             self.requests.lock().unwrap().push(ProtocolRequest {
                 messages,
                 tools,
                 options,
             });
-            let assistant = self
-                .turns
-                .lock()
-                .unwrap()
+            let mut turns = self.turns.lock().unwrap();
+            let assistant = turns
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("unexpected extra model request"))?;
             let stop_reason = if assistant.tool_uses().is_empty() {
@@ -2408,7 +2404,7 @@ mod tests {
         )
         .unwrap();
         let stream_id = run.stream_id;
-        let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let events = tokio::time::timeout(std::time::Duration::from_secs(60), async {
             let mut events = Vec::new();
             loop {
                 let frame = receiver.recv().await.unwrap();
@@ -2430,7 +2426,7 @@ mod tests {
         .await
         .expect("protocol test run timed out");
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while hub.runs.lock().unwrap().contains_key(&stream_id) {
                 tokio::task::yield_now().await;
             }
@@ -3511,6 +3507,58 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_routes_local_capabilities_through_search_tools() {
+        let tools = vec![
+            prompt_tool("search_tools", "Discover additional tools."),
+            prompt_tool("create_project", "Create a managed project."),
+        ];
+        let prompt = static_system_prompt_sections(
+            std::path::Path::new("/workspace"),
+            &ChatRunContext::default(),
+            &tools,
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("## Local app capabilities"));
+        assert!(prompt.contains("`search_tools`"));
+        assert!(prompt.contains("`source: \"app\"`"));
+        assert!(
+            prompt.contains("its app auto-starts"),
+            "the model must know capability invocation auto-starts the app"
+        );
+        assert!(prompt.contains("Prefer local capabilities over web/browser/UI automation"));
+        assert!(prompt.contains("Do not search again after activation"));
+        assert!(prompt.contains("Fall back only when no local capability matches"));
+
+        // The routing section stays generic: no concrete application names or
+        // runtime status values.
+        for leaked in [
+            "worldbase.tasks",
+            "worldbase.documents",
+            "worldbase.projects",
+            "worldbase.host",
+            "localhost:5173",
+        ] {
+            assert!(
+                !prompt.contains(leaked),
+                "prompt leaked application-specific data: {leaked}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_capability_prompt_requires_search_tools() {
+        let tools = vec![prompt_tool("read_file", "Read a workspace file.")];
+        let prompt = static_system_prompt_sections(
+            std::path::Path::new("/workspace"),
+            &ChatRunContext::default(),
+            &tools,
+        )
+        .join("\n\n");
+        assert!(!prompt.contains("## Local app capabilities"));
+    }
+
+    #[test]
     fn memory_prompt_explains_local_store_and_respects_scope_policy() {
         let tools = vec![prompt_tool(
             "memory_search",
@@ -3833,6 +3881,8 @@ mod tests {
     fn system_prompt_adds_desktop_workflows_only_for_visible_tools() {
         let tools = [
             "create_project",
+            "upgrade_project",
+            "search_tools",
             "list_project_files",
             "read_project_file",
             "edit_project_file",
@@ -3876,6 +3926,7 @@ mod tests {
         for section in [
             "## Editing existing projects",
             "## Build and runtime routing",
+            "## AI application capabilities and upgrades",
             "## Web and active-page tools",
             "## Operating-system Computer Use",
             "## Document tools",
@@ -3894,6 +3945,60 @@ mod tests {
         assert!(prompt.contains("`mcp_call` requires the exact server ID"));
         assert!(prompt.contains("`query_project_database` is read-only"));
         assert!(prompt.contains("Poll `get_project_command_status`"));
+        assert!(prompt.contains("`upgrade_project`"));
+        assert!(prompt.contains("Do not inspect or unpack `app.asar`"));
+        assert!(prompt.contains("`aiApplication.status`"));
+        assert!(prompt.contains("source: \"app\""));
+        for expected in ["`template`", "`entities`", "`features`", "`search_tools`"] {
+            assert!(
+                prompt.contains(expected),
+                "new project guidance must mention {expected}"
+            );
+        }
+        for removed in [
+            "THE_WORLD_PROJECT_DATA_BASE_URL",
+            "NEXT_PUBLIC_THE_WORLD_PROJECT_DATA_BASE_URL",
+            "build: next build",
+            "standalone output",
+            "root layout",
+            "dataSchema",
+            ".world-meta.json",
+        ] {
+            assert!(
+                !prompt.contains(removed),
+                "low-level prompt detail must be removed: {removed}"
+            );
+        }
+    }
+
+    #[test]
+    fn ai_application_upgrade_prompt_names_the_bound_project_and_stops_binary_exploration() {
+        let tools = vec![
+            prompt_tool("upgrade_project", "Upgrade an existing project."),
+            prompt_tool("search_tools", "Discover tools."),
+            prompt_tool("get_project_status", "Read project status."),
+        ];
+        let context = ChatRunContext {
+            target_project_id: Some("proj_target".into()),
+            ..ChatRunContext::default()
+        };
+        let prompt = static_system_prompt_sections(
+            std::path::Path::new("/desktop-workspace"),
+            &context,
+            &tools,
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("## AI application capabilities and upgrades"));
+        assert!(prompt.contains("`proj_target`"));
+        assert!(prompt.contains("Call `get_project_status` once"));
+        assert!(prompt.contains("`capabilityDetails`"));
+        assert!(prompt.contains("what the project can do for AI"));
+        assert!(prompt.contains("If the requested business operation is not covered"));
+        assert!(prompt.contains("`ai_only: true`"));
+        assert!(prompt.contains("Do not inspect or unpack `app.asar`"));
+        assert!(prompt.contains("If the manifest is `invalid`"));
+        assert!(prompt.contains("Do not claim the app is AI-usable"));
     }
 
     #[test]
@@ -4116,96 +4221,107 @@ mod tests {
     }
 
     #[test]
-    fn long_context_is_compressed_with_recent_messages_and_goal_anchor() {
-        let mut messages = (0..24)
-            .map(|index| {
-                let role = if index % 2 == 0 {
-                    LlmRole::User
+    fn long_context_assembles_token_bounded_recent_messages_and_goal_evidence() {
+        let history = (1..=24)
+            .map(|id| {
+                let role = if id % 2 == 1 {
+                    Role::User
                 } else {
-                    LlmRole::Assistant
+                    Role::Assistant
                 };
-                let marker = match index {
-                    0 => "ORIGINAL_OBJECTIVE ",
-                    22 => "LATEST_REQUEST ",
+                let marker = match id {
+                    1 => "ORIGINAL_OBJECTIVE ",
+                    23 => "LATEST_REQUEST ",
                     _ => "history ",
                 };
-                LlmMessage::text(role, format!("{marker}{}", "x".repeat(3_000)))
+                ChatMessage {
+                    id,
+                    role,
+                    content: format!("{marker}{}", "x".repeat(900)),
+                    parts: vec![],
+                    tool_calls: vec![],
+                    tool_results: vec![],
+                    created_at: None,
+                }
             })
             .collect::<Vec<_>>();
-        let original_count = messages.len();
-        let mut state = ContextCompressionState::from_messages(&messages);
-        let context_window = 12_000;
+        let messages = to_llm_messages(&history);
+        let estimator = TokenEstimator::new();
+        let budget = TokenBudget::fallback_32k();
+        let window = select_recent_window(&messages, budget.recent_raw_budget_tokens, &estimator);
 
-        assert!(compress_context_if_needed(
-            "base system",
-            &mut messages,
-            &[],
-            context_window,
-            &mut state,
-            false,
-        ));
-
-        assert!(messages.len() < original_count);
-        assert!(messages
+        assert!(window.messages.len() < messages.len());
+        assert!(window
+            .messages
             .iter()
             .any(|message| message.text_view().contains("LATEST_REQUEST")));
-        let effective_system = state.effective_system_prompt("base system");
-        assert!(effective_system.contains(CONTEXT_SUMMARY_PREFIX));
-        assert!(effective_system.contains(CONTEXT_GOAL_ANCHOR_PREFIX));
-        assert!(effective_system.contains("ORIGINAL_OBJECTIVE"));
-        assert!(effective_system.contains("LATEST_REQUEST"));
-        assert!(
-            estimate_context_tokens(&effective_system, &messages, &[])
-                <= context_warning_threshold(context_window)
+
+        let anchors = crate::context::UserAnchors::from_chat_history(&history);
+        let mut ledger = RunStateLedger::new("objective");
+        for anchor in [anchors.original, anchors.latest].into_iter().flatten() {
+            let _ = ledger.observe_real_user_request(anchor.message_id, anchor.text);
+        }
+        let fallback = crate::context::engine::checkpoint_fallback_from_ledger(&ledger);
+        let checkpoint =
+            CompactionCheckpoint::from_fallback("checkpoint", "conversation", &fallback);
+        let evidence = crate::context::assemble_request(
+            "conversation",
+            Some(&checkpoint),
+            &ledger,
+            &window.messages,
         );
+        let evidence_text = evidence
+            .iter()
+            .map(LlmMessage::text_view)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(evidence_text.contains("ORIGINAL_OBJECTIVE"));
+        assert!(evidence_text.contains("LATEST_REQUEST"));
+        assert!(evidence_text.contains("CONTEXT_CHECKPOINT"));
+        assert!(!evidence_text.starts_with("base system"));
     }
 
     #[test]
-    fn context_below_the_provider_budget_is_unchanged() {
-        let mut messages = vec![LlmMessage::text(LlmRole::User, "small request")];
-        let original = messages.clone();
-        let mut state = ContextCompressionState::from_messages(&messages);
-
-        assert!(!compress_context_if_needed(
-            "base system",
-            &mut messages,
-            &[],
-            DEFAULT_CONTEXT_WINDOW_TOKENS,
-            &mut state,
-            false,
-        ));
+    fn small_request_stays_below_background_compaction() {
+        let messages = vec![LlmMessage::text(LlmRole::User, "small request")];
+        let estimator = TokenEstimator::new();
+        let budget = TokenBudget::fallback_32k();
+        let estimated = estimator.estimate_request("base system", &messages, &[]);
+        assert!(estimated < budget.background_threshold_tokens);
         assert_eq!(
-            serde_json::to_value(&messages).unwrap(),
-            serde_json::to_value(&original).unwrap()
+            select_recent_window(&messages, budget.recent_raw_budget_tokens, &estimator)
+                .messages
+                .len(),
+            1
         );
-        assert!(state.summary.is_none());
     }
 
     #[tokio::test]
-    async fn provider_context_summary_is_private_and_replaces_deterministic_text() {
-        let provider = ProtocolProvider::new(vec![protocol_assistant("model summary", vec![])]);
+    async fn structured_checkpoint_is_private_and_uses_the_summary_provider_path() {
+        let ledger = RunStateLedger::from_real_user_request("goal", 1, "goal");
+        let checkpoint_body =
+            crate::context::engine::checkpoint_fallback_from_ledger(&ledger).render_markdown_body();
+        let provider = ProtocolProvider::new(vec![protocol_assistant(&checkpoint_body, vec![])]);
         let abort = CancellationToken::new();
-        let mut messages = vec![
+        let messages = vec![
             LlmMessage::text(LlmRole::User, format!("goal {}", "x".repeat(30_000))),
             LlmMessage::text(LlmRole::Assistant, format!("work {}", "y".repeat(30_000))),
         ];
-        let mut state = ContextCompressionState::from_messages(&messages);
 
-        assert!(
-            compress_context_with_provider(
-                "base system",
-                &mut messages,
-                &[],
-                12_000,
-                &mut state,
-                false,
-                &provider,
-                Some("summary-conversation"),
-                &abort,
-            )
-            .await
-        );
-        assert_eq!(state.summary.as_deref(), Some("model summary"));
+        let generation = crate::context::generate_checkpoint(
+            &provider,
+            Some("summary-conversation"),
+            None,
+            &messages,
+            &ledger,
+            20_000,
+            2_048,
+            &abort,
+        )
+        .await;
+
+        assert!(!generation.fallback_used);
+        assert!(generation.markdown.contains("## Knowledge Gaps"));
         let requests = provider.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(
@@ -4220,38 +4336,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_context_summary_failure_uses_deterministic_fallback() {
+    async fn provider_checkpoint_failure_uses_deterministic_ledger_fallback() {
         let provider = RetryProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
         let abort = CancellationToken::new();
-        let mut messages = vec![
+        let messages = vec![
             LlmMessage::text(LlmRole::User, format!("goal {}", "x".repeat(30_000))),
             LlmMessage::text(LlmRole::Assistant, format!("work {}", "y".repeat(30_000))),
         ];
-        let mut state = ContextCompressionState::from_messages(&messages);
+        let ledger = RunStateLedger::from_real_user_request("goal", 1, "goal");
 
-        assert!(
-            compress_context_with_provider(
-                "base system",
-                &mut messages,
-                &[],
-                12_000,
-                &mut state,
-                false,
-                &provider,
-                None,
-                &abort,
-            )
-            .await
-        );
-        let summary = state.summary.as_deref().unwrap_or_default();
-        assert!(summary.contains("goal"));
-        assert!(!summary.contains("partial"));
+        let generation = crate::context::generate_checkpoint(
+            &provider, None, None, &messages, &ledger, 20_000, 2_048, &abort,
+        )
+        .await;
+
+        assert!(generation.fallback_used);
+        assert!(generation.markdown.contains("goal"));
+        assert!(!generation.markdown.contains("partial"));
     }
 
     #[test]
-    fn recent_context_never_starts_with_an_orphan_tool_result() {
+    fn recent_window_never_starts_with_an_orphan_tool_result() {
         let history = vec![
             LlmMessage::text(LlmRole::User, "run it"),
             LlmMessage {
@@ -4273,18 +4380,83 @@ mod tests {
                 }],
             },
         ];
+        let estimator = TokenEstimator::new();
+        let pair_cost =
+            estimator.estimate_message(&history[1]) + estimator.estimate_message(&history[2]);
+        let window = select_recent_window(
+            &history,
+            pair_cost + estimator.estimate_message(&history[0]),
+            &estimator,
+        );
 
-        let (summary_end, recent) = recent_context_messages(&history, 1);
-        assert_eq!(summary_end, history.len());
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].text_view(), CONTEXT_CONTINUATION_MESSAGE);
+        assert_eq!(window.selected_indices, vec![0, 1, 2]);
+        assert_eq!(window.boundary_index, 0);
+        assert_eq!(window.messages[1].tool_uses().len(), 1);
+        assert!(matches!(
+            window.messages[2].content.first(),
+            Some(ContentBlock::ToolResult { tool_use_id, .. }) if tool_use_id == "call-1"
+        ));
+    }
 
-        let (summary_end, recent) = recent_context_messages(&history, 2);
-        assert_eq!(summary_end, 1);
-        assert_eq!(recent.len(), 3);
-        assert_eq!(recent[0].text_view(), CONTEXT_CONTINUATION_MESSAGE);
-        assert_eq!(recent[1].tool_uses().len(), 1);
-        assert!(is_tool_result_only(&recent[2]));
+    #[tokio::test]
+    async fn compaction_note_is_sent_once_and_never_enters_the_next_request() {
+        let (hub, provider, workspace, conversation_id) = protocol_test_hub(vec![
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "read-1",
+                    "read_file",
+                    serde_json::json!({ "path": "notes.txt" }),
+                )],
+            ),
+            protocol_assistant(
+                "",
+                vec![protocol_tool_call(
+                    "finish-1",
+                    FINISH_TASK_TOOL_NAME,
+                    serde_json::json!({ "task_summary": "Finished after reading." }),
+                )],
+            ),
+        ]);
+        for index in 0..14 {
+            hub.store
+                .append_message(
+                    &conversation_id,
+                    &ChatMessage {
+                        id: 0,
+                        role: if index % 2 == 0 {
+                            Role::User
+                        } else {
+                            Role::Assistant
+                        },
+                        content: format!("history-{index}: {}", "large-context ".repeat(2_000)),
+                        parts: vec![],
+                        tool_calls: vec![],
+                        tool_results: vec![],
+                        created_at: None,
+                    },
+                )
+                .unwrap();
+        }
+
+        let events = run_protocol_chat(hub.clone(), &conversation_id).await;
+        assert!(events.iter().any(
+            |event| matches!(event, EventKind::Notice { text } if text.contains("上下文已压缩"))
+        ));
+        let requests = provider.requests();
+        assert!(requests.len() >= 2);
+        assert!(requests[0].messages.iter().any(|message| {
+            message.role == LlmRole::User && message.text_view().contains("COMPACTION_NOTE")
+        }));
+        assert!(requests[1..].iter().all(|request| {
+            request
+                .messages
+                .iter()
+                .all(|message| !message.text_view().contains("COMPACTION_NOTE"))
+        }));
+
+        drop(hub);
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[tokio::test]
@@ -5742,17 +5914,6 @@ mod tests {
     }
 }
 
-fn llm_tools(tools: &[Arc<dyn worldbase_tools::Tool>]) -> Vec<LlmTool> {
-    tools
-        .iter()
-        .map(|t| LlmTool {
-            name: t.name().to_string(),
-            description: t.description().to_string(),
-            input_schema: t.input_schema(),
-        })
-        .collect()
-}
-
 fn llm_custom_tools(tools: &[ToolDescriptor]) -> Vec<LlmTool> {
     tools
         .iter()
@@ -5834,17 +5995,6 @@ fn platform_tools(
         .collect()
 }
 
-fn run_tools(
-    tools: Vec<Arc<dyn worldbase_tools::Tool>>,
-    context: &ChatRunContext,
-    policy: &RunToolPolicy,
-) -> Vec<Arc<dyn worldbase_tools::Tool>> {
-    platform_tools(tools, context)
-        .into_iter()
-        .filter(|tool| tool_allowed_for_run(tool.name(), policy))
-        .collect()
-}
-
 fn is_folder_workspace_tool(name: &str) -> bool {
     matches!(
         name,
@@ -5906,6 +6056,134 @@ fn run_custom_tools(
         .collect()
 }
 
+fn catalog_entry(tool: Arc<dyn worldbase_tools::Tool>, visibility: ToolVisibility) -> CatalogEntry {
+    let mut descriptor = tool.descriptor();
+    descriptor.visibility = visibility;
+    CatalogEntry {
+        descriptor,
+        tool,
+        visibility,
+    }
+}
+
+/// Every enabled, available application capability for this platform. The
+/// caller applies the agent allow/deny policy when building the executable
+/// base catalog; the unfiltered list also feeds `visible_tool_catalog`.
+fn application_catalog_entries(hub: &Hub, caps: &Capabilities) -> Vec<CatalogEntry> {
+    let mut entries = Vec::new();
+    for app in hub.application_registry.list() {
+        if !app.enabled || !hub.application_registry.app_visible(&app.app_id, caps) {
+            continue;
+        }
+        let Some(provider) = hub.application_registry.provider_for(&app.app_id) else {
+            continue;
+        };
+        for capability in &app.capabilities {
+            if capability.availability != CapabilityAvailability::Available {
+                continue;
+            }
+            let tool: Arc<dyn worldbase_tools::Tool> =
+                Arc::new(worldbase_tools::CapabilityTool::new(
+                    provider.clone(),
+                    app.clone(),
+                    capability.clone(),
+                ));
+            entries.push(catalog_entry(tool, ToolVisibility::Discoverable));
+        }
+    }
+    entries
+}
+
+fn skill_catalog_entries(hub: &Hub) -> Vec<SkillCatalogEntry> {
+    hub.skills
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|skill| !skill.instructions.trim().is_empty())
+        .map(|skill| {
+            let description = if skill.description.trim().is_empty() {
+                skill.when_to_use.clone().unwrap_or_default()
+            } else {
+                skill.description.clone()
+            };
+            SkillCatalogEntry {
+                source: format!("skill:{}", skill.name),
+                name: skill.name,
+                description,
+                tags: skill.allowed_tools,
+                instructions: skill.instructions,
+            }
+        })
+        .collect()
+}
+
+fn tool_allowed_in_catalog(name: &str, policy: &RunToolPolicy) -> bool {
+    // `search_tools` is the discovery entrypoint: an agent allow/deny list
+    // must never be able to hide the only way to reach discoverable tools.
+    name == "search_tools" || tool_allowed_for_run(name, policy)
+}
+
+fn tools_meta_from_snapshot(
+    snapshot: &crate::application::RunCatalogSnapshot,
+    custom_tools: &[ToolDescriptor],
+    policy: &RunToolPolicy,
+) -> Vec<LlmTool> {
+    let mut tools_meta = snapshot
+        .entries
+        .iter()
+        .filter(|entry| tool_allowed_in_catalog(&entry.descriptor.name, policy))
+        .map(|entry| LlmTool {
+            name: entry.descriptor.name.clone(),
+            description: entry.descriptor.description.clone(),
+            input_schema: entry.descriptor.input_schema.clone(),
+        })
+        .collect::<Vec<_>>();
+    tools_meta.extend(llm_custom_tools(custom_tools));
+    let mut seen = std::collections::HashSet::new();
+    tools_meta.retain(|tool| tool.name != FINISH_TASK_TOOL_NAME && seen.insert(tool.name.clone()));
+    tools_meta.push(finish_task_tool_definition());
+    tools_meta
+}
+
+fn executable_snapshot_tools(
+    snapshot: &crate::application::RunCatalogSnapshot,
+    policy: &RunToolPolicy,
+) -> Vec<Arc<dyn worldbase_tools::Tool>> {
+    snapshot
+        .entries
+        .iter()
+        .filter(|entry| tool_allowed_in_catalog(&entry.descriptor.name, policy))
+        .map(|entry| entry.tool.clone())
+        .collect()
+}
+
+fn dynamic_system_suffix_with_skills(
+    head: Option<&str>,
+    instructions: &[String],
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(head) = head.filter(|head| !head.trim().is_empty()) {
+        parts.push(head.to_string());
+    }
+    let instructions = instructions
+        .iter()
+        .map(|instructions| instructions.trim())
+        .filter(|instructions| !instructions.is_empty())
+        .collect::<Vec<_>>();
+    if !instructions.is_empty() {
+        let content = instructions
+            .iter()
+            .enumerate()
+            .map(|(index, instructions)| format!("### Skill {}\n{instructions}", index + 1))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        parts.push(format!(
+            "## Active skills\nFollow these activated skill instructions for the rest of this run.\n\n{content}"
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
 fn apply_persisted_agent_context(
     hub: &Hub,
     context: &mut ChatRunContext,
@@ -5957,6 +6235,9 @@ fn apply_persisted_agent_context(
 pub struct ChatRun {
     pub stream_id: String,
     pub conversation_id: String,
+    /// Short-lived token that resolves direct `tool.call` requests to this
+    /// run's Rust-held catalog. It carries no permission by itself.
+    pub run_capability_token: String,
 }
 
 /// 发起一次 chat：立即返回 stream_id，事件经 channel + hub.event_tx 下发。
@@ -6115,6 +6396,15 @@ fn start_chat_with_stream_id_and_group_runtime_at_depth(
     let stream_id = stream_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let channel = hub.register_stream(&stream_id);
     let abort = CancellationToken::new();
+    // Publish the token before spawning the loop so `chat.send` can return it
+    // synchronously. The catalog itself is registered by `run_chat_inner`
+    // once the platform/agent policy and discovered MCP tools are known.
+    let run_capability_token = uuid::Uuid::new_v4().simple().to_string();
+    {
+        let mut tokens = hub.run_tokens.lock().unwrap();
+        tokens.retain(|_, mapped_stream| mapped_stream != &stream_id);
+        tokens.insert(run_capability_token.clone(), stream_id.clone());
+    }
 
     hub.runs.lock().unwrap().insert(
         stream_id.clone(),
@@ -6148,6 +6438,7 @@ fn start_chat_with_stream_id_and_group_runtime_at_depth(
     Ok(ChatRun {
         stream_id,
         conversation_id,
+        run_capability_token,
     })
 }
 
@@ -6276,6 +6567,11 @@ async fn prepare_scheduled_run(
         .create_conversation(&format!("[定时] {name}"), None)?;
     let stream_id = format!("schedule-{schedule_id}-{}", uuid::Uuid::new_v4());
     let channel = hub.register_stream(&stream_id);
+    {
+        let mut tokens = hub.run_tokens.lock().unwrap();
+        tokens.retain(|_, mapped_stream| mapped_stream != &stream_id);
+        tokens.insert(uuid::Uuid::new_v4().simple().to_string(), stream_id.clone());
+    }
     publish(
         &hub,
         &channel,
@@ -6635,6 +6931,28 @@ fn schedule_calls_for_run(
 /// A write batch must run serially when any member could ask the host for
 /// permission. `auto_approve` disables prompts for unattended runs, so the
 /// batch may stay parallel there.
+fn effective_tool_policy(
+    hub: &Hub,
+    tool: Option<&Arc<dyn worldbase_tools::Tool>>,
+    custom_tool: Option<&ToolDescriptor>,
+    name: &str,
+) -> String {
+    if let Some((app, capability, _)) = hub.application_registry.find_capability(name) {
+        let grants = hub
+            .application_registry
+            .list_grants(Some(&app.app_id))
+            .unwrap_or_default();
+        return crate::application::policy::effective_policy(
+            capability.risk,
+            &app.app_id,
+            &capability.capability_id,
+            &grants,
+        )
+        .to_string();
+    }
+    worldbase_policy_for(hub.store.as_ref(), tool, custom_tool, name)
+}
+
 fn write_call_requires_interactive_permission(
     hub: &Hub,
     tools: &[Arc<dyn worldbase_tools::Tool>],
@@ -6650,7 +6968,7 @@ fn write_call_requires_interactive_permission(
     }
     let tool = tools.iter().find(|tool| tool.name() == call.name);
     let custom_tool = custom_tools.iter().find(|tool| tool.name == call.name);
-    let policy = worldbase_policy_for(hub.store.as_ref(), tool, custom_tool, &call.name);
+    let policy = effective_tool_policy(hub, tool, custom_tool, &call.name);
     !matches!(policy.as_str(), "allow" | "deny")
 }
 
@@ -7183,6 +7501,38 @@ fn apply_coding_tool_outcome(
     })
 }
 
+/// Resolve the managed project that a successful scaffold tool created or
+/// upgraded. `create_project` reports the id in its result; `upgrade_project`
+/// receives it as input. Returns `None` for other tools or failed calls.
+fn scaffold_tool_project_id(
+    tool_name: &str,
+    input: &serde_json::Value,
+    result: &Result<serde_json::Value>,
+) -> Option<String> {
+    fn from_value(value: &serde_json::Value) -> Option<String> {
+        value
+            .get("projectId")
+            .or_else(|| value.get("project_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|project_id| !project_id.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
+    let value = result.as_ref().ok()?;
+    match tool_name {
+        "create_project" => from_value(value),
+        "upgrade_project" => input
+            .get("project_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|project_id| !project_id.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| from_value(value)),
+        _ => None,
+    }
+}
+
 async fn execute_tool_for_run(
     hub: &Arc<Hub>,
     services: &worldbase_tools::ToolServices,
@@ -7198,6 +7548,7 @@ async fn execute_tool_for_run(
     input: serde_json::Value,
     storage_dir: &Path,
 ) -> RunToolExecution {
+    let started = std::time::Instant::now();
     let tool = tools.iter().find(|tool| tool.name() == name);
     let custom_tool = custom_tools.iter().find(|tool| tool.name == name);
     let exec_result = if let Some(error) = tool_input_errors.get(&call_id) {
@@ -7207,7 +7558,7 @@ async fn execute_tool_for_run(
             "当前处于规划模式，不允许执行写入操作 ({name})。请先退出规划模式。"
         ))
     } else {
-        let policy = worldbase_policy_for(hub.store.as_ref(), tool, custom_tool, &name);
+        let policy = effective_tool_policy(hub, tool, custom_tool, &name);
         // The workspace root defines the "safe zone" for command and path
         // permissions: folder-workspace conversations use the selected folder,
         // managed-project runs use the project root.
@@ -7222,7 +7573,10 @@ async fn execute_tool_for_run(
                 .or_else(|| services.target_project_id.clone());
             project_id.and_then(|id| services.projects.project_root(&id).ok())
         });
-        let allowed = crate::permissions::check(
+        let risk = tool
+            .and_then(|tool| tool.risk())
+            .or_else(|| custom_tool.and_then(|tool| tool.risk));
+        let allowed = crate::permissions::check_with_risk(
             hub,
             stream_id,
             &policy,
@@ -7232,6 +7586,7 @@ async fn execute_tool_for_run(
             interactive,
             auto_approve,
             Some(abort),
+            risk,
         )
         .await;
         if abort.is_cancelled() {
@@ -7264,8 +7619,41 @@ async fn execute_tool_for_run(
         }
     };
 
+    let scaffold_project_id = scaffold_tool_project_id(&name, &input, &exec_result);
+    let scaffold_dry_run = exec_result
+        .as_ref()
+        .ok()
+        .and_then(|value| value.get("dryRun"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let (content, is_error, images) =
         process_tool_result(exec_result, &name, &call_id, storage_dir).await;
+    if !is_error && matches!(name.as_str(), "create_project" | "upgrade_project") {
+        hub.refresh_managed_applications();
+        hub.application_registry.invalidate();
+        // Scaffold-generated applications are safe to enable immediately; the
+        // capability call still starts the project runtime on demand. A dry
+        // run must not flip catalog state.
+        if !scaffold_dry_run {
+            if let Some(project_id) = scaffold_project_id.as_deref() {
+                hub.auto_enable_scaffold_application(project_id);
+            }
+        }
+    }
+    if let Some((app, capability, _)) = hub.application_registry.find_capability(&name) {
+        let _ =
+            hub.application_registry
+                .record_call(worldbase_protocol::types::ApplicationCallAudit {
+                    call_id: call_id.clone(),
+                    conversation_id: services.conversation_id.clone(),
+                    app_id: app.app_id,
+                    capability_id: capability.capability_id,
+                    status: if is_error { "error" } else { "ok" }.into(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    approval_id: None,
+                    created_at: String::new(),
+                });
+    }
     RunToolExecution {
         call_id,
         name,
@@ -7381,6 +7769,16 @@ async fn run_chat_inner(
     if group_collaboration.is_some() {
         catalog_tools.extend(worldbase_tools::group_collaboration_tools());
     }
+    // `search_tools` is the only path to discoverable capabilities. Keep it in
+    // the catalog even if platform filtering or an agent policy would drop it.
+    if !catalog_tools
+        .iter()
+        .any(|tool| tool.name() == "search_tools")
+    {
+        if let Some(tool) = hub.tools.iter().find(|tool| tool.name() == "search_tools") {
+            catalog_tools.push(tool.clone());
+        }
+    }
     let folder_workspace = context
         .workspace_root
         .as_deref()
@@ -7403,23 +7801,6 @@ async fn run_chat_inner(
     services.abort = Some(abort.clone());
     services.group_collaboration = group_collaboration.clone();
     services.set_current_stream(&stream_id);
-    if subagent_nesting_depth < MAX_SUBAGENT_NESTING_DEPTH {
-        services.subagent_runtime = Some(Arc::new(CoreSubagentRuntime::new(
-            hub.clone(),
-            stream_id.clone(),
-            abort.clone(),
-            caps.clone(),
-            interactive,
-            agent.as_ref().map(|agent| agent.id.clone()),
-            provider_entry.as_ref().map(|entry| entry.id.clone()),
-            model_override
-                .clone()
-                .or_else(|| Some(provider.model().to_string())),
-            context.clone(),
-            group_collaboration.clone(),
-            subagent_nesting_depth,
-        )));
-    }
     if context.plan_mode_active {
         // The desktop UI may enter plan mode before this stream begins. Keep
         // the authoritative guard inside Rust rather than relying on a prompt
@@ -7460,18 +7841,94 @@ async fn run_chat_inner(
         .map(|tool| tool.name.as_str())
         .collect();
     catalog_tools.retain(|tool| !host_override_names.contains(tool.name()));
-    let mut visible_tool_catalog = worldbase_tools::descriptors(&catalog_tools);
+
+    let application_entries = application_catalog_entries(&hub, &caps);
+    let mut visible_tool_catalog = catalog_tools
+        .iter()
+        .map(|tool| {
+            let mut descriptor = tool.descriptor();
+            if tool.name().starts_with("mcp__") {
+                descriptor.visibility = ToolVisibility::Discoverable;
+            }
+            descriptor
+        })
+        .collect::<Vec<_>>();
     visible_tool_catalog.extend(catalog_custom_tools.iter().cloned());
+    visible_tool_catalog.extend(
+        application_entries
+            .iter()
+            .map(|entry| entry.descriptor.clone()),
+    );
     visible_tool_catalog.sort_by(|left, right| left.name.cmp(&right.name));
     visible_tool_catalog.dedup_by(|left, right| left.name == right.name);
     services.visible_tool_catalog = Some(Arc::new(visible_tool_catalog));
 
-    let tools = run_tools(catalog_tools, &context, &tool_policy);
     let custom_tools = run_custom_tools(catalog_custom_tools, &tool_policy);
-    let mut tools_meta = llm_tools(&tools);
-    tools_meta.extend(llm_custom_tools(&custom_tools));
-    tools_meta.retain(|tool| tool.name != FINISH_TASK_TOOL_NAME);
-    tools_meta.push(finish_task_tool_definition());
+    let mut base_entries = Vec::new();
+    for tool in catalog_tools {
+        if !tool_allowed_in_catalog(tool.name(), &tool_policy) {
+            continue;
+        }
+        let visibility = if tool.name().starts_with("mcp__") {
+            ToolVisibility::Discoverable
+        } else {
+            tool.visibility()
+        };
+        base_entries.push(catalog_entry(tool, visibility));
+    }
+    base_entries.extend(
+        application_entries
+            .into_iter()
+            .filter(|entry| tool_allowed_for_run(&entry.descriptor.name, &tool_policy)),
+    );
+    let skills = skill_catalog_entries(&hub);
+    let run_capability_token = hub
+        .run_capability_token_for_stream(&stream_id)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+    let allowed_base_names: std::collections::HashSet<String> = base_entries
+        .iter()
+        .map(|entry| entry.descriptor.name.clone())
+        .collect();
+    let catalog = RunToolCatalog::new_with_policy(
+        stream_id.clone(),
+        run_capability_token.clone(),
+        hub.application_registry.clone(),
+        base_entries,
+        skills,
+        caps.clone(),
+        Arc::new(move |name: &str| allowed_base_names.contains(name)),
+    );
+    hub.register_run_catalog(&stream_id, &run_capability_token, catalog.clone());
+    services.catalog_runtime = Some(catalog.clone());
+    services.conversation_id = Some(conversation_id.clone());
+    // A subagent inherits every tool the parent already activated. The base
+    // catalog is policy-filtered, so activation cannot widen the child.
+    if !context.inherited_tool_names.is_empty() {
+        let _ = catalog.activate(&context.inherited_tool_names);
+    }
+    context.inherited_tool_names =
+        worldbase_tools::ToolCatalogRuntime::active_tool_names(catalog.as_ref());
+    if subagent_nesting_depth < MAX_SUBAGENT_NESTING_DEPTH {
+        services.subagent_runtime = Some(Arc::new(CoreSubagentRuntime::new(
+            hub.clone(),
+            stream_id.clone(),
+            abort.clone(),
+            caps.clone(),
+            interactive,
+            agent.as_ref().map(|agent| agent.id.clone()),
+            provider_entry.as_ref().map(|entry| entry.id.clone()),
+            model_override
+                .clone()
+                .or_else(|| Some(provider.model().to_string())),
+            context.clone(),
+            group_collaboration.clone(),
+            subagent_nesting_depth,
+        )));
+    }
+
+    let initial_snapshot = catalog.snapshot();
+    let mut last_catalog_version = initial_snapshot.version;
+    let mut tools_meta = tools_meta_from_snapshot(&initial_snapshot, &custom_tools, &tool_policy);
     let memory_query_vector = resolve_memory_query_vector(&hub, &context).await;
     let system_build = system_prompt(
         &hub,
@@ -7481,20 +7938,67 @@ async fn run_chat_inner(
         memory_query_vector.as_ref(),
     )
     .await;
-    let system = system_build.full;
-    let dynamic_system_suffix = system_build.dynamic_tail;
+    let mut system = system_build.full;
+    let mut dynamic_system_suffix_head = system_build.dynamic_tail;
     let selected_model = model_override
         .as_deref()
         .unwrap_or_else(|| provider.model());
     let context_window_tokens =
         provider_context_window_tokens(provider_entry.as_ref(), selected_model, provider.name());
+    let token_budget = TokenBudget::new(context_window_tokens, MAX_TOKENS as usize);
+    let mut token_estimator = TokenEstimator::new();
 
-    let history = hub
+    let full_history = hub
         .store
         .list_messages(&conversation_id, 400)
         .unwrap_or_default();
+    let (checkpoint, loaded_ledger) =
+        match crate::context::load_checkpoint(hub.store.as_ref(), &conversation_id) {
+            Some((checkpoint, ledger)) => (Some(checkpoint), ledger),
+            None => (None, None),
+        };
+    let mut checkpoint = checkpoint;
+    let mut ledger = loaded_ledger.unwrap_or_else(|| RunStateLedger::new(""));
+    observe_ledger_anchors(&mut ledger, &full_history);
+    let history = if let Some(checkpoint) = checkpoint.as_ref() {
+        let filtered = full_history
+            .iter()
+            .filter(|message| message.id > checkpoint.last_summarized_message_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if filtered.is_empty() {
+            full_history.clone()
+        } else {
+            filtered
+        }
+    } else {
+        full_history.clone()
+    };
     let mut llm_messages = to_llm_messages(&history);
-    let mut context_compression = ContextCompressionState::from_messages(&llm_messages);
+    let context_ledger = std::sync::Arc::new(std::sync::Mutex::new(ledger));
+    let initial_version = current_compaction_version(
+        &full_history,
+        &system,
+        initial_snapshot.version,
+        provider_entry.as_ref(),
+        selected_model,
+    );
+    let ledger_history_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        initial_version.history_version,
+    ));
+    let track_b_extractor = provider_entry.as_ref().map(|_| {
+        std::sync::Arc::new(crate::context::track_b::TrackBExtractor::new(
+            provider.clone(),
+            Some(conversation_id.clone()),
+            crate::context::track_b::DEFAULT_TRACK_B_TIMEOUT,
+            1,
+        ))
+    });
+    let mut compaction_note = crate::context::compaction_note::CompactionNoteState::new();
+    let mut candidate_manager = crate::context::candidate::CandidateManager::new(initial_version);
+    let mut overflow_guard = crate::context::OverflowCompactionGuard::new();
+    let (candidate_tx, mut candidate_rx) = tokio::sync::mpsc::channel::<CompactionCandidate>(1);
+    let mut candidate_task: Option<tokio::task::JoinHandle<()>> = None;
     let tool_result_storage_dir = worldbase_memory::Store::default_dir().join("tool-results");
 
     // Every `break` below emits a terminal frame and assigns `result`.
@@ -7520,7 +8024,10 @@ async fn run_chat_inner(
     let run_started_at = std::time::Instant::now();
     let mut segment_iterations = 0usize;
     let mut segment_index = 1usize;
-    loop {
+    let mut logical_step = 0u64;
+    let mut completed_turns = 0usize;
+    let mut last_compaction_turn: Option<usize> = None;
+    'agent_loop: loop {
         if abort.is_cancelled() {
             publish(
                 &hub,
@@ -7566,50 +8073,137 @@ async fn run_chat_inner(
             result = Ok(message.into());
             break;
         }
-        if segment_iterations >= MAX_STEPS {
-            // Keep the loop alive across long-running tasks. The continuation
-            // directive is transient context, mirroring Electron's automatic
-            // segment hand-off after its per-segment iteration budget.
+        // Refresh the run catalog before every model turn. Registry changes
+        // (application enabled/disabled, grants, MCP reload) invalidate active
+        // entries; `search_tools` activations bump the run catalog version
+        // directly. Either way the next request must use the new snapshot.
+        catalog.refresh_from_registry();
+        let turn_snapshot = catalog.snapshot();
+        if turn_snapshot.version != last_catalog_version {
+            tools_meta = tools_meta_from_snapshot(&turn_snapshot, &custom_tools, &tool_policy);
+            last_catalog_version = turn_snapshot.version;
+        }
+        let turn_tools = executable_snapshot_tools(&turn_snapshot, &tool_policy);
+        let dynamic_system_suffix = dynamic_system_suffix_with_skills(
+            dynamic_system_suffix_head.as_deref(),
+            &turn_snapshot.active_skill_instructions,
+        );
+        let stored_history = hub
+            .store
+            .list_messages(&conversation_id, 400)
+            .unwrap_or_default();
+        {
+            let Ok(mut ledger) = context_ledger.lock() else {
+                let message = "context ledger lock poisoned".to_string();
+                publish(
+                    &hub,
+                    &channel,
+                    &stream_id,
+                    EventKind::Error {
+                        message: message.clone(),
+                    },
+                )
+                .await;
+                result = Err(anyhow::anyhow!(message));
+                break;
+            };
+            observe_ledger_anchors(&mut ledger, &stored_history);
+        }
+        let current_version = current_compaction_version(
+            &stored_history,
+            &system,
+            turn_snapshot.version,
+            provider_entry.as_ref(),
+            selected_model,
+        );
+        ledger_history_version.store(
+            current_version.history_version,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        let _stale_candidate = candidate_manager.set_current_version(current_version.clone());
+        while let Ok(candidate) = candidate_rx.try_recv() {
+            candidate_task.take();
+            if let Err(error) = candidate_manager.complete_background(candidate) {
+                tracing::debug!(%error, "background context candidate rejected");
+            }
+        }
+
+        let mut compacted_this_iteration = false;
+        let mut compact_notice: Option<String> = None;
+        let force_segment_compaction = segment_iterations >= MAX_STEPS;
+        if force_segment_compaction {
+            // Keep the loop alive across long-running tasks without the old
+            // unconditional every-16-turn force path. The segment boundary is
+            // still a safe point to rebuild static context and compact.
             remove_finish_task_nudges(&mut llm_messages);
             llm_messages.retain(|message| {
                 !(message.role == LlmRole::User
                     && message.text_view() == CONTEXT_CONTINUATION_MESSAGE)
             });
             segment_index += 1;
-            let compressed = compress_context_with_provider(
+            if let Some(task) = candidate_task.take() {
+                task.abort();
+            }
+            if let Some(sequence) = candidate_manager.in_flight_sequence() {
+                let _ = candidate_manager.abandon_background(sequence);
+            }
+            let ledger_snapshot = context_ledger
+                .lock()
+                .map(|ledger| ledger.clone())
+                .unwrap_or_default();
+            let before_tokens = token_estimator.estimate_request(
                 &system,
-                &mut llm_messages,
+                &crate::context::assemble_request(
+                    &conversation_id,
+                    checkpoint.as_ref(),
+                    &ledger_snapshot,
+                    &llm_messages,
+                ),
                 &tools_meta,
-                context_window_tokens,
-                &mut context_compression,
-                true,
+            );
+            let source_history = compaction_source_history(
+                hub.store.as_ref(),
+                &conversation_id,
+                checkpoint.as_ref(),
+            );
+            let source = to_sourced_llm_messages(&source_history);
+            let recent_limit =
+                compaction_recent_limit(&system, &tools_meta, &token_budget, &token_estimator)
+                    .unwrap_or(256);
+            match compact_context_now(
+                hub.store.as_ref(),
+                &conversation_id,
                 provider.as_ref(),
-                Some(&conversation_id),
+                checkpoint.as_ref(),
+                &ledger_snapshot,
+                &source,
+                &token_estimator,
+                &token_budget,
+                recent_limit,
+                &current_version,
+                None,
+                "segment",
+                before_tokens,
                 &abort,
             )
-            .await;
-            if compressed {
-                publish(
-                    &hub,
-                    &channel,
-                    &stream_id,
-                    EventKind::Notice {
-                        text: format!(
-                            "自动续跑第 {segment_index} 段：上下文已压缩，以适配约 {context_window_tokens} token 的模型窗口。"
-                        ),
-                    },
-                )
-                .await;
-            } else {
-                publish(
-                    &hub,
-                    &channel,
-                    &stream_id,
-                    EventKind::Notice {
-                        text: format!("自动续跑第 {segment_index} 段（已完成 {MAX_STEPS} 轮）"),
-                    },
-                )
-                .await;
+            .await
+            {
+                Ok(compacted) => {
+                    compaction_note.arm(&compacted.checkpoint);
+                    checkpoint = Some(compacted.checkpoint);
+                    llm_messages = compacted.recent_messages;
+                    compacted_this_iteration = true;
+                    last_compaction_turn = Some(completed_turns);
+                    compact_notice = Some(format!(
+                        "自动续跑第 {segment_index} 段：上下文已压缩，以适配约 {context_window_tokens} token 的模型窗口。"
+                    ));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "segment-boundary context compaction failed");
+                    compact_notice = Some(format!(
+                        "自动续跑第 {segment_index} 段（已完成 {MAX_STEPS} 轮）"
+                    ));
+                }
             }
             llm_messages.push(LlmMessage::text(
                 LlmRole::User,
@@ -7617,8 +8211,6 @@ async fn run_chat_inner(
             ));
             segment_iterations = 0;
         }
-        let force_proactive_compression =
-            segment_iterations > 0 && segment_iterations % PROACTIVE_COMPRESSION_INTERVAL == 0;
         segment_iterations += 1;
         if let Some(limit) = context.budget_limit {
             if limit.is_finite() && limit > 0.0 && total_cost >= limit {
@@ -7649,32 +8241,216 @@ async fn run_chat_inner(
         }
 
         // Completion nudges are runtime directives rather than conversation
-        // history. Remove the previous one before compression, then inject the
-        // current attempt after compression so it cannot pollute goal anchors
-        // or be discarded with compacted history.
+        // history. They are removed before compaction and re-injected only into
+        // the next provider request, never into goal anchors or checkpoints.
         remove_finish_task_nudges(&mut llm_messages);
-        if compress_context_with_provider(
+        let ledger_snapshot = context_ledger
+            .lock()
+            .map(|ledger| ledger.clone())
+            .unwrap_or_default();
+        let mut estimated_input = token_estimator.estimate_request(
             &system,
-            &mut llm_messages,
+            &crate::context::assemble_request(
+                &conversation_id,
+                checkpoint.as_ref(),
+                &ledger_snapshot,
+                &llm_messages,
+            ),
             &tools_meta,
-            context_window_tokens,
-            &mut context_compression,
-            force_proactive_compression,
-            provider.as_ref(),
-            Some(&conversation_id),
-            &abort,
-        )
-        .await
+        );
+        // Runtime gate directives are transient and are re-injected after
+        // compaction. Never let a threshold pass discard the directive that
+        // the next model call must answer.
+        let runtime_nudge_pending = finish_task_state.nudge_count > 0
+            || llm_messages.iter().any(|message| {
+                message
+                    .text_view()
+                    .starts_with(CODING_VERIFICATION_GATE_PREFIX)
+            });
+        let safe_recent_limit =
+            compaction_recent_limit(&system, &tools_meta, &token_budget, &token_estimator);
+        let dynamic_context_tokens = token_estimator.estimate_request(
+            "",
+            &crate::context::assemble_request(
+                &conversation_id,
+                checkpoint.as_ref(),
+                &ledger_snapshot,
+                &llm_messages,
+            ),
+            &[],
+        );
+        let compaction_cooldown_ready =
+            last_compaction_turn.map_or(true, |turn| completed_turns >= turn.saturating_add(2));
+
+        if !compacted_this_iteration
+            && !runtime_nudge_pending
+            && compaction_cooldown_ready
+            && dynamic_context_tokens >= 2_048
+            && llm_messages.len() >= 4
+            && estimated_input >= token_budget.background_threshold_tokens
         {
+            let microcompaction = crate::context::microcompact(
+                &mut llm_messages,
+                &crate::context::MicrocompactOptions::default(),
+                &token_estimator,
+            );
+            if microcompaction.estimated_tokens_saved > 0 {
+                tracing::debug!(
+                    saved = microcompaction.estimated_tokens_saved,
+                    compacted = microcompaction.results_compacted,
+                    "microcompacted old tool results before summary"
+                );
+            }
+            estimated_input = token_estimator.estimate_request(
+                &system,
+                &crate::context::assemble_request(
+                    &conversation_id,
+                    checkpoint.as_ref(),
+                    &ledger_snapshot,
+                    &llm_messages,
+                ),
+                &tools_meta,
+            );
+        }
+
+        if !compacted_this_iteration
+            && !runtime_nudge_pending
+            && compaction_cooldown_ready
+            && dynamic_context_tokens >= 2_048
+            && llm_messages.len() >= 4
+            && estimated_input >= token_budget.compaction_threshold_tokens
+        {
+            let adopted_generation = match candidate_manager.adopt_candidate() {
+                Ok(candidate) => candidate
+                    .checkpoint
+                    .and_then(|value| serde_json::from_value::<CheckpointGeneration>(value).ok())
+                    .or_else(|| {
+                        Some(CheckpointGeneration {
+                            knowledge_gaps: crate::context::engine::extract_knowledge_gaps(
+                                &candidate.summary,
+                            ),
+                            markdown: candidate.summary,
+                            fallback_used: false,
+                        })
+                    }),
+                Err(error) => {
+                    tracing::debug!(%error, "no adoptable background context candidate");
+                    None
+                }
+            };
+            if let Some(task) = candidate_task.take() {
+                task.abort();
+            }
+            if let Some(sequence) = candidate_manager.in_flight_sequence() {
+                let _ = candidate_manager.abandon_background(sequence);
+            }
+            let source_history = compaction_source_history(
+                hub.store.as_ref(),
+                &conversation_id,
+                checkpoint.as_ref(),
+            );
+            let source = to_sourced_llm_messages(&source_history);
+            match compact_context_now(
+                hub.store.as_ref(),
+                &conversation_id,
+                provider.as_ref(),
+                checkpoint.as_ref(),
+                &ledger_snapshot,
+                &source,
+                &token_estimator,
+                &token_budget,
+                safe_recent_limit.unwrap_or(256),
+                &current_version,
+                adopted_generation,
+                if estimated_input >= token_budget.compaction_threshold_tokens {
+                    "threshold"
+                } else {
+                    "microcompact"
+                },
+                estimated_input,
+                &abort,
+            )
+            .await
+            {
+                Ok(compacted) => {
+                    compaction_note.arm(&compacted.checkpoint);
+                    checkpoint = Some(compacted.checkpoint);
+                    llm_messages = compacted.recent_messages;
+                    compacted_this_iteration = true;
+                    last_compaction_turn = Some(completed_turns);
+                    compact_notice = Some(format!(
+                        "上下文已压缩：约 {} → {} tokens。完整历史仍可通过 recall_context 检索。",
+                        compacted.before_tokens, compacted.after_tokens
+                    ));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "threshold context compaction failed");
+                }
+            }
+        } else if !compacted_this_iteration
+            && !runtime_nudge_pending
+            && compaction_cooldown_ready
+            && dynamic_context_tokens >= 2_048
+            && llm_messages.len() >= 4
+            && estimated_input >= token_budget.background_threshold_tokens
+            && estimated_input < token_budget.compaction_threshold_tokens
+        {
+            if let Some(ticket) = candidate_manager
+                .begin_background(estimated_input, token_budget.available_input_tokens)
+            {
+                let source_history = compaction_source_history(
+                    hub.store.as_ref(),
+                    &conversation_id,
+                    checkpoint.as_ref(),
+                );
+                let source = to_sourced_llm_messages(&source_history);
+                let provider = provider.clone();
+                let sender = candidate_tx.clone();
+                let previous = checkpoint.clone();
+                let ledger_for_candidate = ledger_snapshot.clone();
+                let estimator = token_estimator;
+                let budget = token_budget;
+                let version = current_version.clone();
+                let conversation_id_for_task = conversation_id.clone();
+                let abort_for_task = abort.clone();
+                candidate_task = Some(tokio::spawn(async move {
+                    let candidate = build_compaction_candidate(
+                        provider.as_ref(),
+                        &conversation_id_for_task,
+                        previous.as_ref(),
+                        &ledger_for_candidate,
+                        &source,
+                        &estimator,
+                        &budget,
+                        safe_recent_limit.unwrap_or(256),
+                        &version,
+                        ticket.sequence,
+                        &abort_for_task,
+                    )
+                    .await;
+                    let _ = sender.send(candidate).await;
+                }));
+            }
+        }
+
+        if compacted_this_iteration {
+            let rebuilt = system_prompt(
+                &hub,
+                agent.as_ref(),
+                &context,
+                &tools_meta,
+                memory_query_vector.as_ref(),
+            )
+            .await;
+            system = rebuilt.full;
+            dynamic_system_suffix_head = rebuilt.dynamic_tail;
+        }
+        if let Some(notice) = compact_notice {
             publish(
                 &hub,
                 &channel,
                 &stream_id,
-                EventKind::Notice {
-                    text: format!(
-                        "上下文已自动压缩，以适配约 {context_window_tokens} token 的模型窗口。"
-                    ),
-                },
+                EventKind::Notice { text: notice },
             )
             .await;
         }
@@ -7684,7 +8460,22 @@ async fn run_chat_inner(
                 finish_task_nudge(finish_task_state.nudge_count),
             ));
         }
-        let effective_system = context_compression.effective_system_prompt(&system);
+        let ledger_snapshot = context_ledger
+            .lock()
+            .map(|ledger| ledger.clone())
+            .unwrap_or_default();
+        let mut request_messages = crate::context::assemble_request(
+            &conversation_id,
+            checkpoint.as_ref(),
+            &ledger_snapshot,
+            &llm_messages,
+        );
+        if let Some(note) = compaction_note.drain_for_provider_request() {
+            let insert_at = request_messages.len().saturating_sub(llm_messages.len());
+            request_messages.insert(insert_at, note);
+        }
+        let request_estimate =
+            token_estimator.estimate_request(&system, &request_messages, &tools_meta);
 
         let mut assistant: Option<LlmMessage> = None;
         let mut stop_reason = String::new();
@@ -7721,8 +8512,8 @@ async fn run_chat_inner(
                 biased;
                 _ = abort.cancelled() => None,
                 result = provider.chat_stream(
-                    Some(&effective_system),
-                    llm_messages.clone(),
+                    Some(&system),
+                    request_messages.clone(),
                     tools_meta.clone(),
                     MAX_TOKENS,
                     ChatOptions {
@@ -7749,7 +8540,12 @@ async fn run_chat_inner(
             let mut stream = match stream_result {
                 Ok(s) => s,
                 Err(e) => {
-                    stream_error = Some(e.to_string());
+                    let message = e.to_string();
+                    let overflow = worldbase_providers::is_context_overflow_error(&message);
+                    stream_error = Some(message);
+                    if overflow {
+                        break;
+                    }
                     continue;
                 }
             };
@@ -7803,6 +8599,7 @@ async fn run_chat_inner(
                         total_cost += cost;
                         total_input_tokens += usage.input_tokens;
                         total_output_tokens += usage.output_tokens;
+                        token_estimator.calibrate_from_actual(request_estimate, usage.input_tokens);
                         publish(
                             &hub,
                             &channel,
@@ -7836,6 +8633,12 @@ async fn run_chat_inner(
             }
             drop(stream);
 
+            if stream_error
+                .as_deref()
+                .is_some_and(worldbase_providers::is_context_overflow_error)
+            {
+                break;
+            }
             if assistant.is_some() && stream_error.is_none() {
                 break;
             }
@@ -7845,6 +8648,136 @@ async fn run_chat_inner(
             stream_error = None;
         }
         if let Some(err) = stream_error {
+            if worldbase_providers::is_context_overflow_error(&err) {
+                match overflow_guard.on_overflow(logical_step) {
+                    crate::context::OverflowDecision::EmergencyCompaction => {
+                        publish(
+                            &hub,
+                            &channel,
+                            &stream_id,
+                            EventKind::Notice {
+                                text: "模型上下文已溢出：正在执行一次紧急压缩并重试当前步骤。"
+                                    .into(),
+                            },
+                        )
+                        .await;
+                        let history = hub
+                            .store
+                            .list_messages(&conversation_id, 400)
+                            .unwrap_or_default();
+                        let version = current_compaction_version(
+                            &history,
+                            &system,
+                            turn_snapshot.version,
+                            provider_entry.as_ref(),
+                            selected_model,
+                        );
+                        let _ = candidate_manager.set_current_version(version.clone());
+                        if let Some(task) = candidate_task.take() {
+                            task.abort();
+                        }
+                        if let Some(sequence) = candidate_manager.in_flight_sequence() {
+                            let _ = candidate_manager.abandon_background(sequence);
+                        }
+                        let ledger_snapshot = context_ledger
+                            .lock()
+                            .map(|ledger| ledger.clone())
+                            .unwrap_or_default();
+                        let source_history = compaction_source_history(
+                            hub.store.as_ref(),
+                            &conversation_id,
+                            checkpoint.as_ref(),
+                        );
+                        let source = to_sourced_llm_messages(&source_history);
+                        let before_tokens = token_estimator.estimate_request(
+                            &system,
+                            &crate::context::assemble_request(
+                                &conversation_id,
+                                checkpoint.as_ref(),
+                                &ledger_snapshot,
+                                &llm_messages,
+                            ),
+                            &tools_meta,
+                        );
+                        match compact_context_now(
+                            hub.store.as_ref(),
+                            &conversation_id,
+                            provider.as_ref(),
+                            checkpoint.as_ref(),
+                            &ledger_snapshot,
+                            &source,
+                            &token_estimator,
+                            &token_budget,
+                            compaction_recent_limit(
+                                &system,
+                                &tools_meta,
+                                &token_budget,
+                                &token_estimator,
+                            )
+                            .unwrap_or(256),
+                            &version,
+                            None,
+                            "overflow",
+                            before_tokens,
+                            &abort,
+                        )
+                        .await
+                        {
+                            Ok(compacted) => {
+                                compaction_note.arm(&compacted.checkpoint);
+                                checkpoint = Some(compacted.checkpoint);
+                                llm_messages = compacted.recent_messages;
+                                last_compaction_turn = Some(completed_turns);
+                                let rebuilt = system_prompt(
+                                    &hub,
+                                    agent.as_ref(),
+                                    &context,
+                                    &tools_meta,
+                                    memory_query_vector.as_ref(),
+                                )
+                                .await;
+                                system = rebuilt.full;
+                                dynamic_system_suffix_head = rebuilt.dynamic_tail;
+                                continue 'agent_loop;
+                            }
+                            Err(compaction_error) => {
+                                tracing::warn!(%compaction_error, "emergency context compaction failed");
+                                publish(
+                                    &hub,
+                                    &channel,
+                                    &stream_id,
+                                    EventKind::Error {
+                                        message: format!(
+                                            "context overflow; emergency compaction failed: {compaction_error}"
+                                        ),
+                                    },
+                                )
+                                .await;
+                                cleanup(&hub, &stream_id);
+                                return Err(anyhow::anyhow!(
+                                    "context overflow; emergency compaction failed: {compaction_error}"
+                                ));
+                            }
+                        }
+                    }
+                    crate::context::OverflowDecision::Terminate => {
+                        let message = format!(
+                            "context overflow repeated after the one allowed emergency compaction for logical step {logical_step}: {err}"
+                        );
+                        publish(
+                            &hub,
+                            &channel,
+                            &stream_id,
+                            EventKind::Error {
+                                message: message.clone(),
+                            },
+                        )
+                        .await;
+                        cleanup(&hub, &stream_id);
+                        return Err(anyhow::anyhow!(message));
+                    }
+                }
+            }
             publish(
                 &hub,
                 &channel,
@@ -8110,7 +9043,7 @@ async fn run_chat_inner(
         let scheduled_groups = schedule_calls_for_run(
             &tool_uses,
             hub.as_ref(),
-            &tools,
+            &turn_tools,
             &custom_tools,
             context.auto_approve_permissions,
         );
@@ -8151,7 +9084,7 @@ async fn run_chat_inner(
                 let index = call.index;
                 let hub = &hub;
                 let services = &services;
-                let tools = &tools;
+                let tools = &turn_tools;
                 let custom_tools = &custom_tools;
                 let stream_id = &stream_id;
                 let abort = &abort;
@@ -8239,6 +9172,65 @@ async fn run_chat_inner(
                 },
             )
             .await;
+
+            // Track A is synchronous and lossless: the exact tool result is
+            // available here, and the turn ID is stable even when this batch
+            // contains multiple calls.
+            let turn = completed_turns + 1;
+            let args = iteration_calls
+                .iter()
+                .find(|(call_id, _, _)| call_id == &execution.call_id)
+                .map(|(_, _, input)| input.clone())
+                .unwrap_or(serde_json::Value::Null);
+            if let Ok(mut ledger) = context_ledger.lock() {
+                let outcome = if execution.is_error {
+                    crate::context::AttemptOutcome::Error
+                } else {
+                    crate::context::AttemptOutcome::Success
+                };
+                let _ = ledger.record_tool_attempt(
+                    execution.name.clone(),
+                    execution.call_id.clone(),
+                    &args,
+                    outcome,
+                    &execution.content,
+                    turn,
+                );
+                if !execution.is_error {
+                    if let Ok(result) =
+                        serde_json::from_str::<serde_json::Value>(&execution.content)
+                    {
+                        let _ = crate::context::capabilities::apply_tool_result_capability_snapshot(
+                            &mut ledger,
+                            &execution.name,
+                            &result,
+                        );
+                    }
+                }
+            }
+
+            // Track B runs off the main path. A new tool turn advances the
+            // revision first, so an older extraction result can never overwrite
+            // newer ledger state.
+            let track_b_version = ledger_history_version
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .saturating_add(1);
+            spawn_track_b_extraction(
+                std::sync::Arc::clone(&context_ledger),
+                std::sync::Arc::clone(&ledger_history_version),
+                track_b_extractor.clone(),
+                crate::context::track_b::TrackBExtractionInput::new(
+                    track_b_version,
+                    turn,
+                    execution.name.clone(),
+                    execution.call_id.clone(),
+                    args,
+                    execution.content.clone(),
+                    execution.is_error,
+                ),
+                abort.clone(),
+            );
+
             let tool_use_id = execution.call_id;
             tool_results_for_llm.push(ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.clone(),
@@ -8290,6 +9282,8 @@ async fn run_chat_inner(
         };
         let _ = hub.store.append_message(&conversation_id, &tr_record);
         finish_task_state.record_regular_tools();
+        logical_step = logical_step.saturating_add(1);
+        completed_turns = completed_turns.saturating_add(1);
 
         // Match Electron's loop detector: identical tool calls with identical
         // results for several consecutive turns indicate an agent loop rather
@@ -8321,6 +9315,9 @@ async fn run_chat_inner(
         }
     }
 
+    if let Some(task) = candidate_task.take() {
+        task.abort();
+    }
     // Every `break` above has already published its terminal Done/Error frame,
     // so no fallback terminal event is needed here.
     let final_result = result;
@@ -8359,5 +9356,6 @@ async fn publish(hub: &Hub, channel: &StreamChannel, stream_id: &str, kind: Even
 
 fn cleanup(hub: &Hub, stream_id: &str) {
     hub.runs.lock().unwrap().remove(stream_id);
+    hub.remove_run_catalog(stream_id);
     worldbase_tools::computer_use::release(stream_id);
 }

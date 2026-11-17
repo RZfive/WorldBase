@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "app": {
+    "id": "worldbase.tasks",
+    "name": "Tasks",
+    "version": "1.2.0",
+    "trustLevel": "community"
+  },
+  "runtime": {
+    "kind": "managed_project",
+    "activation": "on-demand"
+  },
+  "capabilities": [
+    {
+      "id": "tasks.search",
+      "title": "Search tasks",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "$ref": "https://example.com/schema.json#/query" }
+        }
+      },
+      "operation": "tasks.search",
+      "risk": "read"
+    }
+  ]
+}

@@ -162,7 +162,13 @@ export class RustHarnessEngine implements AIHarness {
     // an empty Rust allow-list (which means unrestricted) so MCP tools
     // discovered inside Rust after the Electron handshake can participate.
     const allowedToolNames = requestedAllowedToolNames.length > 0
-      ? requestedAllowedToolNames.filter(name => visibleToolNames.includes(name) || name.startsWith('mcp__'))
+      ? requestedAllowedToolNames.filter(name => visibleToolNames.includes(name) ||
+        name.startsWith('mcp__') ||
+        // Application capabilities and the discovery tool live in Rust's
+        // run catalog; they are activated after this handshake, so they are
+        // not part of the static negotiated catalog.
+        name.startsWith('app__') ||
+        name === 'search_tools')
       : []
     // Rust treats an empty allow-list as unrestricted. Preserve an explicit
     // Electron policy that happens not to match this run's negotiated catalog.
@@ -669,6 +675,7 @@ export function shouldActivateCodingMode (name: string, args: unknown): boolean 
     return typeof mode === 'string' && mode.trim().toLowerCase() === 'coding'
   }
   return name === 'create_project' ||
+    name === 'upgrade_project' ||
     name === 'create_lightweight_app' ||
     name.startsWith('coding_')
 }

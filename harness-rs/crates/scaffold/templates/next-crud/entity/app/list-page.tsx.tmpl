@@ -1,0 +1,227 @@
+'use client'
+
+import { useCallback, useEffect, useState } from 'react'
+import type { ChangeEvent, FormEvent, KeyboardEvent } from 'react'
+
+type FieldKind = 'text' | 'number' | 'checkbox'
+
+interface FormField {
+  name: string
+  label: string
+  type: FieldKind
+  required: boolean
+  step?: string | null
+}
+
+interface ListField {
+  name: string
+  label: string
+  type: FieldKind
+}
+
+const formFields: FormField[] = {{form_fields_json}}
+const listFields: ListField[] = {{list_fields_json}}
+
+type RecordRow = Record<string, unknown>
+
+export default function {{entity_pascal}}ListPage () {
+  const [rows, setRows] = useState<RecordRow[]>([])
+  const [total, setTotal] = useState(0)
+  const [query, setQuery] = useState('')
+  const [form, setForm] = useState<Record<string, string | boolean>>({})
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async (search?: string) => {
+    setLoading(true)
+    setError(null)
+    try {
+      const suffix = search ? `?q=${encodeURIComponent(search)}` : ''
+      const response = await fetch(`{{route_base}}${suffix}`, { cache: 'no-store' })
+      if (!response.ok) throw new Error(await response.text())
+      const payload = await response.json() as { items?: RecordRow[]; total?: number }
+      setRows(payload.items ?? [])
+      setTotal(payload.total ?? (payload.items?.length ?? 0))
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  async function createRecord (event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError(null)
+    const body: Record<string, unknown> = {}
+    for (const field of formFields) {
+      const value = form[field.name]
+      if (field.type === 'checkbox') {
+        body[field.name] = Boolean(value)
+        continue
+      }
+      if (value === undefined || value === '') {
+        if (field.required) {
+          setError(`${field.label} is required`)
+          return
+        }
+        continue
+      }
+      body[field.name] = field.type === 'number' ? Number(value) : value
+    }
+
+    try {
+      const response = await fetch('{{route_base}}', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+      if (!response.ok) throw new Error(await response.text())
+      setForm({})
+      await load(query || undefined)
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : String(createError))
+    }
+  }
+
+  async function removeRecord (id: string) {
+    if (!window.confirm('Delete this record?')) return
+    setError(null)
+    try {
+      const response = await fetch(`{{route_base}}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!response.ok) throw new Error(await response.text())
+      await load(query || undefined)
+    } catch (removeError) {
+      setError(removeError instanceof Error ? removeError.message : String(removeError))
+    }
+  }
+
+  function updateForm (name: string, value: string | boolean) {
+    setForm((current) => ({ ...current, [name]: value }))
+  }
+
+  return (
+    <>
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <span className="eyebrow">Records</span>
+            <h2>{{entity_title}}</h2>
+          </div>
+          <span className="muted">{total} record(s)</span>
+        </div>
+
+        <div className="search-row">
+          <input
+            type="text"
+            value={query}
+            placeholder="Search {{entity_title}}..."
+            onChange={(event: ChangeEvent<HTMLInputElement>) => setQuery(event.target.value)}
+            onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
+              if (event.key === 'Enter') void load(query || undefined)
+            }}
+          />
+          <button type="button" onClick={() => void load(query || undefined)}>Search</button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => { setQuery(''); void load() }}
+          >
+            Reset
+          </button>
+        </div>
+
+        {error ? <p className="error">{error}</p> : null}
+        {loading ? <p className="muted">Loading...</p> : null}
+
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                {listFields.map((field) => (
+                  <th key={field.name}>{field.label}</th>
+                ))}
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 && !loading ? (
+                <tr>
+                  <td colSpan={listFields.length + 1} className="muted">No records yet.</td>
+                </tr>
+              ) : null}
+              {rows.map((row, index) => {
+                const id = String(row['{{id_field}}'] ?? index)
+                return (
+                  <tr key={id}>
+                    {listFields.map((field) => (
+                      <td key={field.name}>{formatCell(row[field.name])}</td>
+                    ))}
+                    <td>
+                      <div className="row-actions">
+                        <a className="link-button" href={`{{page_base}}/${encodeURIComponent(id)}`}>Edit</a>
+                        <button
+                          type="button"
+                          className="link-button danger"
+                          onClick={() => void removeRecord(id)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <h2>New {{entity_title}}</h2>
+        </div>
+        <form onSubmit={createRecord}>
+          <div className="form-grid">
+            {formFields.map((field) => (
+              <label
+                key={field.name}
+                className={field.type === 'checkbox' ? 'field field-checkbox' : 'field'}
+              >
+                <span>{field.label}{field.required ? ' *' : ''}</span>
+                {field.type === 'checkbox' ? (
+                  <input
+                    type="checkbox"
+                    checked={Boolean(form[field.name])}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => updateForm(field.name, event.target.checked)}
+                  />
+                ) : (
+                  <input
+                    type={field.type}
+                    step={field.step ?? undefined}
+                    required={field.required}
+                    value={String(form[field.name] ?? '')}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => updateForm(field.name, event.target.value)}
+                  />
+                )}
+              </label>
+            ))}
+          </div>
+          <div className="form-actions">
+            <button type="submit">Create {{entity_title}}</button>
+          </div>
+        </form>
+      </section>
+    </>
+  )
+}
+
+function formatCell (value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'boolean') return value ? 'yes' : 'no'
+  if (value instanceof Date) return value.toISOString()
+  return String(value)
+}

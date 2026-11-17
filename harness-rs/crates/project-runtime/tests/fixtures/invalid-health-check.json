@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "app": {
+    "id": "worldbase.tasks",
+    "name": "Tasks",
+    "version": "1.2.0",
+    "trustLevel": "community"
+  },
+  "runtime": {
+    "kind": "managed_project",
+    "activation": "on-demand",
+    "healthCheck": "tasks.missing"
+  },
+  "capabilities": [
+    {
+      "id": "tasks.search",
+      "title": "Search tasks",
+      "inputSchema": { "type": "object" },
+      "operation": "tasks.search",
+      "risk": "read"
+    }
+  ]
+}

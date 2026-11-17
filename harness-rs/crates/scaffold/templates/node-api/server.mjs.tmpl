@@ -1,0 +1,136 @@
+import http from 'node:http'
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
+import { invokeCapability } from './src/ai/invoke.mjs'
+
+{{entity_imports}}
+
+const port = Number(process.env.PORT ?? 3000)
+const host = process.env.HOSTNAME ?? '127.0.0.1'
+
+function sendJson (response, status, body) {
+  const payload = JSON.stringify(body)
+  response.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(payload)
+  })
+  response.end(payload)
+}
+
+async function readJson (request) {
+  const chunks = []
+  for await (const chunk of request) chunks.push(chunk)
+  if (chunks.length === 0) return {}
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
+function numberParam (url, name) {
+  const raw = url.searchParams.get(name)
+  if (raw === null) return undefined
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : undefined
+}
+
+function directionParam (url) {
+  const raw = url.searchParams.get('orderDirection')
+  return raw === 'asc' || raw === 'desc' ? raw : undefined
+}
+
+const entityRoutes = [
+{{entity_routes}}
+]
+
+const server = http.createServer(async (request, response) => {
+  try {
+    const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
+    if (url.pathname === '/health' || url.pathname === '/api/health') {
+      sendJson(response, 200, {
+        status: 'ok',
+        app: {{project_name_ts}},
+        appId: {{app_id_ts}},
+        template: 'node-api',
+        time: new Date().toISOString()
+      })
+      return
+    }
+
+    if (url.pathname === '/.well-known/worldbase/capabilities' && request.method === 'GET') {
+      const projectRoot = process.env.THE_WORLD_PROJECT_ROOT ?? process.cwd()
+      const manifestPath = path.join(projectRoot, '.worldbase', 'app-capabilities.json')
+      try {
+        sendJson(response, 200, JSON.parse(await readFile(manifestPath, 'utf8')))
+      } catch {
+        sendJson(response, 500, {
+          status: 'error',
+          errorCode: 'manifest_invalid',
+          message: 'app manifest is unavailable'
+        })
+      }
+      return
+    }
+
+    if (url.pathname === '/worldbase/capabilities/invoke' && request.method === 'POST') {
+      const token = process.env.WORLDBASE_APP_TOKEN
+      if (!token || request.headers.authorization !== `Bearer ${token}`) {
+        sendJson(response, 401, {
+          status: 'error',
+          errorCode: 'permission_required',
+          message: 'invalid app token'
+        })
+        return
+      }
+      let envelope
+      try {
+        envelope = await readJson(request)
+      } catch {
+        sendJson(response, 400, {
+          status: 'error',
+          errorCode: 'input_schema_invalid',
+          message: 'invalid JSON body'
+        })
+        return
+      }
+      if (envelope.protocolVersion !== 1) {
+        sendJson(response, 400, {
+          status: 'error',
+          errorCode: 'input_schema_invalid',
+          message: 'protocolVersion must be 1'
+        })
+        return
+      }
+      const result = await invokeCapability(envelope)
+      const status = result.status === 'ok'
+        ? 200
+        : result.errorCode === 'capability_not_found'
+          ? 404
+          : result.errorCode === 'operation_timeout'
+            ? 408
+            : 400
+      sendJson(response, status, result)
+      return
+    }
+
+    for (const route of entityRoutes) {
+      const match = route.pattern.exec(url.pathname)
+      if (!match) continue
+      const method = (request.method ?? 'GET').toUpperCase()
+      const handler = route.handlers[method]
+      if (!handler) {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const body = ['POST', 'PUT', 'PATCH'].includes(method) ? await readJson(request) : undefined
+      const result = await handler({ url, id: match[1], body })
+      sendJson(response, result.status ?? 200, result.body)
+      return
+    }
+
+    sendJson(response, 404, { error: 'not found' })
+  } catch (error) {
+    sendJson(response, 500, { error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+server.listen(port, host, () => {
+  console.log(`[node-api] listening on http://${host}:${port}`)
+})

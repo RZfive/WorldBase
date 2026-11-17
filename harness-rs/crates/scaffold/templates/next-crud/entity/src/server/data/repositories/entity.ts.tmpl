@@ -1,0 +1,96 @@
+import { newId, queryRecords, saveRecords } from '../client'
+import type {
+  {{entity_pascal}},
+  Create{{entity_pascal}}Input,
+  Update{{entity_pascal}}Input
+} from '../../../shared/schema'
+
+const TABLE = '{{table_name}}'
+const SEARCH_FIELDS = {{search_fields_json}} as string[]
+
+export interface List{{entity_pascal}}RecordInput {
+  filters?: Record<string, unknown>
+  limit?: number
+  offset?: number
+  orderBy?: string
+  orderDirection?: 'asc' | 'desc'
+}
+
+function activeFilters (filters: Record<string, unknown> = {}): Record<string, unknown> {
+  return { ...filters, deleted_at: null }
+}
+
+export async function list{{entity_plural_pascal}} (input: List{{entity_pascal}}RecordInput = {}): Promise<{{entity_pascal}}[]> {
+  return await queryRecords<{{entity_pascal}}>(TABLE, {
+    filters: activeFilters(input.filters),
+    limit: input.limit,
+    offset: input.offset,
+    orderBy: input.orderBy ?? '{{order_column}}',
+    orderDirection: input.orderDirection ?? 'desc'
+  })
+}
+
+export async function count{{entity_plural_pascal}} (filters: Record<string, unknown> = {}): Promise<number> {
+  const rows = await queryRecords<Record<string, unknown>>(TABLE, {
+    filters: activeFilters(filters),
+    columns: ['{{id_field}}'],
+    limit: 1000
+  })
+  return rows.length
+}
+
+export async function get{{entity_pascal}} (id: string): Promise<{{entity_pascal}} | null> {
+  const rows = await queryRecords<{{entity_pascal}}>(TABLE, {
+    filters: activeFilters({ {{id_field}}: id }),
+    limit: 1
+  })
+  return rows[0] ?? null
+}
+
+export async function create{{entity_pascal}} (input: Create{{entity_pascal}}Input): Promise<{{entity_pascal}}> {
+  const record: Record<string, unknown> = {
+    {{id_field}}: {{id_generator}},
+    ...(input as unknown as Record<string, unknown>),
+    deleted_at: null
+  }
+{{created_at_setup}}
+  await saveRecords(TABLE, [record], 'insert')
+  return record as unknown as {{entity_pascal}}
+}
+
+export async function update{{entity_pascal}} (id: string, input: Update{{entity_pascal}}Input): Promise<{{entity_pascal}} | null> {
+  const existing = await get{{entity_pascal}}(id)
+  if (!existing) return null
+  const next: Record<string, unknown> = {
+    ...existing,
+    ...(input as unknown as Record<string, unknown>),
+    {{id_field}}: id
+  }
+  await saveRecords(TABLE, [next], 'upsert')
+  return next as unknown as {{entity_pascal}}
+}
+
+export async function remove{{entity_pascal}} (id: string): Promise<boolean> {
+  const existing = await get{{entity_pascal}}(id)
+  if (!existing) return false
+  const next: Record<string, unknown> = {
+    ...existing,
+    deleted_at: new Date().toISOString()
+  }
+  await saveRecords(TABLE, [next], 'upsert')
+  return true
+}
+
+export async function search{{entity_plural_pascal}} (query: string): Promise<{{entity_pascal}}[]> {
+  const term = query.trim().toLowerCase()
+  if (!term) return []
+  const rows = await list{{entity_plural_pascal}}({
+    limit: 500,
+    orderBy: '{{order_column}}',
+    orderDirection: 'desc'
+  })
+  return rows.filter((row) => {
+    const record = row as unknown as Record<string, unknown>
+    return SEARCH_FIELDS.some((field) => String(record[field] ?? '').toLowerCase().includes(term))
+  })
+}

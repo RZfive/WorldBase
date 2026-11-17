@@ -17,6 +17,9 @@ cargo test --manifest-path harness-rs/Cargo.toml -p worldbase-core
 section "Rust tests: worldbase-tools"
 cargo test --manifest-path harness-rs/Cargo.toml -p worldbase-tools
 
+section "Rust tests: worldbase-scaffold"
+cargo test --manifest-path harness-rs/Cargo.toml -p worldbase-scaffold
+
 section "Rust clippy: worldbase-coding"
 cargo clippy --manifest-path harness-rs/Cargo.toml -p worldbase-coding --all-targets --no-deps -- -D warnings
 

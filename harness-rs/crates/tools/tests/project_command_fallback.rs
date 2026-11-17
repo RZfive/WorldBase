@@ -46,6 +46,8 @@ impl Fixture {
             todo_items: Arc::new(Mutex::new(Vec::new())),
             read_files: Arc::new(Mutex::new(std::collections::HashSet::new())),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store: store.clone(),
             memory_queue: None,
             memory_scopes: Vec::new(),

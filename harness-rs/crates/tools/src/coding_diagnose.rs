@@ -236,6 +236,8 @@ mod tests {
             todo_items: Arc::new(std::sync::Mutex::new(Vec::new())),
             read_files: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store: store.clone(),
             memory_queue: None,
             memory_scopes: Vec::new(),

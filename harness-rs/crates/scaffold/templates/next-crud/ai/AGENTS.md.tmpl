@@ -1,0 +1,31 @@
+# AGENTS.md
+
+本文件由 WorldBase 脚手架生成，描述 {{PROJECT_NAME}} 的应用边界与 AI capability 契约。
+
+## 项目
+
+- 项目 ID：`{{PROJECT_ID}}`
+- App ID：`{{APP_ID}}`
+- 模板：`{{TEMPLATE}}`
+- 类型：`{{PROJECT_TYPE}}`
+
+## 业务实体
+
+{{ENTITY_SUMMARY}}
+
+## AI Capabilities
+
+{{CAPABILITY_LIST}}
+
+## 生成的关键文件
+
+{{GENERATED_FILES}}
+
+## 约定
+
+1. UI 与 AI 共用 `src/domain/` 下的业务 service；不要在路由中重复实现业务逻辑。
+2. AI adapter 只调用 domain service，不直接访问数据层。
+3. 新增或修改 capability 后，必须同步 `.worldbase/app-capabilities.json` 的严格输入/输出 schema。
+4. 固定 RPC 路由校验 `Authorization: Bearer ${WORLDBASE_APP_TOKEN}`、`protocolVersion === 1` 和 `deadline`。
+5. 输入大小限制为 1 MiB；返回 `{status:"ok", data}` 或 `{status:"error", errorCode, message}`。
+6. 变更后运行 `node scripts/generate-manifest.mjs` 与 `npm test`。

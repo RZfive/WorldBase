@@ -450,6 +450,7 @@ interface BrowserPageEmulationRequest {
   media?: 'screen' | 'print'
   colorScheme?: 'light' | 'dark' | 'no-preference'
   reducedMotion?: 'reduce' | 'no-preference'
+  autoDarkMode?: boolean
   userAgent?: string
   viewport?: {
     width: number
@@ -468,15 +469,27 @@ interface BrowserPageEmulationResult {
     media?: string
     colorScheme?: string
     reducedMotion?: string
+    autoDarkMode?: boolean
     userAgent?: string | null
     viewport?: BrowserPageEmulationViewport
   }
+}
+
+interface BrowserPageThemeRequest {
+  webContentsId: number
+  colorScheme: 'light' | 'dark'
+  autoDarkMode?: boolean
+}
+
+interface BrowserPageThemeResult {
+  ok: true
 }
 
 interface PageEmulationState {
   media?: 'screen' | 'print'
   colorScheme?: 'light' | 'dark' | 'no-preference'
   reducedMotion?: 'reduce' | 'no-preference'
+  autoDarkMode?: boolean
   userAgent?: string
   viewport?: BrowserPageEmulationViewport
 }
@@ -486,12 +499,21 @@ interface PageEmulationSession {
   refs: number
   emulation: PageEmulationState | null
   emulationActive: boolean
+  hostTheme: PageHostTheme | null
   cleanup: () => void
+}
+
+interface PageHostTheme {
+  colorScheme: 'light' | 'dark'
+  autoDarkMode: boolean
 }
 
 // One ref for active emulation plus one per in-flight screenshot. The debugger
 // is detached only when the last ref is released.
 const pageEmulationSessions = new Map<number, PageEmulationSession>()
+// Host chrome theme survives debugger resets and screenshots, so page media
+// and Chromium auto-dark mode stay aligned with the application theme.
+const pageHostThemes = new Map<number, PageHostTheme>()
 
 interface PageEmulationTargetOperations {
   queue: Promise<unknown>
@@ -584,6 +606,7 @@ function acquirePageEmulationSession (target: WebContents): { session: PageEmula
     refs: 0,
     emulation: null,
     emulationActive: false,
+    hostTheme: pageHostThemes.get(webContentsId) ?? null,
     cleanup: () => {}
   }
 
@@ -594,6 +617,7 @@ function acquirePageEmulationSession (target: WebContents): { session: PageEmula
   }
   const onDestroyed = () => {
     forget()
+    pageHostThemes.delete(webContentsId)
     debuggerSession.removeListener('detach', onDetached)
     try {
       if (debuggerSession.isAttached()) debuggerSession.detach()
@@ -637,15 +661,18 @@ function releasePageEmulationSessionRef (webContentsId: number, session: PageEmu
     return
   }
   session.refs = Math.max(0, session.refs - 1)
-  if (session.refs > 0) return
+  if (session.refs > 0 || session.hostTheme) return
   closePageEmulationSession(webContentsId, session)
 }
 
 function rebuildPageEmulationSession (target: WebContents, session: PageEmulationSession): PageEmulationSession | null {
+  const hostTheme = session.hostTheme
   closePageEmulationSession(target.id, session)
   if (target.isDestroyed()) return null
   try {
-    return acquirePageEmulationSession(target).session
+    const rebuilt = acquirePageEmulationSession(target).session
+    rebuilt.hostTheme = hostTheme
+    return rebuilt
   } catch {
     return null
   }
@@ -707,6 +734,32 @@ interface PageEmulationApplyOptions {
   isCurrent?: () => boolean
 }
 
+function pageHostThemeState (hostTheme: PageHostTheme | null): PageEmulationState {
+  if (!hostTheme) return {}
+  return {
+    colorScheme: hostTheme.colorScheme,
+    autoDarkMode: hostTheme.autoDarkMode
+  }
+}
+
+function effectivePageEmulationState (
+  session: PageEmulationSession,
+  state: PageEmulationState | null
+): PageEmulationState {
+  const hostTheme = pageHostThemeState(session.hostTheme)
+  if (!state) return hostTheme
+  const autoDarkMode = state.autoDarkMode ?? (
+    state.colorScheme === 'light' ? false : hostTheme.autoDarkMode
+  )
+  return {
+    ...state,
+    ...(state.colorScheme === undefined && hostTheme.colorScheme !== undefined
+      ? { colorScheme: hostTheme.colorScheme }
+      : {}),
+    ...(autoDarkMode !== undefined ? { autoDarkMode } : {})
+  }
+}
+
 async function applyPageEmulation (
   debuggerSession: ElectronDebugger,
   state: PageEmulationState,
@@ -739,6 +792,28 @@ async function applyPageEmulation (
     media: state.media ?? '',
     features
   })
+  checkCurrent()
+  if (state.autoDarkMode !== undefined) {
+    try {
+      await sendCommand('Emulation.setAutoDarkModeOverride', {
+        enabled: state.autoDarkMode
+      })
+    } catch (error) {
+      // Color-scheme emulation above is the critical path. Auto dark is a
+      // best-effort fallback for light-only sites and varies across Chromium
+      // builds, so an unsupported protocol command must not break theming.
+      console.warn('[pageAutomation] auto dark mode override is unavailable:', error)
+    }
+  } else if (options.clearNamedMediaFeatures) {
+    // Auto dark is a Chromium rendering override, not a CSS media feature.
+    // Clear it explicitly while resetting so a detached debugger is not needed
+    // just to restore normal page colors.
+    try {
+      await sendCommand('Emulation.setAutoDarkModeOverride', { enabled: false })
+    } catch (error) {
+      console.warn('[pageAutomation] failed to clear auto dark mode override:', error)
+    }
+  }
   checkCurrent()
   await sendCommand('Emulation.setUserAgentOverride', {
     userAgent: state.userAgent ?? ''
@@ -838,10 +913,14 @@ async function resetPageEmulationMedia (
   timeoutMs: number | undefined,
   isCurrent: () => boolean
 ): Promise<void> {
-  const expected = readSystemMediaBaseline()
+  const systemBaseline = readSystemMediaBaseline()
+  const expected: PageMediaState = session.hostTheme
+    ? { ...systemBaseline, colorScheme: session.hostTheme.colorScheme }
+    : systemBaseline
+  const resetState = pageHostThemeState(session.hostTheme)
   const clearAndVerify = async (debuggerSession: ElectronDebugger): Promise<boolean> => {
     assertPageEmulationCurrent(isCurrent)
-    await applyPageEmulation(debuggerSession, {}, timeoutMs, {
+    await applyPageEmulation(debuggerSession, resetState, timeoutMs, {
       clearNamedMediaFeatures: true,
       isCurrent
     })
@@ -871,6 +950,7 @@ function toEmulatedResult (state: PageEmulationState | null): BrowserPageEmulati
     ...(state.media ? { media: state.media } : {}),
     ...(state.colorScheme ? { colorScheme: state.colorScheme } : {}),
     ...(state.reducedMotion ? { reducedMotion: state.reducedMotion } : {}),
+    ...(state.autoDarkMode !== undefined ? { autoDarkMode: state.autoDarkMode } : {}),
     userAgent: state.userAgent ?? null,
     ...(state.viewport ? { viewport: { ...state.viewport } } : {})
   }
@@ -1308,6 +1388,48 @@ export function setupIPC (): void {
     return (browserNetworkLogs.get(webContentsId) || []).slice(-limit).reverse()
   })
 
+  ipcMain.handle('pageAutomation:setTheme', async (event: IpcMainInvokeEvent, rawRequest: unknown): Promise<BrowserPageThemeResult> => {
+    if (!rawRequest || typeof rawRequest !== 'object' || Array.isArray(rawRequest)) {
+      throw new Error('Invalid page theme request.')
+    }
+
+    const request = rawRequest as Partial<BrowserPageThemeRequest>
+    const webContentsId = request.webContentsId
+    if (typeof webContentsId !== 'number' || !Number.isInteger(webContentsId) || webContentsId <= 0) {
+      throw new Error('Invalid page surface id for theme sync.')
+    }
+    if (request.colorScheme !== 'light' && request.colorScheme !== 'dark') {
+      throw new Error('Unsupported page theme color scheme.')
+    }
+    if (request.autoDarkMode !== undefined && typeof request.autoDarkMode !== 'boolean') {
+      throw new Error('Invalid page auto dark mode flag.')
+    }
+
+    const target = webContents.fromId(webContentsId)
+    if (!target || target.isDestroyed()) {
+      throw new Error('The requested page surface is not available.')
+    }
+    assertPageSurfaceOwnedBySender(target, event.sender)
+
+    const hostTheme: PageHostTheme = {
+      colorScheme: request.colorScheme,
+      autoDarkMode: request.autoDarkMode ?? request.colorScheme === 'dark'
+    }
+    pageHostThemes.set(webContentsId, hostTheme)
+    return await enqueuePageEmulationOperation(webContentsId, async (isCurrent) => {
+      assertPageEmulationCurrent(isCurrent)
+      const { session } = acquirePageEmulationSession(target)
+      session.hostTheme = hostTheme
+      const effectiveState = effectivePageEmulationState(
+        session,
+        session.emulationActive ? session.emulation : null
+      )
+      await applyPageEmulation(session.debugger, effectiveState, undefined, { isCurrent })
+      assertPageEmulationCurrent(isCurrent)
+      return { ok: true }
+    })
+  })
+
   ipcMain.handle('pageAutomation:emulate', async (event: IpcMainInvokeEvent, rawRequest: unknown): Promise<BrowserPageEmulationResult> => {
     if (!rawRequest || typeof rawRequest !== 'object' || Array.isArray(rawRequest)) {
       throw new Error('Invalid page emulation request.')
@@ -1339,6 +1461,9 @@ export function setupIPC (): void {
     }
     if (request.reset !== undefined && typeof request.reset !== 'boolean') {
       throw new Error('Invalid emulation reset flag.')
+    }
+    if (request.autoDarkMode !== undefined && typeof request.autoDarkMode !== 'boolean') {
+      throw new Error('Invalid page auto dark mode flag.')
     }
 
     const userAgent = request.userAgent
@@ -1410,7 +1535,7 @@ export function setupIPC (): void {
           await resetPageEmulationMedia(target, webContentsId, session, request.timeoutMs, isCurrent)
           assertPageEmulationCurrent(isCurrent)
           const liveSession = getPageEmulationSession(webContentsId)
-          if (liveSession) {
+          if (liveSession && !liveSession.hostTheme) {
             closePageEmulationSession(webContentsId, liveSession)
             closed = true
           }
@@ -1438,13 +1563,19 @@ export function setupIPC (): void {
     const hasOverrides = request.media !== undefined ||
       request.colorScheme !== undefined ||
       request.reducedMotion !== undefined ||
+      request.autoDarkMode !== undefined ||
       userAgent !== undefined ||
       viewport !== undefined
     if (!hasOverrides) {
       return await enqueuePageEmulationOperation(webContentsId, async (isCurrent) => {
         assertPageEmulationCurrent(isCurrent)
         const session = getPageEmulationSession(webContentsId)
-        return { ok: true, emulated: toEmulatedResult(session?.emulationActive ? session.emulation : null) }
+        return {
+          ok: true,
+          emulated: toEmulatedResult(session
+            ? effectivePageEmulationState(session, session.emulationActive ? session.emulation : null)
+            : null)
+        }
       })
     }
 
@@ -1465,18 +1596,32 @@ export function setupIPC (): void {
       if (request.media !== undefined) nextState.media = request.media
       if (request.colorScheme !== undefined) nextState.colorScheme = request.colorScheme
       if (request.reducedMotion !== undefined) nextState.reducedMotion = request.reducedMotion
+      if (request.autoDarkMode !== undefined) nextState.autoDarkMode = request.autoDarkMode
       if (userAgent !== undefined) nextState.userAgent = userAgent
       if (viewport !== undefined) nextState.viewport = viewport
 
       try {
-        await applyPageEmulation(session.debugger, nextState, request.timeoutMs, { isCurrent })
+        await applyPageEmulation(
+          session.debugger,
+          effectivePageEmulationState(session, nextState),
+          request.timeoutMs,
+          { isCurrent }
+        )
         assertPageEmulationCurrent(isCurrent)
         session.emulation = nextState
-        return { ok: true, emulated: toEmulatedResult(nextState) }
+        return {
+          ok: true,
+          emulated: toEmulatedResult(effectivePageEmulationState(session, nextState))
+        }
       } catch (error) {
         if (!(error instanceof PageEmulationSupersededError) && isCurrent()) {
           try {
-            await applyPageEmulation(session.debugger, previousState ?? {}, request.timeoutMs, { isCurrent })
+            await applyPageEmulation(
+              session.debugger,
+              effectivePageEmulationState(session, previousState),
+              request.timeoutMs,
+              { isCurrent }
+            )
           } catch { /* best effort */ }
         }
 
@@ -2205,6 +2350,142 @@ export function setupIPC (): void {
         description: getAgentWorkspaceToolDescription(tool.name, tool.description)
       }))
       .sort((left, right) => left.name.localeCompare(right.name, 'en'))
+  })
+
+  // Applications: every read and mutation is proxied to the Rust catalog.
+  const applicationRpc = async () => {
+    await startSelectedRustHarness()
+    return mainState.rustHarness!
+  }
+  const applicationStringArg = (value: unknown, field: string): string => {
+    const text = typeof value === 'string' ? value.trim() : ''
+    if (!text) throw new TypeError(`Invalid ${field}`)
+    return text
+  }
+  const applicationOptionalString = (value: unknown): string => typeof value === 'string' ? value.trim() : ''
+  const applicationStringList = (value: unknown): string[] => Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim())
+    : []
+  const applicationRpcList = (value: unknown, keys: string[]): unknown[] => {
+    if (Array.isArray(value)) return value
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>
+      for (const key of keys) {
+        if (Array.isArray(record[key])) return record[key] as unknown[]
+      }
+    }
+    return []
+  }
+
+  ipcMain.handle('applications:list', async (_event: IpcMainInvokeEvent, rawQuery?: unknown) => {
+    const query = rawQuery && typeof rawQuery === 'object' && !Array.isArray(rawQuery)
+      ? rawQuery as Record<string, unknown>
+      : {}
+    const params: Record<string, unknown> = {}
+    const appId = applicationOptionalString(query.appId)
+    const source = applicationOptionalString(query.source)
+    if (appId) params.appId = appId
+    if (source) params.source = source
+    const client = await applicationRpc()
+    const result = await client.call('application.list', params)
+    return { apps: applicationRpcList(result, ['apps', 'applications', 'records', 'items']) }
+  })
+
+  ipcMain.handle('applications:get', async (_event: IpcMainInvokeEvent, rawAppId?: unknown) => {
+    const appId = applicationStringArg(rawAppId, 'appId')
+    const client = await applicationRpc()
+    const result = await client.call('application.get', { appId, id: appId })
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      const record = result as Record<string, unknown>
+      return record.app ?? record.application ?? record.record ?? result
+    }
+    return result
+  })
+
+  ipcMain.handle('applications:setEnabled', async (_event: IpcMainInvokeEvent, rawAppId?: unknown, enabled?: unknown) => {
+    const appId = applicationStringArg(rawAppId, 'appId')
+    if (typeof enabled !== 'boolean') throw new TypeError('Invalid enabled flag')
+    const client = await applicationRpc()
+    await client.call('application.setEnabled', { appId, id: appId, enabled })
+    return { success: true }
+  })
+
+  ipcMain.handle('applications:refresh', async (_event: IpcMainInvokeEvent, rawAppId?: unknown) => {
+    const appId = applicationOptionalString(rawAppId)
+    const client = await applicationRpc()
+    return await client.call('application.refresh', appId ? { appId, id: appId } : {})
+  })
+
+  ipcMain.handle('applications:grants:list', async (_event: IpcMainInvokeEvent, rawAppId?: unknown) => {
+    const appId = applicationOptionalString(rawAppId)
+    const client = await applicationRpc()
+    const result = await client.call('application.grants.list', appId ? { appId, id: appId } : {})
+    return { grants: applicationRpcList(result, ['grants', 'items']) }
+  })
+
+  ipcMain.handle('applications:grants:save', async (_event: IpcMainInvokeEvent, rawGrant?: unknown) => {
+    if (!rawGrant || typeof rawGrant !== 'object' || Array.isArray(rawGrant)) {
+      throw new TypeError('Invalid application grant')
+    }
+    const outer = rawGrant as Record<string, unknown>
+    const grant = outer.grant && typeof outer.grant === 'object' && !Array.isArray(outer.grant)
+      ? outer.grant as Record<string, unknown>
+      : outer
+    const appId = applicationStringArg(grant.appId, 'grant.appId')
+    const capabilityPattern = applicationOptionalString(grant.capabilityPattern) || '*'
+    const requestedMode = applicationOptionalString(grant.mode) || 'ask'
+    if (requestedMode !== 'allow' && requestedMode !== 'ask' && requestedMode !== 'deny') {
+      throw new TypeError('Invalid grant mode')
+    }
+    const expiresAt = typeof grant.expiresAt === 'string' && grant.expiresAt.trim()
+      ? grant.expiresAt.trim()
+      : null
+    const payload: Record<string, unknown> = {
+      appId,
+      capabilityPattern,
+      permissions: applicationStringList(grant.permissions),
+      dataScope: applicationStringList(grant.dataScope ?? grant.dataScopes),
+      mode: requestedMode,
+      expiresAt
+    }
+    const id = applicationOptionalString(grant.id)
+    if (id) payload.id = id
+    const client = await applicationRpc()
+    return await client.call('application.grants.save', { grant: payload, ...payload })
+  })
+
+  ipcMain.handle('applications:grants:revoke', async (_event: IpcMainInvokeEvent, rawGrantId?: unknown) => {
+    const grantId = applicationStringArg(rawGrantId, 'grantId')
+    const client = await applicationRpc()
+    return await client.call('application.grants.revoke', { grantId, id: grantId })
+  })
+
+  ipcMain.handle('applications:audit:list', async (_event: IpcMainInvokeEvent, rawOptions?: unknown) => {
+    const options = rawOptions && typeof rawOptions === 'object' && !Array.isArray(rawOptions)
+      ? rawOptions as Record<string, unknown>
+      : {}
+    const appId = applicationOptionalString(options.appId)
+    const requestedLimit = typeof options.limit === 'number' && Number.isFinite(options.limit)
+      ? Math.trunc(options.limit)
+      : 20
+    const limit = Math.min(200, Math.max(1, requestedLimit))
+    const client = await applicationRpc()
+    const result = await client.call('application.audit.list', {
+      limit,
+      ...(appId ? { appId, id: appId } : {})
+    })
+    return { audits: applicationRpcList(result, ['audits', 'items', 'records']) }
+  })
+
+  ipcMain.handle('lightapp:list', async () => {
+    const client = await applicationRpc()
+    return await client.call('lightapp.list', {})
+  })
+
+  ipcMain.handle('lightapp:delete', async (_event: IpcMainInvokeEvent, rawId?: unknown) => {
+    const id = applicationStringArg(rawId, 'lightapp id')
+    const client = await applicationRpc()
+    return await client.call('lightapp.delete', { id })
   })
 
   ipcMain.handle('agentGroups:list', async () => {

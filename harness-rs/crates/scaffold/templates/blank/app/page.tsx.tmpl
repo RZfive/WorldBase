@@ -1,0 +1,30 @@
+import type { Metadata } from 'next'
+
+const appName = {{project_name_ts}}
+const templateId = {{template_id_ts}}
+
+export const metadata: Metadata = {
+  title: appName
+}
+
+export default function HomePage () {
+  return (
+    <>
+      <section className="hero-card">
+        <span className="eyebrow">WorldBase blank · {templateId}</span>
+        <h1>{appName}</h1>
+        <p className="hero-copy">
+          A minimal Next.js shell is ready. Add entities to the project to generate typed
+          repositories, domain services, CRUD routes, and management pages.
+        </p>
+      </section>
+
+      <section className="info-card">
+        <h2>Health check</h2>
+        <p>
+          The runtime health endpoint is available at <a className="card-link" href="/api/health">/api/health</a>.
+        </p>
+      </section>
+    </>
+  )
+}

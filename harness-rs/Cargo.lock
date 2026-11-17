@@ -199,6 +199,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bit-set"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0700ddab506f33b20a03b13996eccd309a48e5ff77d0d95926aa0210fb4e95f1"
+dependencies = [
+ "bit-vec",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -235,6 +250,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
 dependencies = [
  "memchr",
+ "regex-automata",
  "serde_core",
 ]
 
@@ -570,6 +586,17 @@ name = "fallible-streaming-iterator"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
+name = "fancy-regex"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "531e46835a22af56d1e3b66f04844bed63158bc094a628bec1d321d9b4c44bf2"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
+]
 
 [[package]]
 name = "fastrand"
@@ -1444,7 +1471,7 @@ dependencies = [
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
- "rustc-hash",
+ "rustc-hash 2.1.3",
  "rustls",
  "socket2",
  "thiserror 2.0.20",
@@ -1465,7 +1492,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_pcg",
  "ring",
- "rustc-hash",
+ "rustc-hash 2.1.3",
  "rustls",
  "rustls-pki-types",
  "slab",
@@ -1734,6 +1761,12 @@ dependencies = [
  "libsqlite3-sys",
  "smallvec",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc-hash"
@@ -2106,6 +2139,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "tiktoken-rs"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25563eeba904d770acf527e8b370fe9a5547bacd20ff84a0b6c3bc41288e5625"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bstr",
+ "fancy-regex",
+ "lazy_static",
+ "regex",
+ "rustc-hash 1.1.0",
 ]
 
 [[package]]
@@ -2836,7 +2884,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "worldbase-app-server"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2854,23 +2902,25 @@ dependencies = [
 
 [[package]]
 name = "worldbase-cli"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "clap",
  "futures",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "worldbase-core",
  "worldbase-memory",
+ "worldbase-project-runtime",
  "worldbase-protocol",
 ]
 
 [[package]]
 name = "worldbase-coding"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2891,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-core"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2902,6 +2952,9 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
+ "tiktoken-rs",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2925,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-docs"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "calamine",
@@ -2938,7 +2991,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-exec"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "serde",
@@ -2951,7 +3004,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-group"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2966,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-im-gateway"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "aes",
  "anyhow",
@@ -2993,7 +3046,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-mcp-client"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "futures",
@@ -3007,7 +3060,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-memory"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3027,7 +3080,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-mobile-ffi"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -3044,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-project-runtime"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -3062,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-protocol"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3072,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-providers"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3088,8 +3141,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "worldbase-scaffold"
+version = "1.7.4"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "worldbase-scheduler"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3105,7 +3168,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-search"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "ignore",
@@ -3117,7 +3180,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-skills"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "serde",
@@ -3131,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "worldbase-tools"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3161,6 +3224,7 @@ dependencies = [
  "worldbase-project-runtime",
  "worldbase-protocol",
  "worldbase-providers",
+ "worldbase-scaffold",
  "worldbase-scheduler",
  "worldbase-search",
  "worldbase-skills",

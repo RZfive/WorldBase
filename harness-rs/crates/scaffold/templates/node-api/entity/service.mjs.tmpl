@@ -1,0 +1,42 @@
+import {
+  count{{entity_plural_pascal}},
+  create{{entity_pascal}} as create{{entity_pascal}}Record,
+  get{{entity_pascal}} as get{{entity_pascal}}Record,
+  list{{entity_plural_pascal}} as list{{entity_plural_pascal}}Records,
+  remove{{entity_pascal}} as remove{{entity_pascal}}Record,
+  search{{entity_plural_pascal}} as search{{entity_plural_pascal}}Records,
+  update{{entity_pascal}} as update{{entity_pascal}}Record
+} from '../data/repositories/{{entity_name}}.mjs'
+
+const NOT_FOUND = {{entity_title_ts}} + ' not found'
+
+export async function list{{entity_plural_pascal}} (input = {}) {
+  const [items, total] = await Promise.all([
+    list{{entity_plural_pascal}}Records(input),
+    count{{entity_plural_pascal}}(input.filters ?? {})
+  ])
+  return { items, total }
+}
+
+export async function get{{entity_pascal}} (id) {
+  return await get{{entity_pascal}}Record(id)
+}
+
+export async function create{{entity_pascal}} (input) {
+  return await create{{entity_pascal}}Record(input)
+}
+
+export async function update{{entity_pascal}} (id, input) {
+  const updated = await update{{entity_pascal}}Record(id, input)
+  if (!updated) throw new Error(NOT_FOUND)
+  return updated
+}
+
+export async function remove{{entity_pascal}} (id) {
+  const removed = await remove{{entity_pascal}}Record(id)
+  if (!removed) throw new Error(NOT_FOUND)
+}
+
+export async function search{{entity_plural_pascal}} (query) {
+  return await search{{entity_plural_pascal}}Records(query)
+}

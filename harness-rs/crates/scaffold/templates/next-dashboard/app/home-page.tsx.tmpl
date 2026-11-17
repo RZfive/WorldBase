@@ -1,0 +1,84 @@
+'use client'
+
+import { useEffect, useState } from 'react'
+
+const appName = {{project_name_ts}}
+const templateId = {{template_id_ts}}
+const entities: Array<{ table: string; title: string; href: string }> = {{entity_nav_json}}
+
+type Counts = Record<string, number | null>
+
+export default function DashboardPage () {
+  const [counts, setCounts] = useState<Counts>({})
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadCounts () {
+      try {
+        const entries = await Promise.all(entities.map(async (entity) => {
+          const response = await fetch(`/api/${entity.table}?limit=1`, { cache: 'no-store' })
+          if (!response.ok) throw new Error(await response.text())
+          const payload = await response.json() as { total?: number; items?: unknown[] }
+          return [entity.table, payload.total ?? payload.items?.length ?? 0] as const
+        }))
+        if (!cancelled) setCounts(Object.fromEntries(entries))
+      } catch (loadError) {
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : String(loadError))
+      }
+    }
+    void loadCounts()
+    return () => { cancelled = true }
+  }, [])
+
+  const maxCount = Math.max(
+    1,
+    ...Object.values(counts).filter((value): value is number => typeof value === 'number')
+  )
+
+  return (
+    <>
+      <section className="hero-card">
+        <span className="eyebrow">WorldBase dashboard · {templateId}</span>
+        <h1>{appName}</h1>
+        <p className="hero-copy">
+          A generated dashboard over your declared entities. Counts and charts are computed from
+          the same CRUD API the AI capability layer uses.
+        </p>
+      </section>
+
+      <section className="feature-grid">
+        {entities.map((entity) => (
+          <article key={entity.table} className="feature-card">
+            <span className="eyebrow">{entity.table}</span>
+            <h2>{counts[entity.table] ?? '–'}</h2>
+            <p>{entity.title} records currently stored.</p>
+            <a className="card-link" href={entity.href}>Manage {entity.title}</a>
+          </article>
+        ))}
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <h2>Records by entity</h2>
+        </div>
+        {error ? <p className="error">{error}</p> : null}
+        <div className="bar-chart">
+          {entities.map((entity) => {
+            const value = counts[entity.table]
+            const count = typeof value === 'number' ? value : 0
+            return (
+              <div key={entity.table} className="bar-row">
+                <span>{entity.title}</span>
+                <span className="bar-track">
+                  <span className="bar-fill" style={{ width: `${(count / maxCount) * 100}%` }} />
+                </span>
+                <span className="muted">{typeof value === 'number' ? value : '–'}</span>
+              </div>
+            )
+          })}
+        </div>
+      </section>
+    </>
+  )
+}

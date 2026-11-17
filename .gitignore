@@ -60,3 +60,6 @@ snapshots/
 
 # fangyang (放羊) task files and manifests
 .fangyang/
+
+# Local articles (not tracked)
+/articles/

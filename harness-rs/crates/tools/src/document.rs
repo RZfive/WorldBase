@@ -433,7 +433,12 @@ impl Tool for DocDraftTool {
 
         let has_full_text = ["content", "blocks", "slides", "sheets", "rows"]
             .iter()
-            .any(|key| input.get(key).map(|value| !value.is_null()).unwrap_or(false));
+            .any(|key| {
+                input
+                    .get(key)
+                    .map(|value| !value.is_null())
+                    .unwrap_or(false)
+            });
         let ops = office_ops_from_input(&input)?;
 
         let content = if !ops.is_empty() {
@@ -520,7 +525,11 @@ impl Tool for DocDraftTool {
                 "修改草稿已生成，但工作区通知未送达（用户稍后仍可在文档页看到草稿）。请勿直接覆写原文件。"
             }
         });
-        if staged.get("dataLossRisk").map(|value| !value.is_null()).unwrap_or(false) {
+        if staged
+            .get("dataLossRisk")
+            .map(|value| !value.is_null())
+            .unwrap_or(false)
+        {
             if let Some(object) = result.as_object_mut() {
                 object.insert(
                     "warning".into(),
@@ -700,8 +709,8 @@ fn office_ops_from_input(input: &Value) -> Result<Vec<worldbase_docs::ops::Offic
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use crate::compat_tools::LocalWriteFileTool;
+    use std::path::Path;
 
     #[test]
     fn doc_write_schema_advertises_format_specific_fields() {
@@ -720,7 +729,9 @@ mod tests {
     #[test]
     fn doc_draft_schema_advertises_target_and_formats() {
         let schema = DocDraftTool.input_schema();
-        let properties = schema["properties"].as_object().expect("doc_draft properties");
+        let properties = schema["properties"]
+            .as_object()
+            .expect("doc_draft properties");
         assert!(properties.contains_key("artifact_id"));
         assert!(properties.contains_key("file_path"));
         assert!(properties.contains_key("ops"), "fidelity ops list exposed");
@@ -767,7 +778,11 @@ mod tests {
             worldbase_docs::ops::OfficeOp::PptxDeleteSlide { index: 4 }
         );
         match &ops[3] {
-            worldbase_docs::ops::OfficeOp::DocxInsertImage { paragraph_index, image_path, width_inches } => {
+            worldbase_docs::ops::OfficeOp::DocxInsertImage {
+                paragraph_index,
+                image_path,
+                width_inches,
+            } => {
                 assert_eq!(*paragraph_index, 7);
                 assert_eq!(image_path, &std::path::PathBuf::from("/tmp/a.png"));
                 assert_eq!(*width_inches, Some(3.5));
@@ -795,11 +810,11 @@ mod tests {
     // -------------------------------------------------------------------
 
     const TINY_PNG: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
-        0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
-        0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
-        0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
-        0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x62, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
 
     fn e2e_services(root: &Path) -> ToolServices {
@@ -820,13 +835,17 @@ mod tests {
             todo_items: Arc::new(std::sync::Mutex::new(Vec::new())),
             read_files: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             visible_tool_catalog: None,
+            catalog_runtime: None,
+            conversation_id: None,
             store: store.clone(),
             memory_queue: None,
             memory_scopes: Vec::new(),
             skills: Arc::new(worldbase_skills::SkillRegistry::new(vec![])),
             scheduler: Arc::new(worldbase_scheduler::Scheduler::new(store)),
             mcp: Arc::new(worldbase_mcp_client::McpManager::default()),
-            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(root.join("projects"))),
+            projects: Arc::new(worldbase_project_runtime::ProjectRuntime::new(
+                root.join("projects"),
+            )),
             group_collaboration: None,
             subagent_runtime: None,
         }
@@ -905,9 +924,15 @@ mod tests {
 
         assert_eq!(result["success"], true);
         assert_eq!(result["changes"]["counts"]["modified"], 1);
-        assert!(result["dataLossRisk"].is_null(), "ops drafts never lose media");
+        assert!(
+            result["dataLossRisk"].is_null(),
+            "ops drafts never lose media"
+        );
         assert_eq!(result["notified"], false, "fixture host bridge is unwired");
-        assert!(result["note"].as_str().unwrap().contains("未送达") || result["note"].as_str().unwrap().contains("草稿"));
+        assert!(
+            result["note"].as_str().unwrap().contains("未送达")
+                || result["note"].as_str().unwrap().contains("草稿")
+        );
 
         let draft_path = std::path::PathBuf::from(result["draftPath"].as_str().unwrap());
         assert!(draft_path.is_file());
@@ -921,19 +946,17 @@ mod tests {
         assert_eq!(parsed["items"][1]["paragraphs"][0], json!("第二页改写"));
 
         // 原文件未被触碰。
-        assert_eq!(
-            worldbase_docs::ops::count_media_parts(&source).unwrap(),
-            1
-        );
+        assert_eq!(worldbase_docs::ops::count_media_parts(&source).unwrap(), 1);
         let source_parsed = worldbase_docs::parse_file(&source).unwrap();
-        assert_eq!(source_parsed["items"][1]["paragraphs"][0], json!("第二页原文"));
+        assert_eq!(
+            source_parsed["items"][1]["paragraphs"][0],
+            json!("第二页原文")
+        );
 
         // getDocumentDraft 链路（渲染层补拉路径）能取回带 changes 的记录。
-        let record = crate::document_artifacts::get_document_draft(
-            &workspace,
-            source.to_str().unwrap(),
-        )
-        .unwrap();
+        let record =
+            crate::document_artifacts::get_document_draft(&workspace, source.to_str().unwrap())
+                .unwrap();
         assert_eq!(record["changes"]["counts"]["modified"], 1);
     }
 
@@ -954,6 +977,9 @@ mod tests {
             )
             .await;
         let message = format!("{}", blocked.unwrap_err());
-        assert!(message.contains("doc_draft"), "guidance to doc_draft: {message}");
+        assert!(
+            message.contains("doc_draft"),
+            "guidance to doc_draft: {message}"
+        );
     }
 }

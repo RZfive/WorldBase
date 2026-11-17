@@ -214,11 +214,14 @@ fn assistant_replies_no_longer_generate_knowledge_entries() {
     // The explicit user-preference path keeps working unchanged, including
     // verbatim evidence; manual saves and memory_add are separate paths.
     let evidence = "我喜欢吃苹果。";
-    let traits = f.store.ingest_workspace_memories(&json!({
-        "scopes": [{"scopeType":"user", "scopeId":"local-user"}],
-        "userMessages": [evidence],
-        "finalAssistantText": "好的，已保存你的偏好。"
-    })).unwrap();
+    let traits = f
+        .store
+        .ingest_workspace_memories(&json!({
+            "scopes": [{"scopeType":"user", "scopeId":"local-user"}],
+            "userMessages": [evidence],
+            "finalAssistantText": "好的，已保存你的偏好。"
+        }))
+        .unwrap();
     assert_eq!(traits.len(), 1);
     assert_eq!(traits[0].memory_type, "user_trait");
     assert_eq!(traits[0].source_text.as_deref(), Some(evidence));
@@ -309,8 +312,17 @@ fn user_fact_channel_reads_pinned_and_category_facts_for_the_exact_scope() {
         .store
         .recall_user_scope_facts(&user_scope(), diet, false, 8)
         .unwrap();
-    assert_eq!(categorized.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec!["apple"]);
-    assert_eq!(categorized[0].source_text.as_deref(), Some("我喜欢吃苹果。"));
+    assert_eq!(
+        categorized
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["apple"]
+    );
+    assert_eq!(
+        categorized[0].source_text.as_deref(),
+        Some("我喜欢吃苹果。")
+    );
 
     // Unrelated query categories must not pull the fact in.
     let schedule = personal_profile_category_terms("我的作息是什么").unwrap();
@@ -319,7 +331,10 @@ fn user_fact_channel_reads_pinned_and_category_facts_for_the_exact_scope() {
         .recall_user_scope_facts(&user_scope(), schedule, false, 8)
         .unwrap();
     assert_eq!(
-        by_schedule.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        by_schedule
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
         vec!["routine"],
         "category terms must not leak between categories"
     );
@@ -330,10 +345,13 @@ fn user_fact_channel_filters_lifecycle_and_keeps_multiple_preferences() {
     let f = Fixture::new();
     let save = |id: &str, summary: &str| {
         f.store
-            .save_workspace_memory(&serde_json::from_value(json!({
-                "id": id, "title": summary, "summary": summary,
-                "scopeType": "user", "scopeId": "local-user", "memoryType": "user_trait"
-            })).unwrap())
+            .save_workspace_memory(
+                &serde_json::from_value(json!({
+                    "id": id, "title": summary, "summary": summary,
+                    "scopeType": "user", "scopeId": "local-user", "memoryType": "user_trait"
+                }))
+                .unwrap(),
+            )
             .unwrap()
     };
     save("apple", "用户喜欢吃苹果");
@@ -367,6 +385,13 @@ fn user_fact_channel_filters_lifecycle_and_keeps_multiple_preferences() {
         .recall_user_scope_facts(&user_scope(), diet, false, 10)
         .unwrap();
     let ids = hits.iter().map(|e| e.id.as_str()).collect::<Vec<_>>();
-    assert!(ids.contains(&"apple") && ids.contains(&"banana"), "multiple independent preferences stay: {ids:?}");
-    assert_eq!(ids.len(), 2, "wrong scope, inactive, expired and deleted entries are excluded: {ids:?}");
+    assert!(
+        ids.contains(&"apple") && ids.contains(&"banana"),
+        "multiple independent preferences stay: {ids:?}"
+    );
+    assert_eq!(
+        ids.len(),
+        2,
+        "wrong scope, inactive, expired and deleted entries are excluded: {ids:?}"
+    );
 }

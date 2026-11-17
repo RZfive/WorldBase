@@ -103,10 +103,21 @@ function resolveIcon (type?: string, icon?: string) {
       </template>
 
       <template v-else>
-        <div class="lp-app-icon">
+        <div
+          class="lp-app-icon"
+          :title="asProject(item).aiUpgradeAvailable
+            ? $t('launchpad.aiUpgradeHint')
+            : asProject(item).aiReady ? $t('launchpad.aiReadyHint') : undefined"
+        >
           <img v-if="resolveIcon(asProject(item).type, asProject(item).icon).kind === 'image'" :src="resolveIcon(asProject(item).type, asProject(item).icon).value" alt="" class="lp-app-image" />
           <span v-else class="lp-app-emoji">{{ resolveIcon(asProject(item).type, asProject(item).icon).value }}</span>
           <span v-if="asProject(item).runtime?.status === 'running'" class="lp-running-badge"></span>
+          <span
+            v-if="asProject(item).aiUpgradeAvailable"
+            class="lp-ai-upgrade-badge"
+            role="img"
+            :aria-label="$t('launchpad.aiUpgradeHint')"
+          >AI<span aria-hidden="true">↑</span></span>
         </div>
         <span class="lp-cell-name">{{ asProject(item).name || asProject(item).id }}</span>
       </template>

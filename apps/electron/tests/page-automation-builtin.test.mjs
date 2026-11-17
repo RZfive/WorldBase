@@ -763,7 +763,7 @@ test('page emulation serializes per-surface operations and drops stale rollbacks
   assert.match(emulate, /enqueuePageEmulationOperation/, 'emulate must run inside the per-surface queue')
   assert.match(
     emulate,
-    /applyPageEmulation\(session\.debugger, nextState, request\.timeoutMs, \{ isCurrent \}\)/,
+    /applyPageEmulation\([\s\S]*effectivePageEmulationState\(session, nextState\)[\s\S]*request\.timeoutMs/,
     'emulate must stop applying once a reset supersedes it'
   )
   assert.match(
@@ -778,12 +778,13 @@ test('page emulation serializes per-surface operations and drops stale rollbacks
   )
 })
 
-test('page emulation reset clears named features and verifies the system baseline', async () => {
+test('page emulation reset clears named features and restores the host/system baseline', async () => {
   const source = await readText(IPC_PATH)
   const apply = sliceBetween(source, 'async function applyPageEmulation', 'interface PageMediaState')
   assert.match(apply, /clearNamedMediaFeatures/, 'reset must use the explicit feature-clear path')
   assert.match(apply, /\{ name: 'prefers-color-scheme', value: '' \}/, 'reset must clear prefers-color-scheme by name')
   assert.match(apply, /\{ name: 'prefers-reduced-motion', value: '' \}/, 'reset must clear prefers-reduced-motion by name')
+  assert.match(apply, /Emulation\.setAutoDarkModeOverride/, 'reset must be able to clear Chromium auto dark mode')
 
   const mediaExpression = sliceBetween(source, 'const PAGE_MEDIA_STATE_EXPRESSION', 'function readSystemMediaBaseline')
   assert.match(mediaExpression, /prefers-color-scheme: dark/, 'reset verification must read the live color scheme')
@@ -796,9 +797,10 @@ test('page emulation reset clears named features and verifies the system baselin
   const reset = sliceBetween(source, 'async function resetPageEmulationMedia', 'function toEmulatedResult')
   assert.match(
     reset,
-    /applyPageEmulation\(debuggerSession, \{\}, timeoutMs, \{/,
-    'reset must clear overrides instead of forcing a color scheme'
+    /applyPageEmulation\(debuggerSession, resetState, timeoutMs, \{/,
+    'reset must restore the host theme, or the system baseline when no host theme exists'
   )
+  assert.match(reset, /session\.hostTheme/, 'reset must preserve the application theme baseline')
   assert.match(reset, /clearAndVerify/, 'reset must verify the page media state after clearing')
   assert.match(reset, /rebuildPageEmulationSession/, 'an unverified reset must rebuild the debugger session')
   assert.match(
@@ -810,6 +812,27 @@ test('page emulation reset clears named features and verifies the system baselin
 
   const close = sliceBetween(source, 'function closePageEmulationSession', 'function releasePageEmulationSessionRef')
   assert.match(close, /session\.debugger\.detach\(\)/, 'closing a reset session must detach even while screenshot refs remain')
+})
+
+test('browser chrome and guest pages follow the resolved application theme', async () => {
+  const ipcSource = await readText(IPC_PATH)
+  const themeHandler = sliceBetween(
+    ipcSource,
+    "ipcMain.handle('pageAutomation:setTheme'",
+    "ipcMain.handle('pageAutomation:emulate'"
+  )
+  assert.match(themeHandler, /pageHostThemes\.set/, 'host themes must be retained across debugger resets')
+  assert.match(themeHandler, /effectivePageEmulationState/, 'host themes must compose with page automation overrides')
+  assert.match(themeHandler, /applyPageEmulation/, 'host themes must be applied to the guest page')
+
+  const browserSource = await readText(BROWSER_WEBVIEW_PATH)
+  const themeSync = sliceBetween(browserSource, 'function resolveHostColorScheme', 'function focusWebviewForInput')
+  assert.match(themeSync, /document\.documentElement\.dataset\.theme/, 'the guest theme must resolve the app-resolved theme')
+  assert.match(themeSync, /setBrowserPageTheme/, 'the guest theme must be sent through the page theme bridge')
+  assert.match(themeSync, /autoDarkMode: colorScheme === "dark"/, 'dark mode must enable the light-site fallback')
+  assert.match(browserSource, /attributeFilter: \["data-theme"\]/, 'theme changes must be forwarded live')
+  assert.match(browserSource, /\.browser-view-url-input \{[\s\S]*var\(--app-input-bg\)/, 'the address bar must use theme tokens')
+  assert.match(browserSource, /\.browser-view-stage \{[\s\S]*var\(--app-main-surface\)/, 'the webview stage must use theme tokens')
 })
 
 test('page tool contract exposes snapshot, timeout and array wait text', async () => {

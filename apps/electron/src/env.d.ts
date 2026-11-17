@@ -28,6 +28,7 @@ interface BrowserPageEmulationRequest {
   media?: 'screen' | 'print'
   colorScheme?: 'light' | 'dark' | 'no-preference'
   reducedMotion?: 'reduce' | 'no-preference'
+  autoDarkMode?: boolean
   userAgent?: string
   viewport?: BrowserPageEmulationViewportRequest
   reset?: boolean
@@ -41,6 +42,7 @@ interface BrowserPageEmulationResult {
     media?: string
     colorScheme?: string
     reducedMotion?: string
+    autoDarkMode?: boolean
     userAgent?: string | null
     viewport?: {
       width: number
@@ -49,6 +51,16 @@ interface BrowserPageEmulationResult {
       mobile: boolean
     }
   }
+}
+
+interface BrowserPageThemeRequest {
+  webContentsId: number
+  colorScheme: 'light' | 'dark'
+  autoDarkMode?: boolean
+}
+
+interface BrowserPageThemeResult {
+  ok: true
 }
 
 type WorkspaceTabControlRequest = import('./shared/workspace-control-types.js').WorkspaceTabControlRequest
@@ -101,6 +113,92 @@ type LongTermGoalActivityEvent = import('./shared/long-term-goal-types.js').Long
 type LongTermGoalStreamEvent = import('./shared/long-term-goal-types.js').LongTermGoalStreamEvent
 type DailySuggestionPreferences = import('./shared/daily-suggestion-types.js').DailySuggestionPreferences
 type DailySuggestionSnapshot = import('./shared/daily-suggestion-types.js').DailySuggestionSnapshot
+
+type ApplicationTrustLevel = 'builtin' | 'verified' | 'community' | 'untrusted'
+type ApplicationRisk = 'read' | 'write_reversible' | 'write_destructive' | 'external_effect'
+type ApplicationAvailability = 'available' | 'disabled' | 'unavailable' | 'starting'
+type ApplicationRuntimeKind = 'host_service' | 'managed_project' | 'mcp_server' | 'electron_host' | 'plugin'
+type ApplicationGrantMode = 'allow' | 'ask' | 'deny'
+
+interface ApplicationHealth {
+  status: string
+  detail?: string | null
+  checkedAt?: string | null
+}
+
+interface ApplicationCapability {
+  appId: string
+  capabilityId: string
+  toolName: string
+  title?: string
+  description?: string
+  inputSchema?: Record<string, unknown>
+  outputSchema?: Record<string, unknown> | null
+  risk?: ApplicationRisk
+  permissions?: string[]
+  dataScopes?: string[]
+  providerRef?: string
+  availability?: ApplicationAvailability
+  sideEffects?: boolean
+  idempotent?: boolean
+  deadlineMs?: number | null
+}
+
+interface ApplicationRecord {
+  sourceId: string
+  appId: string
+  name: string
+  version: string
+  description?: string
+  tags?: string[]
+  trustLevel?: ApplicationTrustLevel
+  enabled: boolean
+  platforms?: string[]
+  runtimeKind?: ApplicationRuntimeKind
+  capabilities?: ApplicationCapability[]
+  health?: ApplicationHealth
+  lastSeenAt?: string | null
+  manifestHash?: string
+  aiReady?: boolean
+}
+
+interface ApplicationGrant {
+  id: string
+  appId: string
+  capabilityPattern: string
+  permissions?: string[]
+  dataScope?: string[]
+  mode?: ApplicationGrantMode
+  expiresAt?: string | null
+  createdAt?: string
+}
+
+interface ApplicationGrantInput {
+  id?: string
+  appId: string
+  capabilityPattern: string
+  permissions?: string[]
+  dataScope?: string[]
+  mode: ApplicationGrantMode
+  expiresAt?: string | null
+}
+
+interface ApplicationCallAudit {
+  callId: string
+  conversationId?: string | null
+  appId: string
+  capabilityId: string
+  status: string
+  durationMs?: number
+  approvalId?: string | null
+  createdAt?: string
+}
+
+interface ApplicationLightApp {
+  id: string
+  name: string
+  createdAt: string
+}
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
@@ -1185,6 +1283,7 @@ interface ElectronAPI {
   dispatchBrowserPageKey: (request: BrowserPageKeyDispatchRequest) => Promise<BrowserPageKeyDispatchResult>
   getBrowserPageNetworkLog: (webContentsId: number, limit?: number) => Promise<BrowserAutomationNetworkEntry[]>
   emulateBrowserPage: (request: BrowserPageEmulationRequest) => Promise<BrowserPageEmulationResult>
+  setBrowserPageTheme: (request: BrowserPageThemeRequest) => Promise<BrowserPageThemeResult>
   getAboutInfo: () => Promise<AppAboutInfo>
   getAppUpdateState: () => Promise<AppUpdateState>
   getAppUpdateConfig: () => Promise<AppUpdateConfig>
@@ -1206,6 +1305,24 @@ interface ElectronAPI {
   deleteConversation: (id: string) => Promise<boolean>
   listAgents: () => Promise<AgentDefinition[]>
   listAgentToolDefinitions: () => Promise<Array<{ name: string; description: string }>>
+  applications: {
+    list: (query?: { appId?: string; source?: string }) => Promise<{ apps: ApplicationRecord[] }>
+    get: (appId: string) => Promise<ApplicationRecord | null>
+    setEnabled: (appId: string, enabled: boolean) => Promise<unknown>
+    refresh: (appId?: string) => Promise<unknown>
+    grants: {
+      list: (appId?: string) => Promise<{ grants: ApplicationGrant[] }>
+      save: (grant: ApplicationGrantInput) => Promise<unknown>
+      revoke: (grantId: string) => Promise<unknown>
+    }
+    audit: {
+      list: (options?: { appId?: string; limit?: number }) => Promise<{ audits: ApplicationCallAudit[] }>
+    }
+  }
+  lightapps: {
+    list: () => Promise<{ apps?: ApplicationLightApp[] }>
+    delete: (id: string) => Promise<unknown>
+  }
   getAgent: (id: string) => Promise<AgentDefinition | null>
   saveAgent: (agent: Partial<AgentDefinition>) => Promise<AgentDefinition>
   deleteAgent: (id: string) => Promise<boolean>

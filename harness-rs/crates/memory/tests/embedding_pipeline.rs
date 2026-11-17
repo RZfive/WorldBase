@@ -73,8 +73,14 @@ async fn pipeline_indexes_saves_and_recalls_semantically() {
         ))
         .unwrap();
     assert_eq!(entry.id, "m_pref");
-    assert!(store.get_embedding_document("memory", "m_pref").unwrap().is_some());
-    assert!(!dir.join("agent-memory").join("memory-vector.sqlite").exists());
+    assert!(store
+        .get_embedding_document("memory", "m_pref")
+        .unwrap()
+        .is_some());
+    assert!(!dir
+        .join("agent-memory")
+        .join("memory-vector.sqlite")
+        .exists());
 
     let queue = MemoryEmbeddingQueue::new(store.clone());
     queue.set_config(Some(fake_config())).await;
@@ -88,7 +94,10 @@ async fn pipeline_indexes_saves_and_recalls_semantically() {
         .expect("active generation");
     assert_eq!(generation.status, "active");
     assert!(generation.indexed_documents >= 1);
-    assert!(dir.join("agent-memory").join("memory-vector.sqlite").exists());
+    assert!(dir
+        .join("agent-memory")
+        .join("memory-vector.sqlite")
+        .exists());
 
     // Semantic recall surfaces the preference entry through the vector index.
     let scope_keys = vec!["user:local-user".to_string()];
@@ -108,7 +117,10 @@ async fn pipeline_indexes_saves_and_recalls_semantically() {
     // Forgetting removes the main record and its vector projection.
     assert!(store.delete_workspace_memory("m_pref").unwrap());
     assert!(store.get_workspace_memory("m_pref").unwrap().is_none());
-    assert!(store.get_embedding_document("memory", "m_pref").unwrap().is_none());
+    assert!(store
+        .get_embedding_document("memory", "m_pref")
+        .unwrap()
+        .is_none());
     let recalled = store
         .recall_semantic_entries(
             &provider,
@@ -134,7 +146,10 @@ async fn queue_does_nothing_without_config() {
     let queue = MemoryEmbeddingQueue::new(store);
     // No config set: drain must be a no-op and must not create the vector file.
     assert_eq!(queue.drain_once().await, 0);
-    assert!(!dir.join("agent-memory").join("memory-vector.sqlite").exists());
+    assert!(!dir
+        .join("agent-memory")
+        .join("memory-vector.sqlite")
+        .exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -174,7 +189,10 @@ fn governance_migration_adds_columns_to_legacy_database() {
             .unwrap();
     }
     let store = Store::open(&dir.join("app.sqlite")).unwrap();
-    let entry = store.get_workspace_memory("legacy_1").unwrap().expect("entry survives migration");
+    let entry = store
+        .get_workspace_memory("legacy_1")
+        .unwrap()
+        .expect("entry survives migration");
     assert_eq!(entry.title, "旧记忆");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -360,8 +378,28 @@ async fn edited_or_rescoped_memories_do_not_recall_stale_vectors() {
     );
     entry.scope_id = "third-user".into();
     store.save_workspace_memory(&entry).unwrap();
-    assert_eq!(store.get_embedding_document("memory", "edited").unwrap().unwrap().status, "queued");
+    assert_eq!(
+        store
+            .get_embedding_document("memory", "edited")
+            .unwrap()
+            .unwrap()
+            .status,
+        "queued"
+    );
     queue.drain_once().await;
-    assert_eq!(store.recall_semantic_entries(&provider, &generation.id, "香蕉", &["user:third-user".into()], 5).await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .recall_semantic_entries(
+                &provider,
+                &generation.id,
+                "香蕉",
+                &["user:third-user".into()],
+                5
+            )
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
