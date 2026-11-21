@@ -8464,16 +8464,28 @@ async fn run_chat_inner(
             .lock()
             .map(|ledger| ledger.clone())
             .unwrap_or_default();
-        let mut request_messages = crate::context::assemble_request(
-            &conversation_id,
-            checkpoint.as_ref(),
-            &ledger_snapshot,
-            &llm_messages,
-        );
-        if let Some(note) = compaction_note.drain_for_provider_request() {
-            let insert_at = request_messages.len().saturating_sub(llm_messages.len());
-            request_messages.insert(insert_at, note);
-        }
+        let note = compaction_note.drain_for_provider_request();
+        let request_messages = if provider.name() == "openai-responses" {
+            crate::context::engine::assemble_request_with_evidence_tail(
+                &conversation_id,
+                checkpoint.as_ref(),
+                &ledger_snapshot,
+                &llm_messages,
+                note,
+            )
+        } else {
+            let mut messages = crate::context::assemble_request(
+                &conversation_id,
+                checkpoint.as_ref(),
+                &ledger_snapshot,
+                &llm_messages,
+            );
+            if let Some(note) = note {
+                let insert_at = messages.len().saturating_sub(llm_messages.len());
+                messages.insert(insert_at, note);
+            }
+            messages
+        };
         let request_estimate =
             token_estimator.estimate_request(&system, &request_messages, &tools_meta);
 

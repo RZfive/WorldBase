@@ -135,6 +135,15 @@ pub fn evidence_prefix_messages(
     checkpoint: Option<&CompactionCheckpoint>,
     ledger: &RunStateLedger,
 ) -> Vec<LlmMessage> {
+    let mut messages = checkpoint_evidence_messages(conversation_id, checkpoint);
+    messages.push(LlmMessage::text(LlmRole::User, ledger.render_markdown()));
+    messages
+}
+
+fn checkpoint_evidence_messages(
+    conversation_id: &str,
+    checkpoint: Option<&CompactionCheckpoint>,
+) -> Vec<LlmMessage> {
     let mut messages = Vec::new();
     if let Some(checkpoint) = checkpoint {
         if !checkpoint.summary.trim().is_empty() {
@@ -142,7 +151,6 @@ pub fn evidence_prefix_messages(
             messages.push(transcript_reference_message(conversation_id, checkpoint));
         }
     }
-    messages.push(LlmMessage::text(LlmRole::User, ledger.render_markdown()));
     messages
 }
 
@@ -190,6 +198,20 @@ pub fn assemble_request(
 ) -> Vec<LlmMessage> {
     let mut messages = evidence_prefix_messages(conversation_id, checkpoint, ledger);
     messages.extend_from_slice(recent);
+    messages
+}
+
+pub fn assemble_request_with_evidence_tail(
+    conversation_id: &str,
+    checkpoint: Option<&CompactionCheckpoint>,
+    ledger: &RunStateLedger,
+    recent: &[LlmMessage],
+    note: Option<LlmMessage>,
+) -> Vec<LlmMessage> {
+    let mut messages = checkpoint_evidence_messages(conversation_id, checkpoint);
+    messages.extend_from_slice(recent);
+    messages.push(LlmMessage::text(LlmRole::User, ledger.render_markdown()));
+    messages.extend(note);
     messages
 }
 
