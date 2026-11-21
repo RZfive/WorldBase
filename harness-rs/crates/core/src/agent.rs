@@ -7730,7 +7730,18 @@ async fn run_chat_inner(
             .denied_tool_names
             .push("spawn_subagentstasks".into());
     }
-    let tool_policy = run_tool_policy(&context, agent.as_ref());
+    let mut tool_policy = run_tool_policy(&context, agent.as_ref());
+    if let (Some(_), Some(allowed)) = (&group_collaboration, &mut tool_policy.allowed) {
+        allowed.insert("read_room_messages".into());
+        for tool in &context.custom_tools {
+            if matches!(
+                tool.name.as_str(),
+                "discover_local_agents" | "invite_local_agent" | "handoff_room_task"
+            ) {
+                allowed.insert(tool.name.clone());
+            }
+        }
+    }
 
     let provider_result = if req_provider_id.is_some() || req_model.is_some() {
         hub.provider_by_ids(req_provider_id.as_deref(), req_model.as_deref())
@@ -7828,7 +7839,7 @@ async fn run_chat_inner(
         catalog_custom_tools.retain(|tool| {
             !matches!(
                 tool.name.as_str(),
-                "message_agent" | "read_board" | "update_board" | "reply_to_user"
+                "message_agent" | "read_board" | "read_room_messages" | "update_board" | "reply_to_user"
             )
         });
     }

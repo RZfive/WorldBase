@@ -137,7 +137,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     }
   }, { immediate: true })
 
-  const activeTodoItems = computed(() => getLatestVisibleTodoItems(messages.value, isLoading.value))
+  const activeTodoItems = computed(() => selectedGroupId.value ? [] : getLatestVisibleTodoItems(messages.value, isLoading.value))
   const currentCodingStatus = computed(() => {
     const id = currentConversationId.value
     return id ? codingStatusByConversation.get(id) || null : null
@@ -168,7 +168,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     longTermGoalSidebarItems,
     nonDefaultAgents,
     providersById,
-    resolveAssistantSpeakerName,
+    resolveAssistantSpeaker,
     shouldUseConversationProviderOverride
   } = createChatSidebarState({
     t,
@@ -210,6 +210,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     updateBackgroundConversationWorkspace,
     saveConversationMetadata,
     saveConversation: doSaveConversation,
+    deleteSavedConversation,
+    isDeletingConversation,
     setConversationTarget,
     getConversationProject,
     setConversationProject,
@@ -374,6 +376,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     deleteConversation: deleteConversationRecord,
     loadConversation,
     newConversation,
+    onRoomHistoryRemoved,
     startBlankConversation,
     openAgentWorkspaceConversation,
     openGroupWorkspaceConversation,
@@ -404,7 +407,6 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     selectedModel,
     streamingConversationIds: streamingConvIds,
     backgroundStreamMessages,
-    activeStreamSessionIds,
     conversationTargets,
     agentsById,
     groupsById,
@@ -416,13 +418,19 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     rememberConversationContext,
     loadConversations,
     saveConversation: doSaveConversation,
+    deleteSavedConversation,
     setConversationTarget,
     setConversationProject,
     resetTransientStreamState
   })
 
   async function deleteConversation (conversationId: string): Promise<void> {
-    await deleteConversationRecord(conversationId)
+    try {
+      if (!await deleteConversationRecord(conversationId)) return
+    } catch (error) {
+      window.alert(t('chatUi.conversationDeleteFailed', { detail: error instanceof Error ? error.message : String(error) }))
+      return
+    }
     clearCodingState(conversationId)
     codingStatusByConversation.delete(conversationId)
     codingDiffByConversation.delete(conversationId)
@@ -496,6 +504,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     isLoading,
     shouldUseConversationProviderOverride,
     currentModelLabel,
+    isDeletingConversation,
     streamingConversationIds: streamingConvIds,
     activeCleanups,
     activeStreamSessionIds,
@@ -505,7 +514,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     codingStatusByConversation,
     codingDiffByConversation,
     setConversationTarget,
-    resolveAssistantSpeakerName,
+    resolveAssistantSpeaker,
     saveConversation: (conversationId, chatMessages, options) => doSaveConversation(conversationId, chatMessages, options),
     resetTransientStreamState,
     clearPendingAskUserRequests
@@ -568,6 +577,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       handleAuthResolution,
       loadSkills,
       loadAgentWorkspaceOptions,
+      onRoomHistoryRemoved,
       loadLongTermGoals,
       loadLongTermGoalSnapshot,
       mergeGoalTitleState
@@ -646,6 +656,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     filePreview,
     forkFromMessage,
     groupMentionHints,
+    roomLocalWorkers: computed(() => currentGroupDefinition.value?.localWorkers),
     groupSidebarItems,
     longTermGoalSidebarItems,
     longTermGoalSnapshot,

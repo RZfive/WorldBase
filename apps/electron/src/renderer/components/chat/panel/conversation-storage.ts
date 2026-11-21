@@ -91,6 +91,7 @@ export function createChatConversationStorage (options: ChatConversationStorageO
   // accepted and once after the assistant turn finishes. Keep those writes in
   // order so a slow first save cannot overwrite the completed conversation.
   const saveQueues = new Map<string, Promise<void>>()
+  const deletingConversations = new Set<string>()
   // A startup list read can race the first optimistic save. Preserve rows that
   // have not yet been confirmed by the catalog.
   const pendingSummaries = new Map<string, ConversationSummary>()
@@ -353,6 +354,7 @@ export function createChatConversationStorage (options: ChatConversationStorageO
     messages: ChatMessage[],
     saveOptions?: SaveConversationOptions
   ): Promise<void> {
+    if (deletingConversations.has(conversationId)) return Promise.resolve()
     const previous = saveQueues.get(conversationId)
     // Start the first save synchronously. `saveConversationNow` applies the
     // optimistic catalog row before its first IPC await, so the caller sees a
@@ -366,6 +368,23 @@ export function createChatConversationStorage (options: ChatConversationStorageO
       () => { if (saveQueues.get(conversationId) === next) saveQueues.delete(conversationId) }
     )
     return next
+  }
+
+  function isDeletingConversation (conversationId: string | null): boolean {
+    return Boolean(conversationId && deletingConversations.has(conversationId))
+  }
+
+  async function deleteSavedConversation (conversationId: string): Promise<boolean> {
+    if (!window.electronAPI || isDeletingConversation(conversationId)) return false
+    deletingConversations.add(conversationId)
+    try {
+      await saveQueues.get(conversationId)?.catch(() => {})
+      const deleted = await window.electronAPI.deleteConversation(conversationId)
+      if (deleted) pendingSummaries.delete(conversationId)
+      return deleted
+    } finally {
+      deletingConversations.delete(conversationId)
+    }
   }
 
   async function renameConversation (conversationId: string, title: string): Promise<boolean> {
@@ -390,6 +409,8 @@ export function createChatConversationStorage (options: ChatConversationStorageO
     updateBackgroundConversationWorkspace,
     saveConversationMetadata,
     saveConversation,
+    deleteSavedConversation,
+    isDeletingConversation,
     setConversationTarget,
     getConversationProject,
     setConversationProject,

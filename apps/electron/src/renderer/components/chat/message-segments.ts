@@ -18,6 +18,7 @@ import { hasRenderableContent } from './message-utils'
 
 export interface BuildRenderSegmentsOptions {
   streaming?: boolean
+  roomReply?: boolean
 }
 
 export type WorkBurstBlock = Extract<ChatMessageBlock, { kind: 'thinking' | 'tool' | 'web_search' | 'web_fetch' | 'file_preview' | 'content' }>
@@ -64,10 +65,28 @@ function hasRenderableBurstBlock (block: WorkBurstBlock): boolean {
   return true
 }
 
+function buildRoomReplySegments (blocks: ChatMessageBlock[]): MessageRenderSegment[] {
+  const segments: MessageRenderSegment[] = []
+  const entries: WorkBurstEntry[] = []
+  blocks.forEach((block, blockIndex) => {
+    if (GROUPABLE_KINDS.has(block.kind) || block.kind === 'file_preview') {
+      if (!entries.length) {
+        segments.push({ type: 'group', key: `group-${block.id}`, block, blockIndex, groupEntries: entries })
+      }
+      entries.push({ block: block as WorkBurstBlock, blockIndex })
+    } else {
+      segments.push({ type: 'single', key: block.id, block, blockIndex, groupEntries: [] })
+    }
+  })
+  return segments
+}
+
 export function buildRenderSegments (
   blocks: ChatMessageBlock[],
   options: BuildRenderSegmentsOptions = {}
 ): MessageRenderSegment[] {
+  if (options.roomReply) return buildRoomReplySegments(blocks)
+
   const segments: MessageRenderSegment[] = []
   let run: WorkBurstEntry[] = []
 

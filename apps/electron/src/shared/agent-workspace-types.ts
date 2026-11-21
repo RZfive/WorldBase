@@ -1,3 +1,5 @@
+import type { RoomLocalWorker } from './local-agent-types.js'
+
 export type AgentReasoningStrength = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 
 export type AgentMemoryScope = 'user' | 'agent' | 'project' | 'group' | 'channel'
@@ -44,6 +46,8 @@ export interface AgentGroupDefinition {
   description?: string
   coordinatorAgentId: string
   memberAgentIds: string[]
+  localWorkers?: RoomLocalWorker[]
+  roomContextId?: string
   maxRounds: number
   maxParallelWorkers: number
   sharedMemoryScopes: Array<'group' | 'project' | 'channel'>
@@ -52,30 +56,36 @@ export interface AgentGroupDefinition {
   updatedAt: string
 }
 
-export type AgentGroupCollaborationMode = 'coordinator_only' | 'targeted' | 'discussion' | 'coordinator_decides' | 'mentioned_agent_decides'
-
-export type AgentGroupCollaborationPhase = 'planning' | 'executing' | 'completed'
-
-export interface AgentGroupParticipant {
-  agentId: string
-  agentName: string
+export interface RoomMemberMessage {
+  speakerName: string
+  speakerIcon: string
+  content: string
 }
 
-export interface AgentGroupCollaborationPlan {
-  groupId: string
-  groupName: string
-  mode: AgentGroupCollaborationMode
-  phase: AgentGroupCollaborationPhase
-  planner: AgentGroupParticipant
-  reportToName: string
-  originalRequest: string
-  normalizedRequest: string
-  reason: string
-  round?: number
-  mentionedParticipants: AgentGroupParticipant[]
-  candidateParticipants: AgentGroupParticipant[]
-  invitedParticipants: AgentGroupParticipant[]
-  updatedAt: string
+export interface ChatStreamResult {
+  ok: boolean
+  roomReplies?: RoomMemberMessage[]
+}
+
+export type RoomReplyStatus = AgentGroupProgressItem['status'] | 'stopped'
+
+export interface RoomMemberStatus extends Pick<RoomMemberMessage, 'speakerName' | 'speakerIcon'> {
+  status: RoomReplyStatus
+}
+
+export interface RoomApprovalRequest {
+  purpose: 'room_workspace'
+  title: string
+  detail: string
+}
+
+export interface AuthRequestPayload {
+  requestId: string
+  conversationId?: string
+  sessionId?: string
+  title: string
+  detail: string
+  purpose?: RoomApprovalRequest['purpose'] | 'room_execution'
 }
 
 export interface AgentGroupTranscriptToolCall {
@@ -174,6 +184,7 @@ export interface AgentSidechatSession {
  */
 export interface AgentGroupMessage {
   id: string
+  kind?: 'handoff'
   groupId: string
   fromAgentId: string
   fromAgentName: string

@@ -1,3 +1,6 @@
+import type { RustEventFrame } from '../../../electron/main-process/rust-harness-client.js'
+import type { StreamEvent } from './types.js'
+
 /**
  * Compact one-line summaries for tool-run rows in the chat transcript.
  *
@@ -135,5 +138,24 @@ export function buildToolRunSummary (name: string, args: unknown): string {
       // deliberately left bare (rebuild_project, open_workspace_tab, todo,
       // memory, page/terminal reads) have no meaningful arguments.
       return ''
+  }
+}
+
+export function toolRunEventFromFrame (frame: RustEventFrame): Extract<StreamEvent, { type: 'tool_start' | 'tool_end' }> | null {
+  if (frame.kind !== 'tool_call' && frame.kind !== 'tool_result') return null
+  const name = typeof frame.name === 'string' ? frame.name : 'tool'
+  const callId = typeof frame.callId === 'string' ? frame.callId : typeof frame.call_id === 'string' ? frame.call_id : undefined
+  if (frame.kind === 'tool_result') {
+    const error = frame.isError === true ? (typeof frame.content === 'string' ? frame.content : 'tool failed') : undefined
+    return { type: 'tool_end', name, ...(callId ? { callId } : {}), ...(error !== undefined ? { error } : {}) }
+  }
+  const summary = buildToolRunSummary(name, frame.args)
+  const filePath = filePathForToolRun(name, frame.args)
+  return {
+    type: 'tool_start',
+    name,
+    ...(callId ? { callId } : {}),
+    ...(summary ? { summary } : {}),
+    ...(filePath ? { filePath } : {})
   }
 }

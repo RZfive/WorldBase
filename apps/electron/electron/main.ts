@@ -1,4 +1,4 @@
-import { app, BrowserWindow, net, protocol } from 'electron'
+import { app, BrowserWindow, dialog, net, protocol } from 'electron'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { STUDIO_IMAGE_SCHEME } from '../src/main/settings/image-library-store.js'
@@ -130,6 +130,15 @@ app.whenReady().then(async () => {
       createWindow()
     }
   })
+}).catch((error: unknown) => {
+  console.error('[main] Startup failed:', error)
+  try {
+    if (app.isPackaged) {
+      dialog.showErrorBox(APP_DISPLAY_NAME, error instanceof Error ? error.message : String(error))
+    }
+  } finally {
+    app.exit(1)
+  }
 })
 
 /**

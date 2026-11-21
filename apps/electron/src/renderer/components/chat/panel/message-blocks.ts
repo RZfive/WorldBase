@@ -1,8 +1,6 @@
-import type { AgentGroupCollaborationPlan, AgentGroupDirectReply, AgentGroupMessage, AgentGroupUserInjection, SharedBoardSnapshot } from '../../../../shared/agent-workspace-types.js'
+import type { AgentGroupMessage, AgentGroupUserInjection } from '../../../../shared/agent-workspace-types.js'
 import type {
   AgentGroupProgressSnapshot,
-  AgentGroupTranscript,
-  AgentSidechatSession,
   AuthRequestPayload,
   ChatMessage,
   ChatMessageBlock,
@@ -121,39 +119,6 @@ export function createFilePreviewBlock (filePath: string): ChatMessageBlock {
   }
 }
 
-function cloneGroupCollaborationPlan (plan: AgentGroupCollaborationPlan): AgentGroupCollaborationPlan {
-  return {
-    ...plan,
-    planner: { ...plan.planner },
-    mentionedParticipants: plan.mentionedParticipants.map((participant: AgentGroupCollaborationPlan['mentionedParticipants'][number]) => ({ ...participant })),
-    candidateParticipants: plan.candidateParticipants.map((participant: AgentGroupCollaborationPlan['candidateParticipants'][number]) => ({ ...participant })),
-    invitedParticipants: plan.invitedParticipants.map((participant: AgentGroupCollaborationPlan['invitedParticipants'][number]) => ({ ...participant }))
-  }
-}
-
-export function createGroupCollaborationPlanBlock (plan: AgentGroupCollaborationPlan): ChatMessageBlock {
-  return {
-    id: createBlockId('groupplan'),
-    kind: 'group_collaboration_plan',
-    plan: cloneGroupCollaborationPlan(plan)
-  }
-}
-
-function cloneAgentSidechatSession (session: AgentSidechatSession): AgentSidechatSession {
-  return {
-    ...session,
-    progress: session.progress.map(step => ({ ...step }))
-  }
-}
-
-export function createAgentSidechatBlock (session: AgentSidechatSession): ChatMessageBlock {
-  return {
-    id: createBlockId('sidechat'),
-    kind: 'agent_sidechat',
-    session: cloneAgentSidechatSession(session)
-  }
-}
-
 function cloneGroupProgressSnapshot (snapshot: AgentGroupProgressSnapshot): AgentGroupProgressSnapshot {
   return {
     ...snapshot,
@@ -169,21 +134,6 @@ export function createGroupProgressBlock (snapshot: AgentGroupProgressSnapshot):
     id: createBlockId('group_progress'),
     kind: 'group_progress',
     snapshot: cloneGroupProgressSnapshot(snapshot)
-  }
-}
-
-function cloneGroupTranscript (transcript: AgentGroupTranscript): AgentGroupTranscript {
-  return {
-    ...transcript,
-    entries: transcript.entries.map(entry => ({ ...entry }))
-  }
-}
-
-export function createGroupTranscriptBlock (transcript: AgentGroupTranscript): ChatMessageBlock {
-  return {
-    id: createBlockId('group_transcript'),
-    kind: 'group_transcript',
-    transcript: cloneGroupTranscript(transcript)
   }
 }
 
@@ -224,6 +174,7 @@ export function createAuthRequestBlock (request: AuthRequestPayload): ChatMessag
     requestId: request.requestId,
     title: request.title,
     detail: request.detail,
+    ...(request.purpose ? { purpose: request.purpose } : {}),
     status: 'pending'
   }
 }
@@ -240,23 +191,13 @@ export function createSudoPasswordRequestBlock (requestId: string, command: stri
 
 export function positionGroupMetaBlocks (message: ChatMessage): void {
   const blocks = ensureBlocks(message)
-  const collaborationPlanBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'group_collaboration_plan' }> => {
-    return block.kind === 'group_collaboration_plan'
-  })
-  const sidechatBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'agent_sidechat' }> => {
-    return block.kind === 'agent_sidechat'
-  })
   const progressBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'group_progress' }> => {
     return block.kind === 'group_progress'
   })
-  const transcriptBlocks = blocks.filter((block): block is Extract<ChatMessageBlock, { kind: 'group_transcript' }> => {
-    return block.kind === 'group_transcript'
-  })
-
-  if (collaborationPlanBlocks.length === 0 && sidechatBlocks.length === 0 && progressBlocks.length === 0 && transcriptBlocks.length === 0) return
+  if (progressBlocks.length === 0) return
 
   const reorderedBlocks: ChatMessageBlock[] = blocks.filter((block) => {
-    return block.kind !== 'group_collaboration_plan' && block.kind !== 'agent_sidechat' && block.kind !== 'group_progress' && block.kind !== 'group_transcript'
+    return block.kind !== 'group_progress'
   })
   let insertIndex = reorderedBlocks.length
   for (let index = 0; index < reorderedBlocks.length; index++) {
@@ -266,38 +207,9 @@ export function positionGroupMetaBlocks (message: ChatMessage): void {
     }
   }
 
-  reorderedBlocks.splice(insertIndex, 0, ...collaborationPlanBlocks, ...progressBlocks, ...sidechatBlocks, ...transcriptBlocks)
+  reorderedBlocks.splice(insertIndex, 0, ...progressBlocks)
 
   blocks.splice(0, blocks.length, ...reorderedBlocks)
-}
-
-export function upsertGroupCollaborationPlanBlock (message: ChatMessage, plan: AgentGroupCollaborationPlan): void {
-  const blocks = ensureBlocks(message)
-  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'group_collaboration_plan' }> => {
-    return block.kind === 'group_collaboration_plan'
-  })
-
-  if (existing) {
-    existing.plan = cloneGroupCollaborationPlan(plan)
-  } else {
-    blocks.push(createGroupCollaborationPlanBlock(plan))
-  }
-
-  positionGroupMetaBlocks(message)
-}
-
-export function upsertAgentSidechatBlock (message: ChatMessage, session: AgentSidechatSession): void {
-  const blocks = ensureBlocks(message)
-  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'agent_sidechat' }> => {
-    return block.kind === 'agent_sidechat' && block.session.id === session.id
-  })
-
-  if (existing) {
-    existing.session = cloneAgentSidechatSession(session)
-  } else {
-    blocks.push(createAgentSidechatBlock(session))
-  }
-  positionGroupMetaBlocks(message)
 }
 
 export function upsertGroupProgressBlock (message: ChatMessage, snapshot: AgentGroupProgressSnapshot): void {
@@ -312,47 +224,6 @@ export function upsertGroupProgressBlock (message: ChatMessage, snapshot: AgentG
     blocks.push(createGroupProgressBlock(snapshot))
   }
 
-  positionGroupMetaBlocks(message)
-}
-
-export function upsertGroupTranscriptBlock (message: ChatMessage, transcript: AgentGroupTranscript): void {
-  const blocks = ensureBlocks(message)
-  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'group_transcript' }> => {
-    return block.kind === 'group_transcript'
-  })
-
-  if (existing) {
-    existing.transcript = cloneGroupTranscript(transcript)
-  } else {
-    blocks.push(createGroupTranscriptBlock(transcript))
-  }
-
-  positionGroupMetaBlocks(message)
-}
-
-export function upsertGroupBoardBlock (message: ChatMessage, board: SharedBoardSnapshot): void {
-  const blocks = ensureBlocks(message)
-  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'group_board' }> => {
-    return block.kind === 'group_board'
-  })
-  if (existing) {
-    existing.board = { ...board, board: { ...board.board }, recentUpdates: board.recentUpdates.map(u => ({ ...u })) }
-  } else {
-    blocks.push({ id: createBlockId('group_board'), kind: 'group_board', board })
-  }
-  positionGroupMetaBlocks(message)
-}
-
-export function appendGroupDirectReplyBlock (message: ChatMessage, reply: AgentGroupDirectReply): void {
-  const blocks = ensureBlocks(message)
-  const existing = blocks.find((block): block is Extract<ChatMessageBlock, { kind: 'group_direct_reply' }> => {
-    return block.kind === 'group_direct_reply' && block.directReply.id === reply.id
-  })
-  if (existing) {
-    existing.directReply = { ...reply }
-  } else {
-    blocks.push({ id: createBlockId('group_direct_reply'), kind: 'group_direct_reply', directReply: { ...reply } })
-  }
   positionGroupMetaBlocks(message)
 }
 
@@ -404,7 +275,7 @@ export function ensureStreamingContentBlock (message: ChatMessage): Extract<Chat
 export function ensureThinkingBlock (message: ChatMessage): Extract<ChatMessageBlock, { kind: 'thinking' }> {
   const blocks = ensureBlocks(message)
   const lastBlock = getLastBlock(blocks)
-  if (lastBlock?.kind === 'thinking') {
+  if (lastBlock?.kind === 'thinking' && lastBlock.endedAt == null) {
     return lastBlock
   }
 

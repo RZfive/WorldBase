@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { USER_ABORT_MESSAGE } from './abort-utils.js'
-import { buildToolRunSummary, filePathForToolRun } from './tool-run-summary.js'
+import { toolRunEventFromFrame } from './tool-run-summary.js'
 import type { UsageStore } from '../settings/usage-store.js'
 import type { ChatContentPart, ChatMessage, MessageContent, ToolDefinition } from './contracts.js'
 import {
@@ -181,6 +181,7 @@ export class RustHarnessEngine implements AIHarness {
     // believe it lacked the capability, so it redirected users to a manual UI
     // flow that does not exist.
     const deniedToolNames = mergeStrings(options?.deniedToolNames)
+    const planModeActive = options?.planModeActive ?? this.planModeDefault
     const priorMessages = pendingIndex >= 0 ? messages.slice(0, pendingIndex) : messages.slice(0, -1)
     const historySystemPromptSections = priorMessages
       .filter(message => message.role === 'system' || message.role === 'developer')
@@ -189,7 +190,7 @@ export class RustHarnessEngine implements AIHarness {
     const systemPromptSections = mergeStrings(
       historySystemPromptSections,
       options?.systemPromptSections,
-      this.planModeDefault
+      planModeActive
         ? ['Plan mode is active. Mutating tools (create/modify files, projects, installs, builds, process control, MCP calls) stay visible but every call is rejected until exit_plan_mode has completed — this is a temporary block, not a missing capability. Present the plan, call exit_plan_mode, then execute the plan yourself with those tools. Never tell the user to create or modify projects manually in the UI.']
         : undefined
     )
@@ -399,7 +400,7 @@ export class RustHarnessEngine implements AIHarness {
         enableThinking: effectiveConfig.enableThinking,
         reasoningEffort: effectiveConfig.reasoningEffort,
         temperature: effectiveConfig.temperature,
-        planModeActive: this.planModeDefault,
+        planModeActive,
         budgetLimit: this.budgetLimit,
         computerUseEnabled: options?.computerUseEnabled === true,
         autoApprovePermissions: options?.autoApprovePermissions === true
@@ -1174,27 +1175,9 @@ function frameToStreamEvent (frame: RustEventFrame, assistantContent: MessageCon
       // Rust emits this before a provider-stream retry. Preserve Node's
       // renderer contract so partial token/thinking buffers are discarded.
       return { type: 'reset' }
-    case 'tool_call': {
-      const name = typeof frame.name === 'string' ? frame.name : 'tool'
-      const summary = buildToolRunSummary(name, frame.args)
-      // Full (unclamped) target path for file tools so the renderer can open
-      // the file in a workspace tab from the row title.
-      const filePath = filePathForToolRun(name, frame.args)
-      return {
-        type: 'tool_start',
-        name,
-        ...(summary ? { summary } : {}),
-        ...(filePath ? { filePath } : {})
-      }
-    }
+    case 'tool_call':
     case 'tool_result':
-      // Native tool failures stay silent otherwise: the renderer would keep
-      // showing the run as completed even though the model saw an error.
-      return {
-        type: 'tool_end',
-        name: typeof frame.name === 'string' ? frame.name : 'tool',
-        ...(frame.isError === true ? { error: typeof frame.content === 'string' ? frame.content : 'tool failed' } : {})
-      }
+      return toolRunEventFromFrame(frame)
     case 'usage':
       return {
         type: 'cost_update',

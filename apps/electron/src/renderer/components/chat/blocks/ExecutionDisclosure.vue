@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { ref, watch } from 'vue'
 
 const props = withDefaults(defineProps<{
   title: string
@@ -11,13 +11,15 @@ const props = withDefaults(defineProps<{
   fileLabel?: string
   status?: 'running' | 'completed' | 'failed' | 'neutral'
   defaultExpanded?: boolean
+  collapseOnSettle?: boolean
 }>(), {
   meta: '',
   detail: '',
   filePath: '',
   fileLabel: '',
   status: 'neutral',
-  defaultExpanded: false
+  defaultExpanded: false,
+  collapseOnSettle: false
 })
 
 const emit = defineEmits<{
@@ -33,10 +35,8 @@ const slots = defineSlots<{
   default?: () => unknown
   meta?: () => unknown
 }>()
-const hasDetails = computed(() => Boolean(slots.default))
-
 function toggleExpanded (): void {
-  if (!hasDetails.value) return
+  if (!slots.default) return
   expanded.value = !expanded.value
 }
 
@@ -46,6 +46,10 @@ watch(
     if (shouldExpand) expanded.value = true
   }
 )
+
+watch(() => props.status, (status, previousStatus) => {
+  if (props.collapseOnSettle && previousStatus === 'running' && status !== 'running') expanded.value = false
+})
 </script>
 
 <template>
@@ -53,7 +57,7 @@ watch(
     <button
       class="execution-summary"
       type="button"
-      :disabled="!hasDetails"
+      :disabled="!$slots.default"
       :aria-expanded="expanded"
       @click="toggleExpanded"
     >
@@ -71,14 +75,14 @@ watch(
         <span v-if="props.meta" class="execution-meta">{{ props.meta }}</span>
       </slot>
       <span v-if="props.detail" class="execution-detail">{{ props.detail }}</span>
-      <span v-if="hasDetails" class="execution-chevron" aria-hidden="true">
+      <span v-if="$slots.default" class="execution-chevron" aria-hidden="true">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </span>
     </button>
 
-    <div v-if="expanded && hasDetails" class="execution-body">
+    <div v-if="expanded && $slots.default" class="execution-body">
       <slot />
     </div>
   </section>

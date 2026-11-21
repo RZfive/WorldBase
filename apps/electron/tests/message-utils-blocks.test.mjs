@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { reactive, ref } from 'vue'
 
 import { buildMessageBlocks, deriveWorkGroupStatus } from '../src/renderer/components/chat/message-utils.ts'
 import { appendFinalContentBlock } from '../src/renderer/components/chat/panel/message-blocks.ts'
+import { createChatAuthorizationState } from '../src/renderer/components/chat/panel/authorization-state.ts'
 
 const idlePreview = { active: false, filePath: '', lineCount: 0, added: 0, removed: 0 }
 
@@ -110,6 +112,48 @@ test('assistant blocks are never rewritten', () => {
   }
 
   assert.equal(build(message), message.blocks)
+})
+
+test('retired group cards do not appear in old conversations', () => {
+  const oldCards = ['group_collaboration_plan', 'group_board', 'group_transcript', 'agent_sidechat'].map(kind => ({ id: kind, kind }))
+  const answer = { id: 'answer', kind: 'content', content: 'Work completed' }
+  const message = { role: 'assistant', content: answer.content, blocks: [...oldCards, answer] }
+
+  assert.deepEqual(build(message), [answer])
+  assert.equal(build({ ...message, blocks: oldCards })[0].content, answer.content)
+  assert.deepEqual(message.blocks, [...oldCards, answer])
+})
+
+test('a saved room approval keeps the coordinator text without rendering old approval buttons', () => {
+  const block = { id: 'approval', kind: 'auth_request', purpose: 'room_execution', status: 'pending', detail: 'I can verify the output.' }
+  assert.deepEqual(build({ role: 'assistant', content: block.detail, blocks: [block] }), [
+    { id: 'approval', kind: 'content', content: block.detail }
+  ])
+})
+
+test('a room directory request enters the normal permission queue without altering the transcript', context => {
+  const previousWindow = globalThis.window
+  const submitted = []
+  globalThis.window = { electronAPI: { respondAuth: (...args) => submitted.push(args) } }
+  context.after(() => { globalThis.window = previousWindow })
+  const messages = ref([{ role: 'assistant', content: '', speakerName: 'Codex CLI', blocks: [] }])
+  const state = createChatAuthorizationState({
+    currentConversationId: ref('room'), messages,
+    activeStreamSessionIds: new Map([['room', 'turn']]),
+    backgroundStreamMessages: new Map(),
+    pendingAuthRequestsByConversation: reactive(new Map()),
+    pendingSudoPasswordRequestsByConversation: new Map(),
+    pendingAskUserRequestsByConversation: new Map(),
+    unreadConversationIds: new Set()
+  })
+  const request = { requestId: 'approval', sessionId: 'turn', purpose: 'room_workspace', title: 'Codex CLI', detail: '/example' }
+  state.handleAuthRequest(request)
+  assert.deepEqual(state.currentPendingAuthRequest.value, { ...request, conversationId: 'room' })
+  assert.deepEqual(messages.value[0].blocks, [])
+  state.respondToAuthRequest('approval', true)
+  assert.deepEqual(submitted, [['approval', true]])
+  state.handleAuthResolution({ requestId: 'approval', approved: true })
+  assert.equal(state.currentPendingAuthRequest.value, null)
 })
 
 test('final answer after pre-tool narration gets its own trailing block', () => {

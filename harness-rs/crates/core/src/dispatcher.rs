@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use futures::StreamExt;
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -173,6 +174,11 @@ pub async fn dispatch(
 
         GROUP_CREATE => group_create(hub, params),
         GROUP_GET => group_get(hub, params),
+        GROUP_ADD_MEMBER => group_add_member(hub, params),
+        GROUP_ADD_LOCAL_WORKER => group_add_local_worker(hub, params),
+        GROUP_REMOVE_LOCAL_WORKER => group_remove_local_worker(hub, params),
+        GROUP_CLEAR_CONTEXT => group_clear_context(hub, params),
+        GROUP_RECORD_HANDOFF => group_record_handoff(hub, params),
         GROUP_MESSAGE => group_message(hub, ctx, params),
         GROUP_BLACKBOARD_ADD => group_blackboard_add(hub, params),
 
@@ -2646,6 +2652,25 @@ fn persist_group_member_message(
     Ok(())
 }
 
+fn read_native_group_messages(hub: &Hub, group_id: &str, before_id: i64, limit: u32) -> Result<Value> {
+    let messages = hub.store.list_messages_before(&group_conversation_id(group_id), limit + 1, before_id)?;
+    let has_more = messages.len() > limit as usize;
+    let messages = &messages[usize::from(has_more)..];
+    let before_id = has_more.then(|| messages[0].id);
+    let rows = messages.iter().map(|message| {
+        let mut author = if message.role == Role::User { "User".to_string() } else { "Room".to_string() };
+        let mut content = message.content.as_str();
+        if let Some((header, body)) = content.strip_prefix(GROUP_MEMBER_HISTORY_PREFIX).and_then(|value| value.split_once('\n')) {
+            if let Ok(header) = serde_json::from_str::<Value>(header) {
+                author = header.get("name").and_then(Value::as_str).unwrap_or("Room").to_string();
+            }
+            content = body;
+        }
+        json!({ "id": message.id, "author": author, "content": content.chars().take(6000).collect::<String>() })
+    }).collect::<Vec<_>>();
+    Ok(json!({ "messages": rows, "beforeId": before_id }))
+}
+
 fn group_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let topic = required_string_param(&params, &["topic"], "topic")?;
     let mode: GroupMode = match params.get("mode") {
@@ -2685,6 +2710,8 @@ fn group_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         max_parallel_workers,
     )
     .map_err(|error| params_err(error.to_string()))?;
+    session.room = optional_bool_param(&params, &["room"], false, "room")?;
+    let mut sessions = hub.group_sessions.lock().unwrap();
     if let Some(session_id) =
         optional_string_param_strict(&params, &["sessionId", "session_id"], "sessionId")?
             .map(|value| value.trim().to_string())
@@ -2692,7 +2719,16 @@ fn group_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     {
         session.id = session_id.to_string();
     }
-    if let Some(existing) = hub.group_sessions.lock().unwrap().get(&session.id).cloned() {
+    if let Some(logical_id) = optional_string_value(&params, &["logicalGroupId"])? {
+        let (_, _, group) = room_group_for_update(hub, logical_id)?;
+        if !session.room || session.id != native_room_id(&group) {
+            return Err(params_err("room context has changed"));
+        }
+    }
+    if let Some(existing) = sessions.get(&session.id).cloned() {
+        if existing.status == "running" {
+            return Err(params_err("group session is already running"));
+        }
         session.created_at = existing.created_at;
         session.board = existing.board;
         session.board_updates = existing.board_updates;
@@ -2706,10 +2742,7 @@ fn group_create(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     hub.store
         .rename_conversation(&conversation_id, topic)
         .map_err(internal)?;
-    hub.group_sessions
-        .lock()
-        .unwrap()
-        .insert(session.id.clone(), session.clone());
+    sessions.insert(session.id.clone(), session.clone());
     Ok(serde_json::to_value(&session).unwrap())
 }
 
@@ -2741,7 +2774,7 @@ fn group_inject(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
             "group injection target is not a member: {target}"
         )));
     }
-    if session.status == "running" {
+    if session.status == "running" && !session.room {
         if session.active_member_ids.is_empty() {
             return Err(ErrorObject::invalid_params(
                 "group injection: no group member has a pending turn that can receive this clarification",
@@ -2760,6 +2793,9 @@ fn group_inject(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
         if target_agent_ids.is_empty() {
             target_agent_ids = session.active_member_ids.clone();
         }
+    }
+    if session.room && target_agent_ids.is_empty() {
+        target_agent_ids = session.active_member_ids.clone();
     }
     persist_group_user_message(hub, id, format!("[补充说明] {content}")).map_err(internal)?;
     worldbase_group::GroupEngine::inject(session, content, target_agent_ids);
@@ -2834,6 +2870,277 @@ fn group_get(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     Ok(serde_json::to_value(&session).unwrap())
 }
 
+fn group_add_member(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = optional_string_param_strict(&params, &["id"], "id")?;
+    let agent_id = required_string_param(&params, &["agentId", "agent_id"], "agentId")?;
+    let logical_group_id = required_string_param(
+        &params,
+        &["logicalGroupId", "logical_group_id"],
+        "logicalGroupId",
+    )?;
+    let agent = hub
+        .store
+        .get_agent(&sanitize_agent_id(agent_id))
+        .map_err(internal)?
+        .ok_or_else(|| ErrorObject::invalid_params("group member agent not found"))?;
+    let mut sessions = hub.group_sessions.lock().unwrap();
+    let session = id
+        .as_deref()
+        .map(|id| {
+            sessions
+                .get_mut(id)
+                .ok_or_else(|| ErrorObject::invalid_params("group session not found"))
+        })
+        .transpose()?;
+    let mut groups = hub.store.get_agent_groups_setting().map_err(internal)?;
+    let group_id = sanitize_group_id(logical_group_id);
+    let index = groups
+        .iter()
+        .position(|group| group_string(group, "id").as_deref() == Some(group_id.as_str()))
+        .ok_or_else(|| params_err("group not found"))?;
+    let mut group: AgentGroupDefinition = serde_json::from_value(normalize_agent_group(
+        &groups[index],
+        Some(&groups[index]),
+        "Untitled group",
+    ))
+    .map_err(internal)?;
+    let added = group.coordinator_agent_id != agent.id && !group.member_agent_ids.contains(&agent.id);
+    if added {
+        group.member_agent_ids.push(agent.id.clone());
+        group.updated_at = worldbase_protocol::event::now_rfc3339();
+        groups[index] = serde_json::to_value(&group).map_err(internal)?;
+        hub.store.set_agent_groups_setting(&groups).map_err(internal)?;
+    }
+    let mut joined_live = false;
+    if let Some(session) = session {
+        if !session.members.iter().any(|member| group_member_id(member) == Some(agent.id.as_str())) {
+            let local_runtime = agent.provider_id.as_deref() == Some("local-cli");
+            let persona = [agent.description.trim(), agent.system_prompt.trim()]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            session.members.push(GroupMember {
+                name: agent.name,
+                persona,
+                agent_id: Some(agent.id),
+                allowed_tool_names: agent.allowed_tools,
+                denied_tool_names: agent.denied_tools,
+                provider: None,
+                local_runtime,
+            });
+            joined_live = true;
+        }
+    }
+    Ok(json!({ "group": group, "added": added, "joinedLive": joined_live }))
+}
+
+fn group_add_local_worker(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let logical_id = required_string_param(&params, &["logicalGroupId"], "logicalGroupId")?;
+    let kind = required_string_param(&params, &["kind"], "kind")?;
+    if !matches!(kind, "codex" | "claude" | "opencode") {
+        return Err(params_err("unsupported local worker platform"));
+    }
+    let role = required_string_param(&params, &["role"], "role")?.trim();
+    let instructions = optional_string_param_strict(&params, &["instructions"], "instructions")?
+        .unwrap_or_default();
+    let instructions = instructions.trim();
+    if role.is_empty()
+        || role.chars().count() > 48
+        || role.chars().any(|character| character.is_control() || matches!(character, '@' | '＠'))
+        || instructions.chars().count() > 2000
+    {
+        return Err(params_err("invalid local worker role or instructions"));
+    }
+    let worker = RoomLocalWorker {
+        id: format!("local_worker_{kind}_{}", uuid::Uuid::new_v4().simple()),
+        kind: kind.to_owned(),
+        role: role.to_owned(),
+        instructions: instructions.to_owned(),
+        exit_after_task: optional_bool_param(&params, &["exitAfterTask"], false, "exitAfterTask")?,
+    };
+    let live_id = optional_string_param_strict(&params, &["id"], "id")?;
+    let mut sessions = hub.group_sessions.lock().unwrap();
+    let (groups, index, mut group) = room_group_for_update(hub, logical_id)?;
+    let native_id = native_room_id(&group);
+    if live_id.as_deref().is_some_and(|id| id != native_id) {
+        return Err(params_err("worker invitation does not match this room"));
+    }
+    let live = match live_id {
+        Some(_) => Some(
+            sessions
+                .get_mut(&native_id)
+                .filter(|session| session.room)
+                .ok_or_else(|| params_err("room not found"))?,
+        ),
+        None => None,
+    };
+    if group.local_workers.len() >= 24 {
+        return Err(params_err("this room already has 24 local workers"));
+    }
+    group.local_workers.push(worker.clone());
+    save_room_group_update(hub, groups, index, &mut group)?;
+    if let Some(live) = live {
+        live.members.push(GroupMember {
+            name: local_room_worker_name(&worker),
+            persona: worker.instructions.clone(),
+            agent_id: Some(worker.id.clone()),
+            allowed_tool_names: vec![],
+            denied_tool_names: vec![],
+            provider: None,
+            local_runtime: true,
+        });
+    }
+    Ok(json!({ "group": group, "worker": worker }))
+}
+
+fn group_remove_local_worker(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let logical_id = required_string_param(&params, &["logicalGroupId"], "logicalGroupId")?;
+    let worker_id = required_string_param(&params, &["workerId"], "workerId")?;
+    let mut sessions = hub.group_sessions.lock().unwrap();
+    let (groups, index, mut group) = room_group_for_update(hub, logical_id)?;
+    let native_id = native_room_id(&group);
+    let live = sessions.get_mut(&native_id).filter(|session| session.room);
+    if live.as_ref().is_some_and(|session| session.status == "running") {
+        return Err(params_err("wait for the current room round to finish before removing a worker"));
+    }
+    let previous = group.local_workers.len();
+    group.local_workers.retain(|worker| worker.id != worker_id);
+    let removed = group.local_workers.len() != previous;
+    if removed {
+        save_room_group_update(hub, groups, index, &mut group)?;
+        if let Some(live) = live {
+            live.members.retain(|member| group_member_id(member) != Some(worker_id));
+            live.pending_injections.retain_mut(|injection| {
+                if injection.target_agent_ids.is_empty() {
+                    return true;
+                }
+                injection.target_agent_ids.retain(|id| id != worker_id);
+                !injection.target_agent_ids.is_empty()
+            });
+        }
+    }
+    Ok(json!({ "group": group, "removed": removed }))
+}
+
+fn group_clear_context(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let logical_id = required_string_param(&params, &["logicalGroupId"], "logicalGroupId")?;
+    let mut sessions = hub.group_sessions.lock().unwrap();
+    let (groups, index, mut group) = room_group_for_update(hub, logical_id)?;
+    purge_room_context(hub, &group, &mut sessions, &params)?;
+    let previous_context_id = group
+        .room_context_id
+        .replace(uuid::Uuid::new_v4().simple().to_string());
+    save_room_group_update(hub, groups, index, &mut group)?;
+    Ok(json!({ "group": group, "previousContextId": previous_context_id }))
+}
+
+fn purge_room_context(
+    hub: &Hub,
+    group: &AgentGroupDefinition,
+    sessions: &mut HashMap<String, GroupSessionMeta>,
+    params: &Value,
+) -> Result<(), ErrorObject> {
+    let native_id = native_room_id(group);
+    let native_ids = HashSet::from([native_id.clone(), format!("room-{}", group.id)]);
+    let mut group_scope_ids = HashSet::from([group.id.as_str()]);
+    if group.room_context_id.is_some() {
+        group_scope_ids.insert(native_id.as_str());
+    }
+    let mut conversation_ids: HashSet<_> =
+        string_array_param(params, &["conversationIds"], "conversationIds")?
+            .into_iter()
+            .collect();
+    for id in &native_ids {
+        conversation_ids.extend(hub.store.room_conversation_ids(id).map_err(internal)?);
+    }
+    let owns_stream = |id: &str| {
+        let parent_id = id.split_once(":member:").map_or(id, |(parent, _)| parent);
+        native_ids.contains(parent_id)
+    };
+    let group_running = native_ids.iter().any(|id| {
+        sessions
+            .get(id)
+            .is_some_and(|session| session.status == "running")
+    });
+    if group_running
+        || hub.runs.lock().unwrap().iter().any(|(id, run)| {
+            owns_stream(id) || conversation_ids.contains(&run.conversation_id)
+        })
+    {
+        return Err(params_err(
+            "stop the current room run before clearing or deleting its context",
+        ));
+    }
+
+    hub.store
+        .delete_room_memories(&conversation_ids, &native_ids, &group_scope_ids)
+        .map_err(internal)?;
+    for id in &conversation_ids {
+        hub.store.delete_conversation(id).map_err(internal)?;
+    }
+    sessions.retain(|id, _| !native_ids.contains(id));
+    hub.streams.lock().unwrap().retain(|id, _| !owns_stream(id));
+    Ok(())
+}
+
+fn native_room_id(group: &AgentGroupDefinition) -> String {
+    match &group.room_context_id {
+        Some(context_id) => format!("room:{context_id}"),
+        None => format!("room-{}", group.id),
+    }
+}
+
+fn room_group_for_update(
+    hub: &Arc<Hub>,
+    logical_id: &str,
+) -> Result<(Vec<Value>, usize, AgentGroupDefinition), ErrorObject> {
+    let groups = hub.store.get_agent_groups_setting().map_err(internal)?;
+    let group_id = sanitize_group_id(logical_id);
+    let index = groups
+        .iter()
+        .position(|group| group_string(group, "id").as_deref() == Some(group_id.as_str()))
+        .ok_or_else(|| params_err("group not found"))?;
+    let group = serde_json::from_value(normalize_agent_group(
+        &groups[index],
+        Some(&groups[index]),
+        "Untitled group",
+    ))
+    .map_err(internal)?;
+    Ok((groups, index, group))
+}
+
+fn save_room_group_update(
+    hub: &Arc<Hub>,
+    mut groups: Vec<Value>,
+    index: usize,
+    group: &mut AgentGroupDefinition,
+) -> Result<(), ErrorObject> {
+    group.updated_at = worldbase_protocol::event::now_rfc3339();
+    groups[index] = serde_json::to_value(group).map_err(internal)?;
+    hub.store.set_agent_groups_setting(&groups).map_err(internal)
+}
+
+fn local_room_worker_name(worker: &RoomLocalWorker) -> String {
+    let suffix: String = worker.id.rsplit('_').next().unwrap_or(&worker.id).chars().take(8).collect();
+    format!("{}-{suffix}", worker.role)
+}
+
+fn group_record_handoff(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let id = required_string_param(&params, &["id"], "id")?;
+    let from = required_string_param(&params, &["fromAgentId"], "fromAgentId")?;
+    let to = required_string_param(&params, &["toAgentId"], "toAgentId")?;
+    let task = required_string_param(&params, &["task"], "task")?;
+    let sessions = hub.group_sessions.lock().unwrap();
+    let room = sessions.get(id).filter(|session| session.room)
+        .ok_or_else(|| params_err("room not found"))?;
+    let member = |key| room.members.iter().find(|member| group_member_id(member) == Some(key));
+    let source = member(from).ok_or_else(|| params_err("handoff sender is not a room member"))?;
+    let target = member(to).ok_or_else(|| params_err("handoff recipient is not a room member"))?;
+    persist_group_member_message(hub, id, &source.name, &format!("Handoff to {}:\n{task}", target.name)).map_err(internal)?;
+    Ok(json!({ "recorded": true }))
+}
+
 fn apply_group_board_update(
     hub: &Arc<Hub>,
     group_id: &str,
@@ -2904,6 +3211,7 @@ fn finalize_native_group_session(
             .append(&mut live.pending_injections);
         local.board = live.board.clone();
         local.board_updates = live.board_updates.clone();
+        local.members = live.members.clone();
     }
     local.status = "open".into();
     local.active_member_ids.clear();
@@ -2981,7 +3289,7 @@ impl worldbase_tools::GroupCollaborationRuntime for NativeGroupCollaborationRunt
             anyhow::bail!("message_agent: deadlock detected in the peer consultation chain.");
         }
 
-        let (target, group_name) = {
+        let (target, group_name, is_room) = {
             let sessions = self.hub.group_sessions.lock().unwrap();
             let session = sessions
                 .get(&self.group_id)
@@ -2996,10 +3304,19 @@ impl worldbase_tools::GroupCollaborationRuntime for NativeGroupCollaborationRunt
                         "message_agent: target agent \"{target_agent_id}\" is not a participant in this group."
                     )
                 })?;
-            (target, session.topic.clone())
+            (target, session.topic.clone(), session.room)
         };
+        anyhow::ensure!(!target.local_runtime, "Use handoff_room_task to queue work for a local CLI agent.");
 
         let now = worldbase_protocol::event::now_rfc3339();
+        if is_room {
+            persist_group_member_message(
+                &self.hub,
+                &self.group_id,
+                &self.member.name,
+                &format!("To {}:\n{request}", target.name),
+            )?;
+        }
         let mut message = GroupPeerMessage {
             id: uuid::Uuid::new_v4().to_string(),
             group_id: self.group_id.clone(),
@@ -3050,6 +3367,9 @@ impl worldbase_tools::GroupCollaborationRuntime for NativeGroupCollaborationRunt
 
         match result {
             Ok(Ok(reply)) => {
+                if is_room {
+                    persist_group_member_message(&self.hub, &self.group_id, &message.to_agent_name, &reply)?;
+                }
                 message.response = reply.clone();
                 message.status = "completed".into();
                 message.resolved_at = Some(worldbase_protocol::event::now_rfc3339());
@@ -3110,6 +3430,10 @@ impl worldbase_tools::GroupCollaborationRuntime for NativeGroupCollaborationRunt
             .map(|session| session.board.clone())
             .ok_or_else(|| anyhow::anyhow!("group session not found"))?;
         Ok(serde_json::to_value(board)?)
+    }
+
+    async fn read_room_messages(&self, before_id: i64, limit: u32) -> anyhow::Result<Value> {
+        read_native_group_messages(&self.hub, &self.group_id, before_id, limit)
     }
 
     async fn update_board(
@@ -3212,6 +3536,13 @@ async fn run_native_group_member(
         .as_deref()
         .filter(|id| !id.trim().is_empty());
     let member_key = persisted_agent_id.unwrap_or(&member.name);
+    let child_stream_id = format!(
+        "{group_id}:member:{member_key}:{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    if member.local_runtime {
+        return run_local_cli_group_member(&hub, &child_stream_id, prompt, &group_abort).await;
+    }
     let conversation_agent_id = persisted_agent_id
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("__group_adhoc__{group_id}:{member_key}"));
@@ -3227,15 +3558,17 @@ async fn run_native_group_member(
     if context.denied_tool_names.is_empty() {
         context.denied_tool_names = member.denied_tool_names.clone();
     }
+    let public_room = hub.group_sessions.lock().unwrap().get(group_id).is_some_and(|session| session.room);
+    let audience = if public_room {
+        "Report your result and evidence directly to the room."
+    } else {
+        "Return an internal working note for the coordinator."
+    };
     context.system_prompt_sections.push(format!(
-        "## Group member assignment\n- Group member: {}\n- Persona: {}\n- Return an internal working note for the coordinator.",
+        "## Group member assignment\n- Group member: {}\n- Persona: {}\n- {audience}",
         member.name, member.persona
     ));
 
-    let child_stream_id = format!(
-        "{group_id}:member:{member_key}:{}",
-        uuid::Uuid::new_v4().simple()
-    );
     // Subscribe before creating the child so an instant mock/provider result
     // cannot be emitted before the waiter is installed.
     let channel = hub.register_stream(&child_stream_id);
@@ -3313,6 +3646,34 @@ async fn run_native_group_member(
     }
 }
 
+async fn run_local_cli_group_member(
+    hub: &Arc<Hub>,
+    stream_id: &str,
+    prompt: String,
+    abort: &CancellationToken,
+) -> anyhow::Result<String> {
+    let request = hub.host_request(
+        stream_id,
+        "tool.execute",
+        json!({ "name": "run_local_cli", "args": { "task": prompt } }),
+        std::time::Duration::from_secs(21 * 60),
+    );
+    let result = tokio::select! {
+        biased;
+        _ = abort.cancelled() => anyhow::bail!("native group aborted"),
+        result = request => result?,
+    };
+    if let Some(error) = result.get("error").and_then(Value::as_str) {
+        anyhow::bail!("{error}");
+    }
+    result
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("Local CLI returned no assistant text."))
+}
+
 fn group_message(
     hub: &Arc<Hub>,
     ctx: &ConnectionContext,
@@ -3320,20 +3681,21 @@ fn group_message(
 ) -> Result<Value, ErrorObject> {
     let id = required_string_param(&params, &["id"], "id")?.to_string();
     let text = required_string_param(&params, &["text"], "text")?.to_string();
-    let session_snapshot = hub
-        .group_sessions
-        .lock()
-        .unwrap()
-        .get(&id)
-        .cloned()
+    let mut sessions = hub.group_sessions.lock().unwrap();
+    let live = sessions
+        .get_mut(&id)
         .ok_or_else(|| ErrorObject::invalid_params("group session not found"))?;
-    let default_round =
-        (session_snapshot.rounds.len() / session_snapshot.members.len().max(1)) as u64 + 1;
+    let default_round = (live.rounds.len() / live.members.len().max(1)) as u64 + 1;
     let round = optional_u64_param(&params, &["round"], default_round, "round")?;
     let round =
         u32::try_from(round).map_err(|_| params_err("round must be no greater than 4294967295"))?;
-    let max_parallel_workers = session_snapshot.max_parallel_workers;
+    let max_parallel_workers = live.max_parallel_workers;
+    let is_room = live.room;
     let selected_members = string_array_param(&params, &["memberIds", "member_ids"], "memberIds")?;
+    let member_requests: std::collections::HashMap<String, String> = params.get("memberRequests")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose().map_err(|error| params_err(error.to_string()))?.unwrap_or_default();
+    let record_message = optional_bool_param(&params, &["recordMessage"], true, "recordMessage")?;
     let mut run_context: ChatRunContext = params
         .get("context")
         .cloned()
@@ -3341,15 +3703,16 @@ fn group_message(
         .transpose()
         .map_err(|error| params_err(error.to_string()))?
         .unwrap_or_default();
-    run_context
-        .system_prompt_sections
-        .push("## Native Rust group deliberation\n- You are producing an internal group note. Do not address the end user directly.\n- Use the shared board and the assigned group prompt. Keep the conclusion concise and concrete.".into());
+    if !is_room {
+        run_context.system_prompt_sections.push("## Native Rust group deliberation\n- You are producing an internal group note. Do not address the end user directly.\n- Use the shared board and the assigned group prompt. Keep the conclusion concise and concrete.".into());
+    }
     let capabilities = ctx.effective_capabilities();
     let interactive = ctx.effective_interactive();
 
     // Keep a parent cancellation handle under the public group stream ID.
     // Member agent loops use child streams, so `chat.abort(group_id)` cancels
     // the entire round without being overwritten by a member RunHandle.
+    let group_abort = CancellationToken::new();
     {
         let mut runs = hub.runs.lock().unwrap();
         if runs.contains_key(&id) {
@@ -3361,7 +3724,7 @@ fn group_message(
             id.clone(),
             RunHandle {
                 conversation_id: format!("group-{id}"),
-                abort: CancellationToken::new(),
+                abort: group_abort.clone(),
                 capabilities: capabilities.clone(),
                 interactive,
                 agent_id: None,
@@ -3373,41 +3736,29 @@ fn group_message(
             },
         );
     }
-    if let Err(error) = persist_group_user_message(hub, &id, text.clone()) {
-        hub.runs.lock().unwrap().remove(&id);
-        return Err(internal(error));
+    if record_message {
+        if let Err(error) = persist_group_user_message(hub, &id, text.clone()) {
+            hub.runs.lock().unwrap().remove(&id);
+            return Err(internal(error));
+        }
     }
-    let group_abort = hub
-        .runs
-        .lock()
-        .unwrap()
-        .get(&id)
-        .map(|run| run.abort.clone())
-        .ok_or_else(|| internal("group run was not registered"))?;
-
     // The Hub copy is authoritative for live board writes and incoming HITL
     // injections. Give the local state machine its initial queue, then move
     // later arrivals in just before each member starts.
-    let mut session = {
-        let mut sessions = hub.group_sessions.lock().unwrap();
-        let live = sessions
-            .get_mut(&id)
-            .ok_or_else(|| internal("group session disappeared before start"))?;
-        let active_members = worldbase_group::GroupEngine::resolve_speakers(
-            live,
-            &text,
-            (!selected_members.is_empty()).then_some(selected_members.as_slice()),
-        );
-        live.status = "running".into();
-        live.active_member_ids = active_members
-            .iter()
-            .filter_map(group_member_id)
-            .map(ToOwned::to_owned)
-            .collect();
-        let mut local = live.clone();
-        local.pending_injections = std::mem::take(&mut live.pending_injections);
-        local
-    };
+    let active_members = worldbase_group::GroupEngine::resolve_speakers(
+        live,
+        &text,
+        (!selected_members.is_empty()).then_some(selected_members.as_slice()),
+    );
+    live.status = "running".into();
+    live.active_member_ids = active_members
+        .iter()
+        .filter_map(group_member_id)
+        .map(ToOwned::to_owned)
+        .collect();
+    let mut session = live.clone();
+    session.pending_injections = std::mem::take(&mut live.pending_injections);
+    drop(sessions);
 
     // 事件流：stream_id = group 会话 id
     let hub2 = hub.clone();
@@ -3428,8 +3779,8 @@ fn group_message(
         let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = collected.clone();
         let mut on_board = |_board: &worldbase_protocol::types::GroupBoard| {};
-        let mut on_message_cb = |member: String, content: String, r: u32| {
-            sink.lock().unwrap().push((member, content, r));
+        let mut on_message_cb = |member: &GroupMember, content: String, round: u32| {
+            sink.lock().unwrap().push((member.name.clone(), member.agent_id.clone(), content, round));
         };
         let selected_members_for_task = selected_members;
         let context_for_task = run_context;
@@ -3447,6 +3798,7 @@ fn group_message(
                 let context = context_for_task.clone();
                 let capabilities = capabilities.clone();
                 let group_abort = group_abort_for_task.clone();
+                let assignment = group_member_id(&member).and_then(|id| member_requests.get(id)).cloned();
                 async move {
                     if group_abort.is_cancelled() {
                         anyhow::bail!("native group aborted");
@@ -3468,6 +3820,14 @@ fn group_message(
                         depth: 0,
                     })
                         as Arc<dyn worldbase_tools::GroupCollaborationRuntime>;
+                    let mut prompt = prompt;
+                    if is_room || member.local_runtime {
+                        let history = read_native_group_messages(&hub, &group_id, i64::MAX, 8)?;
+                        prompt.push_str(&format!("\n\n## Shared room messages\n{history}"));
+                    }
+                    if let Some(assignment) = assignment {
+                        prompt.push_str(&format!("\n\n## Your current handoff assignment\n{assignment}"));
+                    }
                     let result = run_native_group_member(
                         hub,
                         &group_id,
@@ -3481,6 +3841,12 @@ fn group_message(
                     )
                     .await;
                     mark_native_group_member_finished(&hub_for_finish, &group_id, &member);
+                    if let Err(error) = &result {
+                        hub_for_finish.emit(&group_id, EventKind::GroupMemberFailed {
+                            agent_id: group_member_id(&member).unwrap_or(&member.name).to_string(),
+                            message: error.to_string(),
+                        }).await;
+                    }
                     result
                 }
             },
@@ -3501,9 +3867,9 @@ fn group_message(
         match result {
             Ok(_count) => {
                 let final_board = finalize_native_group_session(&hub2, &id, &mut session);
-                let drained: Vec<(String, String, u32)> =
+                let drained: Vec<_> =
                     collected.lock().unwrap().drain(..).collect();
-                for (member, content, r) in drained {
+                for (member, agent_id, content, round) in drained {
                     if let Err(error) = persist_group_member_message(&hub2, &id, &member, &content)
                     {
                         hub2.emit(
@@ -3518,7 +3884,8 @@ fn group_message(
                         &id,
                         EventKind::GroupMessage {
                             member,
-                            round: r,
+                            agent_id,
+                            round,
                             content,
                         },
                     )
@@ -3532,6 +3899,7 @@ fn group_message(
                     },
                 )
                 .await;
+                hub2.runs.lock().unwrap().remove(&id);
                 hub2.emit(
                     &id,
                     EventKind::Done {
@@ -3544,21 +3912,17 @@ fn group_message(
                 finalize_native_group_session(&hub2, &id, &mut session);
                 hub2.emit(
                     &id,
-                    EventKind::Notice {
-                        text: format!("Native group failed: {e}"),
-                    },
+                    EventKind::Notice { text: format!("Native group failed: {e}") },
                 )
                 .await;
+                hub2.runs.lock().unwrap().remove(&id);
                 hub2.emit(
                     &id,
-                    EventKind::Done {
-                        stop_reason: "group_error".into(),
-                    },
+                    EventKind::Done { stop_reason: "group_error".into() },
                 )
                 .await;
             }
         }
-        hub2.runs.lock().unwrap().remove(&id);
     });
     Ok(json!({ "streamId": id, "round": round }))
 }
@@ -4941,6 +5305,10 @@ fn normalize_agent_group(value: &Value, existing: Option<&Value>, fallback_name:
         "description": description,
         "coordinatorAgentId": coordinator,
         "memberAgentIds": member_ids,
+        "localWorkers": group_source_value(value, existing, "localWorkers")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        "roomContextId": existing.and_then(|group| group_string(group, "roomContextId")),
         "maxRounds": max_rounds,
         "maxParallelWorkers": max_parallel_workers,
         "sharedMemoryScopes": scopes,
@@ -4983,6 +5351,7 @@ fn agent_group_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject>
         .get("group")
         .filter(|group| group.is_object())
         .ok_or_else(|| params_err("missing group"))?;
+    let _group_sessions = hub.group_sessions.lock().unwrap();
     let mut groups = hub.store.get_agent_groups_setting().map_err(internal)?;
     let requested_id = group_string(value, "id").map(|id| sanitize_group_id(&id));
     let existing_index = requested_id.as_deref().and_then(|id| {
@@ -4993,7 +5362,11 @@ fn agent_group_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject>
     let existing = existing_index.and_then(|index| groups.get(index));
     let fallback_name =
         optional_string_value(&params, &["fallbackName"])?.unwrap_or("Untitled group");
-    let normalized = normalize_agent_group(value, existing, fallback_name);
+    let mut normalized = normalize_agent_group(value, existing, fallback_name);
+    normalized["localWorkers"] = existing
+        .and_then(|group| group.get("localWorkers"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
     if let Some(index) = existing_index {
         groups[index] = normalized.clone();
     } else {
@@ -5010,16 +5383,24 @@ fn agent_group_save(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject>
 fn agent_group_delete(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
     let requested = required_string_param(&params, &["id"], "id")?;
     let id = sanitize_group_id(requested);
+    let mut sessions = hub.group_sessions.lock().unwrap();
     let mut groups = hub.store.get_agent_groups_setting().map_err(internal)?;
-    let original_len = groups.len();
-    groups.retain(|group| group_string(group, "id").as_deref() != Some(id.as_str()));
-    let deleted = groups.len() != original_len;
-    if deleted {
-        hub.store
-            .set_agent_groups_setting(&groups)
-            .map_err(internal)?;
-    }
-    Ok(json!({ "deleted": deleted }))
+    let Some(index) = groups
+        .iter()
+        .position(|group| group_string(group, "id").as_deref() == Some(id.as_str()))
+    else {
+        return Ok(json!({ "deleted": false }));
+    };
+    let group = serde_json::from_value(normalize_agent_group(
+        &groups[index],
+        Some(&groups[index]),
+        "Untitled group",
+    ))
+    .map_err(internal)?;
+    purge_room_context(hub, &group, &mut sessions, &params)?;
+    groups.remove(index);
+    hub.store.set_agent_groups_setting(&groups).map_err(internal)?;
+    Ok(json!({ "deleted": true }))
 }
 
 // ---------- studio（图像生成）----------

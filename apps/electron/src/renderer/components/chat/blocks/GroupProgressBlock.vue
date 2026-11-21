@@ -84,7 +84,7 @@ const summaryText = computed(() => {
           <span>{{ $t('chatUi.groupStatusMeta', { status: getStatusLabel(snapshot.status) }) }}</span>
           <span>{{ $t('chatUi.groupRoundMeta', { current: Math.max(snapshot.activeRound, snapshot.status === 'running' ? 1 : snapshot.totalRounds), total: snapshot.totalRounds }) }}</span>
           <span>{{ $t('chatUi.groupMaxParallelMeta', { count: snapshot.maxParallelWorkers }) }}</span>
-          <span>{{ $t('chatUi.groupSubAgentCount', { count: snapshot.items.length }) }}</span>
+          <span>{{ $t('chatUi.groupSidebarSubtitle', { count: snapshot.items.length }) }}</span>
         </div>
         <div v-if="snapshot.request" class="group-progress-request">
           <span class="group-progress-request-label">{{ $t('chatUi.groupDiscussionContent') }}</span>

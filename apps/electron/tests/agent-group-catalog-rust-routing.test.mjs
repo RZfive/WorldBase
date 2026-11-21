@@ -20,13 +20,15 @@ test('agent and group catalog IPC routes through Rust when selected', () => {
     ['agents:delete', 'deleteAgent'],
     ['agentGroups:list', 'listAgentGroups'],
     ['agentGroups:get', 'getAgentGroup'],
-    ['agentGroups:save', 'saveAgentGroup'],
-    ['agentGroups:delete', 'deleteAgentGroup']
+    ['agentGroups:save', 'saveAgentGroup']
   ]) {
     const body = handlerBody(channel)
     assert.match(body, /selectedRustProjectClient\(\)/)
     assert.match(body, new RegExp(`rustClient\\.${method}\\(`))
   }
+  const removeGroup = handlerBody('agentGroups:delete')
+  assert.match(removeGroup, /selectedRustProjectClient\(\)/)
+  assert.match(removeGroup, /deleteNativeRoom\(rustClient,/)
 })
 
 test('Rust client exposes dedicated catalog RPCs and handoff mirrors', () => {

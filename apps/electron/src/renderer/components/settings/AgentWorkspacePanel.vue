@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import MultiSelectDropdown from './MultiSelectDropdown.vue'
+import type { LocalAgentProfile, LocalAgentSessionSummary } from '../../../shared/local-agent-types'
 
 interface ToolCatalogEntry {
   name: string
@@ -15,6 +16,13 @@ const { t } = useI18n()
 const activeTab = ref<WorkspaceTab>('agents')
 const agents = ref<AgentDefinition[]>([])
 const groups = ref<AgentGroupDefinition[]>([])
+const localAgents = ref<LocalAgentProfile[]>([])
+const localAgentsLoading = ref(false)
+const localSessions = ref<LocalAgentSessionSummary[]>([])
+const localSessionsLoading = ref(false)
+const localSessionAgentId = ref('')
+const localSessionWorkspace = ref('')
+const localSessionId = ref('')
 const bindings = ref<ChannelBinding[]>([])
 const connectors = ref<ConnectorDefinition[]>([])
 const providersConfig = ref<AIProvidersConfig>({
@@ -57,10 +65,9 @@ const draftGroup = reactive({
   description: '',
   coordinatorAgentId: '',
   memberAgentIds: [] as string[],
-  maxRounds: 2,
+  maxRounds: 3,
   maxParallelWorkers: 2,
-  sharedMemoryScopes: ['group'] as Array<'group' | 'project' | 'channel'>,
-  visibility: 'summary_only' as 'summary_only' | 'expandable_internal_transcript'
+  sharedMemoryScopes: ['group'] as Array<'group' | 'project' | 'channel'>
 })
 
 const draftBinding = reactive({
@@ -117,6 +124,7 @@ function toggleStringValue<T extends string> (collection: T[], value: T): T[] {
 const selectedProvider = computed(() => {
   return providersConfig.value.providers.find(provider => provider.id === draftAgent.providerId) || null
 })
+const draftIsLocalAgent = computed(() => agents.value.some(agent => agent.id === draftAgent.id && agent.providerId === 'local-cli'))
 
 const availableModels = computed(() => {
   return selectedProvider.value?.models || []
@@ -153,6 +161,7 @@ function getDefaultProviderSelection (): { providerId: string; modelId: string }
 }
 
 function syncDraftAgentModel (preferProviderDefault = false) {
+  if (draftIsLocalAgent.value) return
   const provider = selectedProvider.value
   if (!provider) {
     draftAgent.modelId = ''
@@ -173,7 +182,7 @@ function pruneAgentSelections () {
   draftAgent.deniedTools = draftAgent.deniedTools.filter(toolName => validToolNames.has(toolName))
 
   const validProviderIds = new Set(providersConfig.value.providers.map(provider => provider.id))
-  if (draftAgent.providerId && !validProviderIds.has(draftAgent.providerId)) {
+  if (!draftIsLocalAgent.value && draftAgent.providerId && !validProviderIds.has(draftAgent.providerId)) {
     const defaults = getDefaultProviderSelection()
     draftAgent.providerId = defaults.providerId
     draftAgent.modelId = defaults.modelId
@@ -238,10 +247,9 @@ function resetGroupDraft () {
   draftGroup.description = ''
   draftGroup.coordinatorAgentId = ''
   draftGroup.memberAgentIds = []
-  draftGroup.maxRounds = 2
+  draftGroup.maxRounds = 3
   draftGroup.maxParallelWorkers = 2
   draftGroup.sharedMemoryScopes = ['group']
-  draftGroup.visibility = 'summary_only'
 }
 
 function loadGroupIntoDraft (group?: AgentGroupDefinition | null) {
@@ -259,7 +267,6 @@ function loadGroupIntoDraft (group?: AgentGroupDefinition | null) {
   draftGroup.maxRounds = group.maxRounds
   draftGroup.maxParallelWorkers = group.maxParallelWorkers
   draftGroup.sharedMemoryScopes = [...group.sharedMemoryScopes]
-  draftGroup.visibility = group.visibility
 }
 
 function resetBindingDraft () {
@@ -319,10 +326,83 @@ async function loadAgents () {
 
 async function loadGroups () {
   if (!window.electronAPI?.listAgentGroups) return
-  groups.value = await window.electronAPI.listAgentGroups()
+  const next = await window.electronAPI.listAgentGroups()
+  const previous = groups.value.find(group => group.id === draftGroup.id)
+  const updated = next.find(group => group.id === draftGroup.id)
+  if (previous && updated) {
+    const added = updated.memberAgentIds.filter(id => !previous.memberAgentIds.includes(id))
+    draftGroup.memberAgentIds = [...new Set([
+      ...draftGroup.memberAgentIds.filter(id => !previous.memberAgentIds.includes(id) || updated.memberAgentIds.includes(id)),
+      ...added
+    ])]
+  }
+  groups.value = next
   if (!draftGroup.id && groups.value.length > 0) {
     loadGroupIntoDraft(groups.value[0])
   }
+}
+
+async function discoverLocalAgents () {
+  if (!window.electronAPI?.discoverLocalAgents) return
+  localAgentsLoading.value = true
+  try {
+    localAgents.value = await window.electronAPI.discoverLocalAgents()
+  } catch (error) {
+    setStatus((error as Error).message)
+  } finally {
+    localAgentsLoading.value = false
+  }
+}
+
+async function joinLocalAgent (agentId: string) {
+  if (!draftGroup.id || !window.electronAPI?.joinLocalAgentGroup) return
+  try {
+    const result = await window.electronAPI.joinLocalAgentGroup(agentId, draftGroup.id)
+    await Promise.all([loadAgents(), loadGroups(), loadBindings()])
+    loadGroupIntoDraft(result.group)
+    setStatus(t('settings.agentWorkspace.localAgentJoined', { name: result.agent.name }))
+  } catch (error) {
+    setStatus((error as Error).message)
+  }
+}
+
+async function discoverSessionsForAgent (agentId: string) {
+  if (!window.electronAPI?.listLocalAgentSessions) return
+  localSessionAgentId.value = agentId
+  localSessions.value = []
+  localSessionId.value = ''
+  if (!localSessionWorkspace.value.trim()) {
+    setStatus(t('settings.agentWorkspace.localSessionWorkspaceRequired'))
+    return
+  }
+  localSessionsLoading.value = true
+  try {
+    localSessions.value = await window.electronAPI.listLocalAgentSessions(agentId, localSessionWorkspace.value.trim())
+    if (localSessions.value.length === 0) setStatus(t('settings.agentWorkspace.noLocalSessions'))
+  } catch (error) {
+    setStatus((error as Error).message)
+  } finally {
+    localSessionsLoading.value = false
+  }
+}
+
+async function resumeLocalSession () {
+  if (!draftGroup.id || !localSessionId.value || !window.electronAPI?.resumeLocalAgentInGroup) return
+  try {
+    const result = await window.electronAPI.resumeLocalAgentInGroup(localSessionAgentId.value, draftGroup.id, localSessionId.value, localSessionWorkspace.value.trim())
+    await Promise.all([loadAgents(), loadGroups(), loadBindings()])
+    loadGroupIntoDraft(result.group)
+    setStatus(t('settings.agentWorkspace.localSessionJoined', { name: result.agent.name }))
+  } catch (error) {
+    setStatus((error as Error).message)
+  }
+}
+
+async function pickLocalSessionWorkspace () {
+  const result = await window.electronAPI?.pickFolderWorkspace?.()
+  if (!result?.rootPath) return
+  localSessionWorkspace.value = result.rootPath
+  if (localSessionAgentId.value) await discoverSessionsForAgent(localSessionAgentId.value)
 }
 
 async function loadBindings () {
@@ -368,7 +448,8 @@ async function loadAll () {
     loadToolCatalog(),
     loadAgents(),
     loadGroups(),
-    loadBindings()
+    loadBindings(),
+    discoverLocalAgents()
   ])
 }
 
@@ -445,8 +526,7 @@ async function saveGroup () {
     memberAgentIds: [...draftGroup.memberAgentIds],
     maxRounds: draftGroup.maxRounds,
     maxParallelWorkers: draftGroup.maxParallelWorkers,
-    sharedMemoryScopes: [...draftGroup.sharedMemoryScopes],
-    visibility: draftGroup.visibility
+    sharedMemoryScopes: [...draftGroup.sharedMemoryScopes]
   })
   await loadGroups()
   loadGroupIntoDraft(saved)
@@ -455,14 +535,17 @@ async function saveGroup () {
 
 async function removeGroup () {
   if (!draftGroup.id || !window.electronAPI?.deleteAgentGroup) return
-  const deleted = await window.electronAPI.deleteAgentGroup(draftGroup.id)
-  if (!deleted) {
-    setStatus(t('settings.agentWorkspace.groupDeleteFailed'))
-    return
+  try {
+    if (!await window.electronAPI.deleteAgentGroup(draftGroup.id)) {
+      setStatus(t('settings.agentWorkspace.groupDeleteFailed'))
+      return
+    }
+    resetGroupDraft()
+    await loadGroups()
+    setStatus(t('settings.agentWorkspace.groupDeleted'))
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : t('settings.agentWorkspace.groupDeleteFailed'))
   }
-  resetGroupDraft()
-  await loadGroups()
-  setStatus(t('settings.agentWorkspace.groupDeleted'))
 }
 
 async function saveBinding () {
@@ -623,14 +706,16 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
           </label>
           <label>
             <span>{{ $t('settings.agentWorkspace.modelProvider') }}</span>
-            <select v-model="draftAgent.providerId" class="input">
+            <select v-model="draftAgent.providerId" class="input" :disabled="draftIsLocalAgent">
+              <option v-if="draftIsLocalAgent" value="local-cli">{{ $t('settings.agentWorkspace.localAgents') }}</option>
               <option value="">{{ $t('settings.agentWorkspace.selectProvider') }}</option>
               <option v-for="provider in providersConfig.providers" :key="provider.id" :value="provider.id">{{ provider.name }}</option>
             </select>
           </label>
           <label>
             <span>{{ $t('settings.agentWorkspace.model') }}</span>
-            <select v-model="draftAgent.modelId" class="input" :disabled="!draftAgent.providerId">
+            <select v-model="draftAgent.modelId" class="input" :disabled="!draftAgent.providerId || draftIsLocalAgent">
+              <option v-if="draftIsLocalAgent" :value="draftAgent.modelId">{{ draftAgent.modelId }}</option>
               <option value="">{{ $t('settings.agentWorkspace.selectModel') }}</option>
               <option v-for="model in availableModels" :key="model" :value="model">{{ model }}</option>
             </select>
@@ -745,7 +830,7 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
 
         <div class="form-grid two-col">
           <label>
-            <span>{{ $t('settings.agentWorkspace.coordinatorAgent') }}</span>
+            <span>{{ $t('settings.agentWorkspace.roomDefaultReplyAgent') }}</span>
             <select v-model="draftGroup.coordinatorAgentId" class="input">
               <option value="">{{ $t('settings.agentWorkspace.pleaseSelect') }}</option>
               <option v-for="agent in agents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
@@ -757,6 +842,49 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
           <span>{{ $t('settings.agentWorkspace.descriptionLabel') }}</span>
           <input v-model="draftGroup.description" class="input" :placeholder="$t('settings.agentWorkspace.groupDescriptionPlaceholder')">
         </label>
+
+        <section class="local-agent-card">
+          <div class="local-agent-head">
+            <div>
+              <h3>{{ $t('settings.agentWorkspace.localAgents') }}</h3>
+              <p>{{ $t('settings.agentWorkspace.localAgentsHint') }}</p>
+            </div>
+            <button class="ghost-btn small" type="button" :disabled="localAgentsLoading" @click="discoverLocalAgents">{{ $t('settings.agentWorkspace.discoverLocalAgents') }}</button>
+          </div>
+          <div v-for="agent in localAgents" :key="agent.agentId" class="local-agent-row">
+            <div>
+              <strong>{{ agent.name }}</strong>
+              <span>{{ agent.available ? (agent.version || $t('settings.agentWorkspace.localAgentAvailable')) : $t('settings.agentWorkspace.localAgentNotFound') }}</span>
+              <code v-if="agent.executablePath">{{ agent.executablePath }}</code>
+            </div>
+            <div class="local-agent-actions">
+              <button v-if="agent.available && agent.supportsSessionDiscovery" class="ghost-btn small" type="button" :disabled="!draftGroup.id || localSessionsLoading" @click="discoverSessionsForAgent(agent.agentId)">{{ $t('settings.agentWorkspace.findLocalSessions') }}</button>
+              <button
+                class="ghost-btn small"
+                type="button"
+                :disabled="!agent.available || !draftGroup.id || draftGroup.memberAgentIds.includes(agent.agentId)"
+                @click="joinLocalAgent(agent.agentId)"
+              >
+                {{ draftGroup.memberAgentIds.includes(agent.agentId) ? $t('settings.agentWorkspace.localAgentInGroup') : $t('settings.agentWorkspace.addLocalAgent') }}
+              </button>
+            </div>
+          </div>
+          <div v-if="localSessionAgentId" class="local-session-picker">
+            <strong>{{ $t('settings.agentWorkspace.resumeLocalSession') }}</strong>
+            <div class="local-session-actions">
+              <input v-model="localSessionWorkspace" class="input" type="text" :placeholder="$t('settings.agentWorkspace.localSessionWorkspacePlaceholder')">
+              <button class="ghost-btn small" type="button" @click="pickLocalSessionWorkspace">{{ $t('settings.agentWorkspace.chooseLocalSessionWorkspace') }}</button>
+            </div>
+            <div class="local-session-actions">
+              <select v-model="localSessionId" class="input" :disabled="localSessionsLoading">
+                <option value="">{{ $t('settings.agentWorkspace.selectLocalSession') }}</option>
+                <option v-for="session in localSessions" :key="`${session.agentId}:${session.sessionId}`" :value="session.sessionId">{{ session.title }} · {{ session.sessionId }}</option>
+              </select>
+              <button class="ghost-btn small" type="button" :disabled="localSessionsLoading" @click="discoverSessionsForAgent(localSessionAgentId)">{{ $t('settings.agentWorkspace.refresh') }}</button>
+              <button class="primary-btn" type="button" :disabled="!localSessionId || !localSessionWorkspace.trim()" @click="resumeLocalSession">{{ $t('settings.agentWorkspace.resumeAndJoin') }}</button>
+            </div>
+          </div>
+        </section>
 
         <div class="form-grid two-col">
           <label>
@@ -794,11 +922,6 @@ watch(() => draftAgent.providerId, (nextProviderId, previousProviderId) => {
             </label>
           </div>
 
-          <div>
-            <h3>{{ $t('settings.agentWorkspace.visibility') }}</h3>
-            <label class="check-row"><input v-model="draftGroup.visibility" type="radio" value="summary_only"><span>{{ $t('settings.agentWorkspace.summaryOnly') }}</span></label>
-            <label class="check-row"><input v-model="draftGroup.visibility" type="radio" value="expandable_internal_transcript"><span>{{ $t('settings.agentWorkspace.expandableTranscript') }}</span></label>
-          </div>
         </div>
 
         <div class="action-row">
@@ -1143,6 +1266,68 @@ label {
 
 .textarea {
   resize: vertical;
+}
+
+.local-agent-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: var(--app-main-surface);
+}
+
+.local-agent-head,
+.local-agent-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.local-agent-actions,
+.local-session-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.local-agent-row code {
+  display: block;
+  margin-top: 4px;
+  color: var(--app-text-muted);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.local-session-picker {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--app-border);
+}
+
+.local-agent-head h3,
+.local-agent-head p {
+  margin: 0;
+}
+
+.local-agent-head p,
+.local-agent-row span {
+  color: var(--app-text-soft);
+  font-size: 0.8rem;
+  margin-top: 4px;
+}
+
+.local-agent-row {
+  padding-top: 8px;
+  border-top: 1px solid var(--app-border);
+}
+
+.local-agent-row strong,
+.local-agent-row span {
+  display: block;
 }
 
 .check-grid {

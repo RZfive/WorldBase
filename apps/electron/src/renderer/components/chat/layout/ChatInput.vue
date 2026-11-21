@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, type CSSProperties } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, useId, watch, type CSSProperties } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { findGroupMentionQuery, normalizeMentionToken } from '../../../../shared/group-mentions'
 import { copyTextToClipboard } from '../export-utils'
 import ImageLightbox from '../media/ImageLightbox.vue'
 import { removeSelectionQuote, SELECTION_QUOTE_TAG_PATTERN } from '../panel/selection-quote-state'
 import { removeWebQuote, WEB_QUOTE_TAG_PATTERN } from '../panel/web-quote-state'
+import type { GroupMentionHint } from '../panel/types'
+import type { RoomLocalWorker } from '../../../../shared/local-agent-types'
 import type { GalleryImage } from '../types'
+import RoomLocalAgentDialog from './RoomLocalAgentDialog.vue'
 
 interface PendingAttachment {
   id: string
@@ -46,19 +50,11 @@ interface WebQuoteChip {
 
 type AIExecutionAuthMode = 'strict' | 'auto'
 
-interface GroupMentionHint {
-  token: string
-  label: string
-  aliases?: string[]
-}
-
 interface MentionQueryState {
   start: number
   end: number
   query: string
-  top: number
-  left: number
-  lineHeight: number
+  anchor: DOMRect
 }
 
 const props = defineProps<{
@@ -82,6 +78,9 @@ const props = defineProps<{
   activeGroupSessionId?: string
   groupMentionHints?: GroupMentionHint[]
   isGroupConversation?: boolean
+  roomTaskDirectory?: string | null
+  roomLocalWorkers?: RoomLocalWorker[]
+  targetProjectId?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -99,6 +98,7 @@ const emit = defineEmits<{
   (e: 'selectAllSkills'): void
   (e: 'clearSkills'): void
   (e: 'toggleSkill', skillId: string): void
+  (e: 'selectRoomFolder', folder: { rootPath: string; rootName?: string }): void
 }>()
 
 const { t } = useI18n()
@@ -139,14 +139,24 @@ function closePendingImagePreview (): void {
 }
 const activeMention = ref<MentionQueryState | null>(null)
 const activeMentionIndex = ref(0)
+const mentionListId = useId()
+let mentionRefreshFrame = 0
 const pendingSelection = ref<{ start: number; end: number } | null>(null)
-// R5 · human-in-the-loop injection into a running group deliberation.
-const showInjectPanel = ref(false)
-const injectText = ref('')
 const injectFeedback = ref<'idle' | 'sent' | 'failed'>('idle')
 const isInjecting = ref(false)
 let injectFeedbackTimer: ReturnType<typeof setTimeout> | null = null
 const canInject = computed(() => Boolean(props.isGroupConversation && props.selectedGroupId && props.activeGroupSessionId && props.isLoading))
+const canCompose = computed(() => (!props.isLoading || canInject.value) && !props.isUploadingFiles)
+const showLocalAgents = ref(false)
+
+watch(() => props.selectedGroupId, () => { showLocalAgents.value = false })
+
+function handleLocalAgentJoined (agentName: string) {
+  const prefix = plainDraftText.value.trimEnd()
+  const text = `${prefix}${prefix ? ' ' : ''}@${agentName} `
+  pendingSelection.value = { start: text.length, end: text.length }
+  emit('update:modelValue', buildTaggedDraftValue(text))
+}
 const inputContextMenu = reactive({
   visible: false,
   x: 0,
@@ -154,18 +164,12 @@ const inputContextMenu = reactive({
   copied: false
 })
 let inputContextMenuResetTimer: number | null = null
-const MAX_MENTION_DROPDOWN_HEIGHT = 320
-const MIN_MENTION_DROPDOWN_HEIGHT = 120
 // design v1.7: the auth pill reads its state without hover —
 // auto = green breathing dot, strict = amber; while an auth request is
 // pending in strict mode it says 等待授权 (waiting for authorization).
 const authModeLabel = computed(() => {
-  if (props.authMode === 'strict') {
-    return (props.pendingAuthCount || 0) > 0
-      ? t('chatUi.waitingAuth')
-      : t('chatUi.authModeStrict')
-  }
-  return t('chatUi.authModeAuto')
+  if ((props.pendingAuthCount || 0) > 0) return t('chatUi.waitingAuth')
+  return t(props.authMode === 'strict' ? 'chatUi.authModeStrict' : 'chatUi.authModeAuto')
 })
 const LARGE_PASTE_TEXT_ATTACHMENT_THRESHOLD = 2000
 const INPUT_CONTEXT_MENU_WIDTH = 128
@@ -268,7 +272,12 @@ const plainDraftText = computed(() => {
 const hasDraftContent = computed(() => {
   return props.modelValue.trim().length > 0 || props.pendingImages.length > 0 || props.pendingFiles.length > 0
 })
-const isSendDisabled = computed(() => props.isUploadingFiles || (!props.isLoading && !hasDraftContent.value))
+const canSubmit = computed(() => canCompose.value && (canInject.value
+  ? !isInjecting.value && Boolean(plainDraftText.value.trim())
+  : hasDraftContent.value))
+const primaryActionLabel = computed(() => t(props.isLoading
+  ? 'chatUi.stopGenerating'
+  : props.isUploadingFiles ? 'chatUi.processingFiles' : 'chatUi.send'))
 
 function clearInjectFeedbackTimer (): void {
   if (injectFeedbackTimer !== null) {
@@ -289,27 +298,44 @@ async function submitGroupInjection (): Promise<void> {
   if (isInjecting.value) return
   const groupId = props.selectedGroupId
   const sessionId = props.activeGroupSessionId
-  const content = injectText.value.trim()
+  const draft = props.modelValue
+  const content = plainDraftText.value.trim()
   if (!sessionId || !groupId || !content) return
   if (!window.electronAPI?.injectGroupClarification) return
   isInjecting.value = true
+  injectFeedback.value = 'idle'
   try {
     const result = await window.electronAPI.injectGroupClarification(sessionId, groupId, content)
+    if (groupId !== props.selectedGroupId) return
     if (result?.injected) {
       injectFeedback.value = 'sent'
-      injectText.value = ''
+      if (props.modelValue === draft) emit('update:modelValue', buildTaggedDraftValue(''))
       scheduleInjectFeedbackReset(2500)
     } else {
       injectFeedback.value = 'failed'
       scheduleInjectFeedbackReset(3500)
     }
   } catch {
-    injectFeedback.value = 'failed'
-    scheduleInjectFeedbackReset(3500)
+    if (groupId === props.selectedGroupId) {
+      injectFeedback.value = 'failed'
+      scheduleInjectFeedbackReset(3500)
+    }
   } finally {
     isInjecting.value = false
   }
 }
+
+function submitComposer () {
+  if (!canSubmit.value) return
+  if (canInject.value) void submitGroupInjection()
+  else emit('send')
+}
+
+function handlePrimaryAction () {
+  if (props.isLoading) emit('stop')
+  else submitComposer()
+}
+
 const mentionOptions = computed<GroupMentionHint[]>(() => {
   const mention = activeMention.value
   const hints = props.groupMentionHints || []
@@ -357,41 +383,22 @@ const mentionOptions = computed<GroupMentionHint[]>(() => {
   return scored.map(item => item.hint)
 })
 const showMentionDropdown = computed(() => {
-  return Boolean(activeMention.value) && mentionOptions.value.length > 0 && !props.isLoading && !props.isUploadingFiles
+  return canCompose.value && Boolean(activeMention.value) && mentionOptions.value.length > 0
 })
 const mentionDropdownStyle = computed<CSSProperties>(() => {
-  const mention = activeMention.value
-  const textarea = textareaRef.value
-  if (!mention || !textarea) {
-    return {}
-  }
-
-  const availableWidth = Math.max(220, textarea.clientWidth - 16)
-  const longestOptionLength = mentionOptions.value.reduce((maxLength, hint) => {
-    return Math.max(maxLength, `${hint.label} ${hint.token}`.trim().length)
-  }, 0)
-  const viewportPadding = 12
-  const preferredWidth = Math.min(
-    Math.max(260, longestOptionLength * 9 + 72),
-    Math.min(420, availableWidth, window.innerWidth - viewportPadding * 2)
-  )
-  const baseTop = mention.top + mention.lineHeight + 8
-  const spaceBelow = window.innerHeight - baseTop - viewportPadding
-  const spaceAbove = mention.top - viewportPadding - 8
-  const placeAbove = spaceBelow < 180 && spaceAbove > spaceBelow
-  const resolvedMaxHeight = Math.min(MAX_MENTION_DROPDOWN_HEIGHT, Math.max(MIN_MENTION_DROPDOWN_HEIGHT, placeAbove ? spaceAbove : spaceBelow))
-  const resolvedTop = placeAbove
-    ? Math.max(viewportPadding, mention.top - resolvedMaxHeight - 8)
-    : Math.max(viewportPadding, baseTop)
-  const maxLeft = Math.max(viewportPadding, window.innerWidth - preferredWidth - viewportPadding)
-
+  const anchor = activeMention.value?.anchor
+  if (!anchor) return {}
+  const padding = 12
+  const gap = 6
+  const width = Math.min(320, window.innerWidth - padding * 2)
+  const spaceAbove = anchor.top - gap - padding
+  const spaceBelow = window.innerHeight - anchor.bottom - gap - padding
+  const above = spaceAbove >= 180 || spaceAbove >= spaceBelow
   return {
-    position: 'fixed',
-    top: `${resolvedTop}px`,
-    left: `${Math.min(Math.max(viewportPadding, mention.left), maxLeft)}px`,
-    width: `${preferredWidth}px`,
-    maxWidth: `${Math.max(220, Math.min(window.innerWidth - viewportPadding * 2, availableWidth))}px`,
-    maxHeight: `${resolvedMaxHeight}px`
+    ...(above ? { bottom: `${window.innerHeight - anchor.top + gap}px` } : { top: `${anchor.bottom + gap}px` }),
+    left: `${Math.max(padding, Math.min(anchor.left, window.innerWidth - width - padding))}px`,
+    width: `${width}px`,
+    maxHeight: `${Math.min(320, Math.max(56, above ? spaceAbove : spaceBelow))}px`
   }
 })
 
@@ -444,13 +451,13 @@ watch(() => props.modelValue, () => {
   })
 })
 
-watch(canInject, (active) => {
-  if (active) return
-  showInjectPanel.value = false
-  injectText.value = ''
+watch(() => props.selectedGroupId, () => {
   injectFeedback.value = 'idle'
   clearInjectFeedbackTimer()
 })
+
+watch([canCompose, () => props.groupMentionHints], scheduleMentionRefresh)
+watch(() => activeMention.value?.query, () => { activeMentionIndex.value = 0 })
 
 function buildDraftValue (tags: DocumentTagChip[], text: string): string {
   const projectSegment = projectTags.value.map(tag => tag.raw).join(' ')
@@ -474,123 +481,33 @@ function buildTaggedDraftValue (text: string): string {
   return tagSegment || text
 }
 
-function normalizeMentionToken (value: string): string {
-  return value
-    .replace(/^@+/, '')
-    .replace(/[【】\[\]（）(){}<>《》「」『』"'“”‘’`~!?,.:;，。！？、：；]/g, '')
-    .replace(/\s+/g, '')
-    .trim()
-    .toLowerCase()
-}
-
-function measureMentionPosition (textarea: HTMLTextAreaElement, text: string, caretIndex: number): { top: number; left: number; lineHeight: number } {
-  const style = window.getComputedStyle(textarea)
-  const rect = textarea.getBoundingClientRect()
-  const mirror = document.createElement('div')
-  const marker = document.createElement('span')
-  const properties = [
-    'boxSizing',
-    'width',
-    'height',
-    'overflowX',
-    'overflowY',
-    'borderTopWidth',
-    'borderRightWidth',
-    'borderBottomWidth',
-    'borderLeftWidth',
-    'paddingTop',
-    'paddingRight',
-    'paddingBottom',
-    'paddingLeft',
-    'fontStyle',
-    'fontVariant',
-    'fontWeight',
-    'fontStretch',
-    'fontSize',
-    'fontSizeAdjust',
-    'lineHeight',
-    'fontFamily',
-    'letterSpacing',
-    'textTransform',
-    'textIndent',
-    'textDecoration',
-    'textAlign',
-    'wordSpacing',
-    'tabSize'
-  ] as const
-
-  mirror.style.position = 'absolute'
-  mirror.style.visibility = 'hidden'
-  mirror.style.whiteSpace = 'pre-wrap'
-  mirror.style.wordWrap = 'break-word'
-  mirror.style.overflow = 'hidden'
-  mirror.style.top = '0'
-  mirror.style.left = '-9999px'
-
-  for (const property of properties) {
-    mirror.style[property] = style[property]
-  }
-
-  mirror.textContent = text.slice(0, caretIndex)
-  if (mirror.textContent.endsWith('\n')) {
-    mirror.textContent += '\u200b'
-  }
-
-  marker.textContent = text.slice(caretIndex) || '\u200b'
-  mirror.appendChild(marker)
-  document.body.appendChild(mirror)
-
-  const lineHeight = Number.parseFloat(style.lineHeight || '20') || 20
-  const top = rect.top + marker.offsetTop - textarea.scrollTop
-  const left = rect.left + marker.offsetLeft - textarea.scrollLeft
-
-  document.body.removeChild(mirror)
-  return { top, left, lineHeight }
-}
-
-function computeMentionState (text: string, textarea: HTMLTextAreaElement): MentionQueryState | null {
-  const caret = textarea.selectionStart ?? text.length
-  const beforeCaret = text.slice(0, caret)
-  // `@` triggers a mention when at the start of the input or after any character
-  // that is not whitespace or another `@`. The looser left boundary (previously
-  // `(?:^|\s)`) lets CJK input work without a leading space, e.g. "请帮我@张三".
-  const match = /(?:^|[^\s@])@([^\s@]*)$/.exec(beforeCaret)
-  if (!match) {
-    return null
-  }
-
-  const query = match[1] || ''
-  const start = caret - query.length - 1
-  const position = measureMentionPosition(textarea, text, caret)
-
-  return {
-    start,
-    end: caret,
-    query,
-    top: position.top,
-    left: position.left,
-    lineHeight: position.lineHeight
-  }
-}
-
 function refreshMentionState (text?: string) {
   const textarea = textareaRef.value
-  if (!textarea || props.isLoading || props.isUploadingFiles || !props.groupMentionHints?.length) {
+  if (!textarea || !inputFocused.value || !canCompose.value || !props.groupMentionHints?.length || textarea.selectionStart !== textarea.selectionEnd) {
     activeMention.value = null
     activeMentionIndex.value = 0
     return
   }
 
-  activeMention.value = computeMentionState(text ?? textarea.value, textarea)
-  if (!activeMention.value) {
-    activeMentionIndex.value = 0
-  }
+  const mention = findGroupMentionQuery(text ?? textarea.value, textarea.selectionStart)
+  activeMention.value = mention ? { ...mention, anchor: textarea.getBoundingClientRect() } : null
 }
 
 function scheduleMentionRefresh () {
-  requestAnimationFrame(() => {
+  if (mentionRefreshFrame) return
+  mentionRefreshFrame = requestAnimationFrame(() => {
+    mentionRefreshFrame = 0
     refreshMentionState()
   })
+}
+
+function handleTextareaKeyup (event: KeyboardEvent) {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) scheduleMentionRefresh()
+}
+
+function moveMentionSelection (offset: number) {
+  activeMentionIndex.value = (activeMentionIndex.value + offset + mentionOptions.value.length) % mentionOptions.value.length
+  document.getElementById(`${mentionListId}-${activeMentionIndex.value}`)?.scrollIntoView({ block: 'nearest' })
 }
 
 function chooseMention (hint: GroupMentionHint) {
@@ -603,7 +520,7 @@ function chooseMention (hint: GroupMentionHint) {
   const after = text.slice(mention.end)
   const suffixSpace = after.length === 0 || !/^\s/.test(after) ? ' ' : ''
   const nextText = `${before}${hint.token}${suffixSpace}${after}`
-  const nextCaret = before.length + hint.token.length + suffixSpace.length
+  const nextCaret = before.length + hint.token.length + (suffixSpace || /^[ \t]/.test(after) ? 1 : 0)
 
   pendingSelection.value = { start: nextCaret, end: nextCaret }
   activeMention.value = null
@@ -625,6 +542,7 @@ function removeProjectTag (projectId: string) {
 }
 
 function handleTextInput (e: Event) {
+  if ((e as InputEvent).isComposing) return
   const nextText = (e.target as HTMLTextAreaElement).value
   emit('update:modelValue', buildTaggedDraftValue(nextText))
   refreshMentionState(nextText)
@@ -674,16 +592,16 @@ function removeWebQuoteTag (id: string) {
 }
 
 function handleKeydown (e: KeyboardEvent) {
-  if (props.isLoading) return
+  if (!canCompose.value || e.isComposing || e.keyCode === 229) return
   if (showMentionDropdown.value) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      activeMentionIndex.value = (activeMentionIndex.value + 1) % mentionOptions.value.length
+      moveMentionSelection(1)
       return
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault()
-      activeMentionIndex.value = (activeMentionIndex.value - 1 + mentionOptions.value.length) % mentionOptions.value.length
+      moveMentionSelection(-1)
       return
     }
     if ((e.key === 'Enter' || e.key === 'Tab') && mentionOptions.value[activeMentionIndex.value]) {
@@ -727,7 +645,7 @@ function handleKeydown (e: KeyboardEvent) {
   }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
-    emit('send')
+    submitComposer()
   }
 }
 
@@ -836,27 +754,27 @@ async function copyInputText () {
 }
 
 function insertTextIntoInput (text: string) {
-  if (!text || props.isLoading || props.isUploadingFiles) return
+  if (!text || !canCompose.value) return
 
-  if (text.length >= LARGE_PASTE_TEXT_ATTACHMENT_THRESHOLD) {
+  if (!canInject.value && text.length >= LARGE_PASTE_TEXT_ATTACHMENT_THRESHOLD) {
     emit('addAttachments', [createPastedTextAttachment(text)])
     return
   }
 
   const textarea = textareaRef.value
   if (!textarea) return
+  textarea.focus({ preventScroll: true })
   const start = textarea.selectionStart ?? textarea.value.length
   const end = textarea.selectionEnd ?? start
   const nextText = `${textarea.value.slice(0, start)}${text}${textarea.value.slice(end)}`
   const nextCaret = start + text.length
   pendingSelection.value = { start: nextCaret, end: nextCaret }
   emit('update:modelValue', buildTaggedDraftValue(nextText))
-  refreshMentionState(nextText)
 }
 
 async function pasteInputText () {
   const textarea = textareaRef.value
-  if (!textarea || props.isLoading || props.isUploadingFiles) {
+  if (!textarea || !canCompose.value) {
     hideInputContextMenu()
     return
   }
@@ -949,12 +867,15 @@ function handleFocusComposerRequest (): void {
 onMounted(() => {
   document.addEventListener('click', hideInputContextMenu)
   window.addEventListener('blur', hideInputContextMenu)
+  window.addEventListener('resize', scheduleMentionRefresh)
   window.addEventListener(FOCUS_COMPOSER_EVENT, handleFocusComposerRequest)
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', hideInputContextMenu)
   window.removeEventListener('blur', hideInputContextMenu)
+  window.removeEventListener('resize', scheduleMentionRefresh)
+  if (mentionRefreshFrame) cancelAnimationFrame(mentionRefreshFrame)
   window.removeEventListener(FOCUS_COMPOSER_EVENT, handleFocusComposerRequest)
   hideInputContextMenu()
   clearInjectFeedbackTimer()
@@ -1041,14 +962,17 @@ onUnmounted(() => {
         <textarea
           ref="textareaRef"
           :value="plainDraftText"
-          :class="{ busy: props.isLoading }"
-          :placeholder="$t('chatUi.messagePlaceholder')"
+          :class="{ busy: props.isLoading && !canInject }"
+          :placeholder="$t(canInject ? 'chatUi.groupInjectPlaceholder' : props.isGroupConversation ? 'chatUi.roomMessagePlaceholder' : 'chatUi.messagePlaceholder')"
           :aria-busy="props.isLoading ? 'true' : 'false'"
+          :aria-autocomplete="props.isGroupConversation ? 'list' : undefined"
+          :aria-controls="showMentionDropdown ? mentionListId : undefined"
+          :aria-activedescendant="showMentionDropdown ? `${mentionListId}-${activeMentionIndex}` : undefined"
           @input="handleTextInput"
+          @compositionend="handleTextInput"
           @keydown="handleKeydown"
-          @keyup="scheduleMentionRefresh"
+          @keyup="handleTextareaKeyup"
           @click="scheduleMentionRefresh"
-          @mouseup="scheduleMentionRefresh"
           @scroll="scheduleMentionRefresh"
           @paste="handlePaste"
           @contextmenu.prevent.stop="openInputContextMenu"
@@ -1056,20 +980,28 @@ onUnmounted(() => {
           @blur="handleTextareaBlur"
           rows="3"
         />
-        <div v-if="showMentionDropdown" class="mention-dropdown" :style="mentionDropdownStyle">
+      </div>
+      <Teleport to="body">
+        <div v-if="showMentionDropdown" :id="mentionListId" class="mention-dropdown" role="listbox" :aria-label="$t('chatUi.roomMentionMembers')" :style="mentionDropdownStyle">
           <button
             v-for="(hint, hintIndex) in mentionOptions"
+            :id="`${mentionListId}-${hintIndex}`"
             :key="hint.token"
             class="mention-option"
             :class="{ active: hintIndex === activeMentionIndex }"
+            :aria-selected="hintIndex === activeMentionIndex"
+            tabindex="-1"
+            role="option"
             type="button"
-            @mousedown.prevent="chooseMention(hint)"
+            @mousemove="activeMentionIndex = hintIndex"
+            @mousedown.prevent
+            @click="chooseMention(hint)"
           >
             <span class="mention-option-label">{{ hint.label }}</span>
-            <span class="mention-option-token">{{ hint.token }}</span>
+            <span v-if="hint.token !== `@${hint.label}`" class="mention-option-token">{{ hint.token }}</span>
           </button>
         </div>
-      </div>
+      </Teleport>
       <div class="input-actions">
         <!-- design v1.7: high-frequency actions stay icons and lead the row —
              attachment / code workspace / document center. The agent switcher
@@ -1124,7 +1056,7 @@ onUnmounted(() => {
             </Teleport>
           </div>
           <!-- Plan mode: readable text pill (design v1.7) -->
-          <div class="tooltip-container">
+          <div v-if="!props.isGroupConversation" class="tooltip-container">
             <button
               class="action-btn state-pill plan-mode-btn"
               :class="{ active: props.planModeActive }"
@@ -1158,7 +1090,7 @@ onUnmounted(() => {
           </div>
           <!-- Auth mode: breathing-dot pill (design v1.7 — auto green / strict amber,
                等待授权 while a request is pending in strict mode). -->
-          <div class="tooltip-container">
+          <div v-if="!props.isGroupConversation" class="tooltip-container">
             <button
               class="action-btn state-pill auth-mode-btn"
               :class="{ auto: props.authMode === 'auto', strict: props.authMode === 'strict' }"
@@ -1170,49 +1102,41 @@ onUnmounted(() => {
             </button>
             <span class="tooltip-text">{{ props.authMode === 'strict' ? $t('chatUi.strictAuthTooltip') : $t('chatUi.autoAuthTooltip') }}</span>
           </div>
-          <div v-if="canInject" class="tooltip-container group-inject-wrapper">
+          <template v-if="props.isGroupConversation && props.selectedGroupId">
             <button
-              class="action-btn group-inject-btn"
-              :class="{ active: showInjectPanel }"
+              class="action-btn room-mention-btn"
+              :class="{ active: showMentionDropdown }"
               type="button"
-              :aria-label="$t('chatUi.groupInjectButton')"
-              @click="showInjectPanel = !showInjectPanel"
+              aria-haspopup="listbox"
+              :aria-expanded="showMentionDropdown"
+              :aria-controls="showMentionDropdown ? mentionListId : undefined"
+              :title="$t('chatUi.roomMentionMembers')"
+              :aria-label="$t('chatUi.roomMentionMembers')"
+              :disabled="!canCompose || !props.groupMentionHints?.length"
+              @mousedown.prevent
+              @click="insertTextIntoInput('@')"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="4" />
+                <path d="M16 8v5a2 2 0 0 0 4 0v-1a8 8 0 1 0-3.2 6.4" />
+              </svg>
             </button>
-            <span class="tooltip-text">{{ $t('chatUi.groupInjectButton') }}</span>
-            <Transition name="advanced-drawer">
-              <div v-if="showInjectPanel" class="group-inject-panel" @click.stop>
-                <textarea
-                  v-model="injectText"
-                  class="group-inject-textarea"
-                  :placeholder="$t('chatUi.groupInjectPlaceholder')"
-                  rows="2"
-                  @keydown.enter.exact.prevent="submitGroupInjection"
-                />
-                <div class="group-inject-actions">
-                  <span v-if="injectFeedback === 'sent'" class="group-inject-feedback sent">{{ $t('chatUi.groupInjectSent') }}</span>
-                  <span v-else-if="injectFeedback === 'failed'" class="group-inject-feedback failed">{{ $t('chatUi.groupInjectFailed') }}</span>
-                  <button
-                    class="group-inject-submit"
-                    type="button"
-                    :disabled="isInjecting || !injectText.trim()"
-                    @click="submitGroupInjection"
-                  >{{ $t('chatUi.groupInjectSubmit') }}</button>
-                </div>
-              </div>
-            </Transition>
-          </div>
+            <button class="action-btn state-pill room-invite-btn" type="button" aria-haspopup="dialog" :aria-expanded="showLocalAgents" :disabled="props.isLoading" @click="showLocalAgents = true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 7 5 5-5 5m8-5h8m-4-4v8"/></svg>
+              {{ $t('chatUi.roomInviteLocalAgent') }}
+            </button>
+          </template>
           <button
             class="action-btn send-btn"
             :class="{ stopping: props.isLoading, waitingAuth: (props.pendingAuthCount || 0) > 0 }"
             type="button"
-            @click="props.isLoading ? emit('stop') : emit('send')"
-            :disabled="isSendDisabled"
-            :title="props.isUploadingFiles ? $t('chatUi.processingFiles') : (props.isLoading ? $t('chatUi.stopGenerating') : $t('chatUi.send'))"
+            @click="handlePrimaryAction"
+            :disabled="!props.isLoading && !canSubmit"
+            :title="primaryActionLabel"
+            :aria-label="primaryActionLabel"
           >
-            <svg v-if="!props.isLoading" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            <svg v-if="!props.isLoading" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
           </button>
       </div>
     </div>
@@ -1228,7 +1152,7 @@ onUnmounted(() => {
         <button class="chat-input-context-action" type="button" :disabled="plainDraftText.length === 0" @click.stop="copyInputText">
           {{ inputContextMenu.copied ? $t('chatUi.copied') : $t('common.copy') }}
         </button>
-        <button class="chat-input-context-action" type="button" :disabled="props.isLoading || props.isUploadingFiles" @click.stop="pasteInputText">
+        <button class="chat-input-context-action" type="button" :disabled="!canCompose" @click.stop="pasteInputText">
           {{ $t('common.paste') }}
         </button>
         <button class="chat-input-context-action" type="button" :disabled="plainDraftText.length === 0" @click.stop="selectAllInputText">
@@ -1236,7 +1160,21 @@ onUnmounted(() => {
         </button>
       </div>
     </Teleport>
+    <div v-if="injectFeedback !== 'idle'" class="upload-feedback" :class="{ 'room-inject-sent': injectFeedback === 'sent' }" role="status">
+      {{ $t(injectFeedback === 'sent' ? 'chatUi.groupInjectSent' : 'chatUi.groupInjectFailed') }}
+    </div>
     <div v-if="props.uploadFeedback" class="upload-feedback" role="status">{{ props.uploadFeedback }}</div>
+    <RoomLocalAgentDialog
+      v-if="showLocalAgents && props.selectedGroupId"
+      :key="props.selectedGroupId"
+      :group-id="props.selectedGroupId"
+      :workers="props.roomLocalWorkers || []"
+      :task-directory="props.roomTaskDirectory"
+      :target-project-id="props.targetProjectId"
+      @close="showLocalAgents = false"
+      @select-folder="folder => emit('selectRoomFolder', folder)"
+      @joined="handleLocalAgentJoined"
+    />
     <Teleport to="body">
       <ImageLightbox
         v-if="pendingImageLightboxActive"
@@ -1546,17 +1484,16 @@ onUnmounted(() => {
 }
 
 .mention-dropdown {
-  z-index: 60;
-  min-width: 220px;
-  max-width: min(420px, calc(100% - 16px));
-  max-height: min(320px, 45vh);
+  position: fixed;
+  z-index: 150;
+  box-sizing: border-box;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 6px;
   border-radius: 12px;
-  border: 1px solid var(--chat-input-control-border);
-  background: var(--chat-input-floating-surface);
-  box-shadow: var(--chat-input-popover-shadow);
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-panel-strong);
+  box-shadow: 0 16px 36px rgb(15 23 42 / 20%);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1568,6 +1505,7 @@ onUnmounted(() => {
   align-items: flex-start;
   gap: 4px;
   width: 100%;
+  flex-shrink: 0;
   padding: 8px 10px;
   border: none;
   border-radius: 8px;
@@ -1865,105 +1803,16 @@ onUnmounted(() => {
   border-top: 1px solid var(--app-border);
 }
 
-.group-inject-btn.active {
-  background: color-mix(in srgb, var(--app-accent) 18%, transparent);
+.action-btn.room-mention-btn:hover:not(:disabled),
+.action-btn.room-mention-btn.active {
+  background: var(--app-accent-soft);
   color: var(--app-accent-strong);
 }
 
-.group-inject-wrapper {
-  position: relative;
-}
-
-.group-inject-panel {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  right: 0;
-  width: 300px;
-  max-width: 70vw;
-  padding: 10px;
-  border: 1px solid var(--app-border-strong, var(--app-border));
-  border-radius: 10px;
-  background: var(--chat-input-surface, var(--app-panel));
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-  z-index: 20;
-  transform-origin: bottom right;
-}
-
-.group-inject-textarea {
-  width: 100%;
-  resize: vertical;
-  min-height: 44px;
-  max-height: 140px;
-  padding: 8px 10px;
-  border: 1px solid var(--app-border);
-  border-radius: 6px;
-  background: var(--chat-input-bg, transparent);
-  color: var(--app-text);
-  font-size: 0.84em;
-  line-height: 1.45;
-  font-family: inherit;
-}
-
-.group-inject-textarea:focus {
-  outline: none;
-  border-color: var(--app-accent);
-}
-
-.group-inject-actions {
-  margin-top: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.group-inject-feedback {
-  font-size: 0.74em;
-  margin-right: auto;
-}
-.group-inject-feedback.sent { color: var(--app-success); }
-.group-inject-feedback.failed { color: var(--app-danger); }
-
-.group-inject-submit {
-  border: none;
-  border-radius: 6px;
-  padding: 5px 14px;
-  background: var(--app-accent);
-  color: var(--app-on-accent);
-  font-size: 0.78em;
-  font-weight: 600;
-  cursor: pointer;
-}
-.group-inject-submit:disabled {
-  opacity: 0.45;
+.action-btn.room-mention-btn:disabled {
+  background: transparent;
+  color: var(--app-text-faint);
   cursor: not-allowed;
-}
-
-.advanced-drawer-enter-active,
-.advanced-drawer-leave-active {
-  overflow: hidden;
-  transition:
-    max-width 0.24s cubic-bezier(0.2, 0.8, 0.2, 1),
-    opacity 0.18s ease,
-    transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1),
-    padding-left 0.24s cubic-bezier(0.2, 0.8, 0.2, 1),
-    padding-right 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-.advanced-drawer-enter-from,
-.advanced-drawer-leave-to {
-  max-width: 0;
-  opacity: 0;
-  transform: translateX(-8px) scaleX(0.96);
-  padding-left: 0;
-  padding-right: 0;
-}
-
-.advanced-drawer-enter-to,
-.advanced-drawer-leave-from {
-  max-width: 296px;
-  opacity: 1;
-  transform: translateX(0) scaleX(1);
 }
 
 .plan-mode-btn.active {
@@ -2213,6 +2062,8 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
+.upload-feedback.room-inject-sent { color: var(--app-success); }
+
 .action-btn.send-btn {
   position: relative;
   width: 32px;
@@ -2382,10 +2233,4 @@ onUnmounted(() => {
   50% { transform: scale(1.2); opacity: 1; }
 }
 
-@media (max-width: 860px) {
-  .advanced-drawer-enter-to,
-  .advanced-drawer-leave-from {
-    max-width: 300px;
-  }
-}
 </style>

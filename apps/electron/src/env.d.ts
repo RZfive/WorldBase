@@ -15,6 +15,15 @@ type BrowserPageScreenshotResult = import('./shared/page-automation-types.js').B
 type BrowserPageKeyDispatchRequest = import('./shared/page-automation-types.js').BrowserPageKeyDispatchRequest
 type BrowserPageKeyDispatchResult = import('./shared/page-automation-types.js').BrowserPageKeyDispatchResult
 type BrowserAutomationNetworkEntry = import('./shared/page-automation-types.js').BrowserAutomationNetworkEntry
+type LocalAgentProfile = import('./shared/local-agent-types.js').LocalAgentProfile
+type LocalAgentSessionSummary = import('./shared/local-agent-types.js').LocalAgentSessionSummary
+type RoomLocalWorkspace = import('./shared/local-agent-types.js').RoomLocalWorkspace
+type RoomLocalWorker = import('./shared/local-agent-types.js').RoomLocalWorker
+type RoomLocalWorkerOptions = import('./shared/local-agent-types.js').RoomLocalWorkerOptions
+type AuthRequestPayload = import('./shared/agent-workspace-types.js').AuthRequestPayload
+type RoomMemberMessage = import('./shared/agent-workspace-types.js').RoomMemberMessage
+type RoomMemberStatus = import('./shared/agent-workspace-types.js').RoomMemberStatus
+type ChatStreamResult = import('./shared/agent-workspace-types.js').ChatStreamResult
 
 interface BrowserPageEmulationViewportRequest {
   width: number
@@ -207,9 +216,10 @@ declare module '*.vue' {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_session_state' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'group_board' | 'group_direct_reply' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'coding_status' | 'coding_diff' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'room_message' | 'room_member_status' | 'group_session_state' | 'group_progress' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'coding_status' | 'coding_diff' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
+  callId?: string
   /** Compact argument summary for tool_start rows (built host-side). */
   summary?: string
   message?: { role: string; content: MessageContent }
@@ -227,12 +237,9 @@ interface StreamEvent {
   removed?: number
   groupId?: string
   active?: boolean
-  plan?: AgentGroupCollaborationPlan
+  roomMessage?: RoomMemberMessage
+  roomMemberStatus?: RoomMemberStatus
   groupProgress?: AgentGroupProgressSnapshot
-  transcript?: AgentGroupTranscript
-  sidechat?: AgentSidechatSession
-  board?: SharedBoardSnapshot
-  directReply?: AgentGroupDirectReply
   injection?: AgentGroupUserInjection
   peerMessage?: AgentGroupMessage
   query?: string
@@ -347,36 +354,13 @@ interface AgentGroupDefinition {
   description?: string
   coordinatorAgentId: string
   memberAgentIds: string[]
+  localWorkers?: RoomLocalWorker[]
+  roomContextId?: string
   maxRounds: number
   maxParallelWorkers: number
   sharedMemoryScopes: Array<'group' | 'project' | 'channel'>
   visibility: 'summary_only' | 'expandable_internal_transcript'
   createdAt: string
-  updatedAt: string
-}
-
-type AgentGroupCollaborationMode = 'coordinator_only' | 'targeted' | 'discussion' | 'coordinator_decides' | 'mentioned_agent_decides'
-type AgentGroupCollaborationPhase = 'planning' | 'executing' | 'completed'
-
-interface AgentGroupParticipant {
-  agentId: string
-  agentName: string
-}
-
-interface AgentGroupCollaborationPlan {
-  groupId: string
-  groupName: string
-  mode: AgentGroupCollaborationMode
-  phase: AgentGroupCollaborationPhase
-  planner: AgentGroupParticipant
-  reportToName: string
-  originalRequest: string
-  normalizedRequest: string
-  reason: string
-  round?: number
-  mentionedParticipants: AgentGroupParticipant[]
-  candidateParticipants: AgentGroupParticipant[]
-  invitedParticipants: AgentGroupParticipant[]
   updatedAt: string
 }
 
@@ -465,6 +449,7 @@ interface AgentSidechatSession {
 
 interface AgentGroupMessage {
   id: string
+  kind?: 'handoff'
   groupId: string
   fromAgentId: string
   fromAgentName: string
@@ -708,7 +693,6 @@ type ChatMessageBlock =
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; lineCount: number; added: number; removed: number; active: boolean }
-  | { id: string; kind: 'group_collaboration_plan'; plan: AgentGroupCollaborationPlan }
   | { id: string; kind: 'agent_sidechat'; session: AgentSidechatSession }
   | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
   | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
@@ -719,7 +703,7 @@ type ChatMessageBlock =
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
-  | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; status: 'pending' | 'approved' | 'denied' }
+  | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; purpose?: AuthRequestPayload['purpose']; status: 'pending' | 'approved' | 'denied' }
   | { id: string; kind: 'sudo_password_request'; requestId: string; command: string; status: 'pending' | 'submitted' | 'canceled' }
 
 interface ConversationData extends ConversationSummary {
@@ -729,6 +713,8 @@ interface ConversationData extends ConversationSummary {
     id?: string
     thinking?: string
     speakerName?: string
+    speakerIcon?: string
+    roomReplyStatus?: import('./shared/agent-workspace-types.js').RoomReplyStatus
     modelLabel?: string
     toolRuns?: ToolRun[]
     blocks?: ChatMessageBlock[]
@@ -1269,9 +1255,16 @@ interface DocumentFileChangedDTO {
 }
 
 interface ElectronAPI {
+  discoverLocalAgents: () => Promise<LocalAgentProfile[]>
+  getRoomLocalWorkspace: (groupId: string, taskDirectory?: string | null, projectId?: string | null) => Promise<RoomLocalWorkspace>
+  joinLocalAgentGroup: (agentId: string, groupId: string) => Promise<{ agent: AgentDefinition; group: AgentGroupDefinition }>
+  inviteRoomLocalWorker: (agentId: string, groupId: string, options: RoomLocalWorkerOptions) => Promise<{ worker: RoomLocalWorker; group: AgentGroupDefinition }>
+  removeRoomLocalWorker: (groupId: string, workerId: string) => Promise<{ group: AgentGroupDefinition; removed: boolean }>
+  listLocalAgentSessions: (agentId: string, workspaceRoot: string) => Promise<LocalAgentSessionSummary[]>
+  resumeLocalAgentInGroup: (agentId: string, groupId: string, sessionId: string, workspaceRoot: string) => Promise<{ agent: AgentDefinition; group: AgentGroupDefinition }>
   // AI
   chat: (messages: Array<{ role: string; content: MessageContent }>, providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<{ role: string; content: MessageContent }>
-  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext, codingWorkspaceRoot?: string) => Promise<{ ok: boolean }>
+  chatStream: (messages: Array<{ role: string; content: MessageContent }>, sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext, codingWorkspaceRoot?: string) => Promise<ChatStreamResult>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
@@ -1518,7 +1511,7 @@ interface ElectronAPI {
   setMinimumWindowWidth: (minimumWidth: number) => Promise<{ success: boolean; width: number }>
 
   // Auth (in-app authorization dialogs)
-  onAuthRequest: (callback: (request: { requestId: string; conversationId?: string; sessionId?: string; title: string; detail: string }) => void) => () => void
+  onAuthRequest: (callback: (request: AuthRequestPayload) => void) => () => void
   onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => () => void
   respondAuth: (requestId: string, approved: boolean) => void
   onSudoPasswordRequest: (callback: (req: { requestId: string; conversationId?: string; sessionId?: string; command: string }) => void) => () => void

@@ -136,23 +136,6 @@ export function buildActiveAgentSection (agent: AgentDefinition): string {
   return lines.join('\n')
 }
 
-export function buildActiveGroupSection (group: AgentGroupDefinition): string {
-  const coordinatorName = mainState.agentStore?.get(group.coordinatorAgentId)?.name || group.coordinatorAgentId || 'N/A'
-  const memberNames = group.memberAgentIds.map(agentId => mainState.agentStore?.get(agentId)?.name || agentId)
-
-  return [
-    '## Active agent group',
-    `- Group: ${group.name}`,
-    `- Description: ${group.description || 'N/A'}`,
-    `- Coordinator: ${coordinatorName}`,
-    `- Members: ${memberNames.join(', ') || 'N/A'}`,
-    `- Max rounds: ${group.maxRounds}`,
-    `- Max parallel workers: ${group.maxParallelWorkers}`,
-    `- Shared memory scopes: ${group.sharedMemoryScopes.join(', ') || 'group'}`,
-    `- Transcript visibility: ${group.visibility}`
-  ].join('\n')
-}
-
 export function buildActiveChannelSection (binding: ChannelBinding): string {
   const connector = mainState.channelBindingStore?.listConnectors().find(item => item.id === binding.connectorType)
 
@@ -396,7 +379,6 @@ export async function resolveAgentRuntimeContext (input: {
   const memoryEmbedding = resolveMemoryEmbeddingRuntimeConfig()
   const systemPromptSections = [
     agent ? buildActiveAgentSection(agent) : null,
-    group ? buildActiveGroupSection(group) : null,
     channelBinding ? buildActiveChannelSection(channelBinding) : null
   ].filter((value): value is string => Boolean(value))
 

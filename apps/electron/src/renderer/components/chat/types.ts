@@ -1,4 +1,4 @@
-import type { AgentGroupCollaborationPlan, AgentGroupDirectReply, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentSidechatSession, SharedBoardSnapshot } from '../../../shared/agent-workspace-types.js'
+import type { AgentGroupDirectReply, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentSidechatSession, AuthRequestPayload, RoomReplyStatus, SharedBoardSnapshot } from '../../../shared/agent-workspace-types.js'
 
 export type MessageContent = string | ChatContentPart[]
 
@@ -74,7 +74,6 @@ export type ChatMessageBlock =
   | { id: string; kind: 'tool'; toolRun: ToolRun }
   | { id: string; kind: 'todo'; items: TodoItem[] }
   | { id: string; kind: 'file_preview'; filePath: string; lineCount: number; added: number; removed: number; active: boolean }
-  | { id: string; kind: 'group_collaboration_plan'; plan: AgentGroupCollaborationPlan }
   | { id: string; kind: 'agent_sidechat'; session: AgentSidechatSession }
   | { id: string; kind: 'group_progress'; snapshot: AgentGroupProgressSnapshot }
   | { id: string; kind: 'group_transcript'; transcript: AgentGroupTranscript }
@@ -85,7 +84,7 @@ export type ChatMessageBlock =
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
-  | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; status: 'pending' | 'approved' | 'denied' }
+  | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; purpose?: AuthRequestPayload['purpose']; status: 'pending' | 'approved' | 'denied' }
   | { id: string; kind: 'sudo_password_request'; requestId: string; command: string; status: 'pending' | 'submitted' | 'canceled' }
 
 /** Depth preset for a quick-ask annotation; drives the answer prompt. */
@@ -163,6 +162,8 @@ export interface ChatMessage {
   id?: string
   thinking?: string
   speakerName?: string
+  speakerIcon?: string
+  roomReplyStatus?: RoomReplyStatus
   modelLabel?: string
   toolRuns?: ToolRun[]
   blocks?: ChatMessageBlock[]

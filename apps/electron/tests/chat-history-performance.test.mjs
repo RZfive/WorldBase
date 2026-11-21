@@ -135,6 +135,59 @@ test('a first user turn appears in the sidebar before the history write finishes
   assert.equal(fixture.conversations.value[0].previewText, '先显示这条会话')
 })
 
+test('clearing a group waits for queued saves and keeps the empty room selected', async t => {
+  const saveStarted = Promise.withResolvers()
+  const finishSave = Promise.withResolvers()
+  const calls = []
+  const summary = { ...record('alpha'), messages: undefined, groupId: 'room' }
+  const fixture = chatFixture(t, {
+    async saveConversation () {
+      calls.push('save')
+      saveStarted.resolve()
+      await finishSave.promise
+      return { success: true, summary }
+    },
+    async deleteConversation () { calls.push('clear'); return true },
+    async listConversations () { return [summary] }
+  })
+  fixture.selectedGroupId.value = 'room'
+  fixture.targetProjectId.value = 'keep-project'
+  fixture.inputText.value = 'old draft'
+  const saving = fixture.storage.saveConversation('alpha', fixture.messages.value)
+  await saveStarted.promise
+  const clear = fixture.navigation.deleteConversation('alpha')
+  assert.equal(fixture.storage.isDeletingConversation('alpha'), true)
+  await fixture.storage.saveConversation('alpha', fixture.messages.value)
+  assert.deepEqual(calls, ['save'])
+  finishSave.resolve()
+  await saving
+  assert.equal(await clear, true)
+  assert.deepEqual(calls, ['save', 'clear'])
+  assert.equal(fixture.currentConversationId.value, 'alpha')
+  assert.equal(fixture.selectedGroupId.value, 'room')
+  assert.equal(fixture.targetProjectId.value, 'keep-project')
+  assert.deepEqual(fixture.messages.value, [])
+  assert.equal(fixture.inputText.value, '')
+  assert.equal(fixture.storage.isDeletingConversation('alpha'), false)
+})
+
+test('deleting a room from settings discards the open chat and cached room messages', async t => {
+  const { messages: _, ...otherConversation } = record('beta')
+  const fixture = chatFixture(t, { async listConversations () { return [otherConversation] } })
+  fixture.conversations.value[0].groupId = 'room'
+  fixture.selectedGroupId.value = 'room'
+  fixture.backgroundStreamMessages.set('alpha', { messages: fixture.messages.value, groupId: 'room' })
+  fixture.conversationTargets.set('alpha', 'old-room-project')
+  fixture.conversationTargets.set('beta', 'keep-project')
+  await fixture.navigation.onRoomHistoryRemoved('room', true)
+  assert.equal(fixture.currentConversationId.value, null)
+  assert.equal(fixture.selectedGroupId.value, '')
+  assert.deepEqual(fixture.messages.value, [])
+  assert.equal(fixture.backgroundStreamMessages.has('alpha'), false)
+  assert.deepEqual([...fixture.conversationTargets], [['beta', 'keep-project']])
+  assert.deepEqual(fixture.conversations.value.map(conversation => conversation.id), ['beta'])
+})
+
 test('rapid conversation switches discard stale loads and only select cached providers', async t => {
   const pending = new Map()
   let catalogReads = 0
