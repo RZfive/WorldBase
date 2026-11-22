@@ -183,6 +183,10 @@ const PAGE_SCREENSHOT_DEFAULT_OPERATION_TIMEOUT_MS = 15_000
 const PAGE_SCREENSHOT_MIN_OPERATION_TIMEOUT_MS = 3_000
 const PAGE_SCREENSHOT_MAX_OPERATION_TIMEOUT_MS = 30_000
 const PAGE_SCREENSHOT_OPERATION_TIMEOUT_MS = 24_000
+// Native capture must fail fast enough for the CDP fallback to actually run.
+// Previously it could consume the entire operation budget, leaving the
+// fallback pending until the outer timeout rejected the request.
+const PAGE_SCREENSHOT_NATIVE_CAPTURE_TIMEOUT_MS = 2_000
 const PAGE_EMULATION_COMMAND_TIMEOUT_MS = 5_000
 const PAGE_EMULATION_VERIFY_TIMEOUT_MS = 1_500
 const PAGE_EMULATION_VERIFY_SETTLE_MS = 50
@@ -1193,12 +1197,14 @@ export function setupIPC (): void {
         Math.min(Math.round(requestedTimeoutMs), PAGE_SCREENSHOT_MAX_OPERATION_TIMEOUT_MS)
       )
     )
+    const operationDeadline = Date.now() + operationTimeoutMs
+    const remainingOperationMs = () => Math.max(1, operationDeadline - Date.now())
     const leaseRef: { current: PageDebuggerLease | null } = { current: null }
     let operationFinished = false
     const captureViewportWithNativeImage = async (): Promise<BrowserPageScreenshotResult> => {
       const image = await withTimeout(
         target.capturePage(),
-        operationTimeoutMs,
+        Math.min(PAGE_SCREENSHOT_NATIVE_CAPTURE_TIMEOUT_MS, remainingOperationMs()),
         'Timed out capturing the page screenshot.'
       )
       if (image.isEmpty()) {
@@ -1227,7 +1233,7 @@ export function setupIPC (): void {
 
       const metrics = ((await withTimeout(
         debuggerSession.sendCommand('Page.getLayoutMetrics'),
-        PAGE_LAYOUT_METRICS_TIMEOUT_MS,
+        Math.min(PAGE_LAYOUT_METRICS_TIMEOUT_MS, remainingOperationMs()),
         'Timed out reading the page layout metrics.'
       )) ?? {}) as PageScreenshotLayoutMetrics
       const viewportWidth = positivePixelValue(metrics.cssLayoutViewport?.clientWidth)
@@ -1244,7 +1250,7 @@ export function setupIPC (): void {
             expression: 'window.devicePixelRatio || 1',
             returnByValue: true
           }),
-          PAGE_DEVICE_PIXEL_RATIO_TIMEOUT_MS,
+          Math.min(PAGE_DEVICE_PIXEL_RATIO_TIMEOUT_MS, remainingOperationMs()),
           'Timed out reading the page device pixel ratio.'
         ) as { result?: { value?: unknown } }
         devicePixelRatio = resolveDevicePixelRatio(evaluated?.result?.value)
@@ -1287,7 +1293,7 @@ export function setupIPC (): void {
 
       const captured = await withTimeout(
         debuggerSession.sendCommand('Page.captureScreenshot', params),
-        Math.min(PAGE_SCREENSHOT_OPERATION_TIMEOUT_MS, Math.max(PAGE_SCREENSHOT_CAPTURE_TIMEOUT_MS, operationTimeoutMs)),
+        Math.min(PAGE_SCREENSHOT_CAPTURE_TIMEOUT_MS, remainingOperationMs()),
         'Timed out capturing the page screenshot.'
       ) as { data?: string }
       if (typeof captured?.data !== 'string' || captured.data.length === 0) {

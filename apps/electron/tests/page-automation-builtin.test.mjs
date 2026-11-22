@@ -557,24 +557,21 @@ test('BrowserWebView keeps hidden chrome and bounded screenshot waits', async ()
   assert.match(source, /SCREENSHOT_VIEWPORT_TIMEOUT_MS/, 'viewport screenshots must have a timeout')
 })
 
-test('BrowserWebView rebuilds a timed-out screenshot host once with recovery budget', async () => {
+test('BrowserWebView keeps a live page after screenshot failure and bounds the fallback', async () => {
   const source = await readText(BROWSER_WEBVIEW_PATH)
-  assert.match(source, /:key="webviewGeneration"/, 'the screenshot recovery must replace the webview host')
-  assert.match(source, /:src="currentUrl"/, 'the replacement host must retain the current page URL')
+  assert.match(source, /:src="currentUrl"/, 'the live host must retain the current page URL')
 
-  const recovery = sliceBetween(source, 'const SCREENSHOT_RECOVERY_BUDGET_MS', 'interface WebviewLoadWaiter')
-  assert.match(recovery, /detachListeners\?\.\(\)/, 'recovery must detach listeners from the old host')
-  assert.match(recovery, /webviewGeneration\.value \+= 1/, 'recovery must mount a fresh host')
-  assert.match(recovery, /readyState === "interactive" \|\| readyState === "complete"/, 'recovery must wait for a usable replacement document')
-  assert.match(recovery, /isScreenshotTimeoutError/, 'only screenshot timeouts should enter host recovery')
-  assert.match(recovery, /return await captureAttempt\(timeoutMs\)/, 'the first capture must retain the existing path')
-  assert.match(recovery, /await captureAttempt\(retryTimeoutMs\)/, 'recovery must retry the capture once on the new host')
-  assert.match(recovery, /page was reloaded and its emulation was reset/, 'the recovery result must disclose the reset page state')
+  const capture = sliceBetween(source, 'async function captureScreenshot', 'interface WebviewLoadWaiter')
+  assert.doesNotMatch(source, /webviewGeneration|recoverPageHostAfterScreenshotTimeout|rebuilding page host/, 'screenshot failure must not destroy the live webview or reload its page state')
+  assert.match(capture, /const deadline = Date\.now\(\) \+ timeoutMs/, 'the main-process bridge and webview fallback must share one capture deadline')
+  assert.match(capture, /captureBrowserPageScreenshot/, 'the main-process bridge must remain the primary capture path')
+  assert.match(capture, /webview\.capturePage\(\), remainingMs\(\)/, 'the final webview fallback must use only the remaining capture budget')
+  assert.match(capture, /captureScreenshotAttempt\(\{ \.\.\.options, timeoutMs \}\)/, 'the page must capture without a destructive retry')
 
   const app = await readText(APP_PATH)
   const budget = sliceBetween(app, 'function extractUserTimeoutMs', 'function comparablePageUrl')
-  assert.match(budget, /request\.timeoutMs \+ PAGE_SCREENSHOT_RECOVERY_BUDGET_MS/, 'the page request must leave time for host recovery')
-  assert.match(budget, /Math\.min\(PAGE_AUTOMATION_QUEUE_TIMEOUT_MS/, 'the recovery budget must stay within the main-process request limit')
+  assert.match(budget, /request\.timeoutMs \+ PAGE_SCREENSHOT_FALLBACK_BUDGET_MS/, 'the page request must leave a small IPC settling margin')
+  assert.match(budget, /Math\.min\(PAGE_AUTOMATION_QUEUE_TIMEOUT_MS/, 'the capture budget must stay within the main-process request limit')
 })
 
 test('workspace browser and project tabs register their automation surfaces', async () => {
@@ -642,6 +639,11 @@ test('main-process page automation covers native keys, network logs, viewport sc
   assert.match(screenshot, /cssLayoutViewport/, 'viewport screenshots must size themselves from the layout viewport')
   assert.match(screenshot, /request\.timeoutMs/, 'screenshot capture must honor the requested timeout')
   assert.match(screenshot, /PAGE_SCREENSHOT_MAX_OPERATION_TIMEOUT_MS/, 'screenshot capture must clamp the timeout')
+  assert.match(screenshot, /PAGE_SCREENSHOT_NATIVE_CAPTURE_TIMEOUT_MS/, 'native capture must leave time for the CDP fallback')
+  assert.match(screenshot, /const operationDeadline = Date\.now\(\) \+ operationTimeoutMs/, 'capture stages must share one operation deadline')
+  assert.match(screenshot, /Math\.min\(PAGE_LAYOUT_METRICS_TIMEOUT_MS, remainingOperationMs\(\)\)/, 'layout metrics must use the remaining capture budget')
+  assert.match(screenshot, /Math\.min\(PAGE_DEVICE_PIXEL_RATIO_TIMEOUT_MS, remainingOperationMs\(\)\)/, 'device pixel ratio must use the remaining capture budget')
+  assert.match(screenshot, /Math\.min\(PAGE_SCREENSHOT_CAPTURE_TIMEOUT_MS, remainingOperationMs\(\)\)/, 'CDP capture must use the remaining capture budget')
 })
 
 test('preload and renderer types expose native key dispatch and network logs', async () => {
@@ -675,6 +677,7 @@ test('BrowserWebView uses native key, network and screenshot bridges with array 
   assert.match(screenshot, /fullPage,/, 'the screenshot bridge must receive the fullPage flag')
   assert.match(screenshot, /timeoutMs,/, 'the screenshot bridge must receive the adjustable timeout')
   assert.match(screenshot, /fullPage: false/, 'the viewport fallback must report fullPage false')
+  assert.doesNotMatch(screenshot, /recoverPageHostAfterScreenshotTimeout|webviewGeneration|rebuilding page host|page was reloaded/, 'screenshot failures must preserve the live page and its state')
 
   const diagnostics = sliceBetween(source, 'async function captureDiagnostics', 'function dedupeConsoleEntries')
   assert.match(diagnostics, /performance\.getEntriesByType\('navigation'\)/, 'diagnostics must include document navigation transfer sizes')
@@ -717,6 +720,17 @@ test('BrowserWebView settles animation frames with a timer fallback in hidden ho
   assert.match(raf, /window\.requestAnimationFrame/, 'nextAnimationFrame must still request a real frame')
   assert.match(raf, /window\.setTimeout\(settle, 32\)/, 'hidden host windows must get a timer fallback so the wait can settle')
   assert.match(raf, /window\.clearTimeout\(fallbackTimer\)/, 'the frame callback must clear the fallback timer')
+})
+
+test('background browser pages stay paintable without leaking into the app UI', async () => {
+  const source = await readText(APP_PATH)
+  const hosts = sliceBetween(source, '.background-page-hosts {', '.app-layout {')
+
+  assert.match(hosts, /inset:\s*0/, 'background guests must stay within the visible viewport so Chromium paints them')
+  assert.match(hosts, /z-index:\s*-1/, 'background guests must stay behind the opaque application')
+  assert.doesNotMatch(hosts, /left:\s*-\d|opacity:\s*0/, 'offscreen or transparent guests lose their compositor frames and cannot be captured reliably')
+  assert.match(hosts, /pointer-events:\s*none/, 'background guests must not intercept app input')
+  assert.match(source, /<div :class="\['app-root'/, 'the host must retain its app root stacking context')
 })
 
 test('emulate actions honor the action timeout end to end', async () => {
