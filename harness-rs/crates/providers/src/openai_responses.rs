@@ -184,7 +184,22 @@ impl OpenAIResponsesProvider {
             "stream": true,
         });
         if let Some(system) = system.filter(|text| !text.is_empty()) {
-            body["instructions"] = json!(system);
+            let split = options
+                .dynamic_system_suffix
+                .as_deref()
+                .filter(|tail| !tail.trim().is_empty())
+                .and_then(|tail| system.strip_suffix(tail).map(|head| (head, tail)));
+            let (head, tail) = match split {
+                Some((head, tail)) => (head.trim_end(), Some(tail)),
+                None => (system, None),
+            };
+            body["instructions"] = json!(head);
+            if let Some(tail) = tail {
+                body["input"].as_array_mut().unwrap().push(json!({
+                    "role": "developer",
+                    "content": tail,
+                }));
+            }
         }
         if !crate::openai::model_rejects_custom_temperature(&self.base_url, &self.model) {
             let temperature = options
@@ -450,6 +465,7 @@ impl Provider for OpenAIResponsesProvider {
                         output_tokens: self.output_tokens,
                         cache_read_tokens: self.cache_read_tokens,
                         cache_creation_tokens: 0,
+                        input_includes_cache_read: true,
                     },
                 }));
                 self.finished = true;
@@ -730,6 +746,42 @@ mod tests {
         );
         provider.client = crate::test_support::opencode_client(address);
         crate::test_support::assert_opencode_sessions(&provider, listener, "/zen/go/v1/responses", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n").await;
+    }
+
+    #[test]
+    fn dynamic_system_suffix_follows_history_outside_the_stable_instructions() {
+        let provider = OpenAIResponsesProvider::new("key".into(), "gpt-5.1".into(), None);
+        let history = vec![LlmMessage::text(LlmRole::User, "hi")];
+        let body = provider.request_body(
+            Some("stable rules\n\nrecalled memory"),
+            &history,
+            &[],
+            &ChatOptions {
+                dynamic_system_suffix: Some("recalled memory".into()),
+                ..ChatOptions::default()
+            },
+        );
+        assert_eq!(body["instructions"], "stable rules");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(
+            body["input"][1],
+            json!({ "role": "developer", "content": "recalled memory" })
+        );
+
+        let rewritten = provider.request_body(
+            Some("stable rules\n\nrecalled memory\n\ncontext summary"),
+            &history,
+            &[],
+            &ChatOptions {
+                dynamic_system_suffix: Some("recalled memory".into()),
+                ..ChatOptions::default()
+            },
+        );
+        assert_eq!(
+            rewritten["instructions"],
+            "stable rules\n\nrecalled memory\n\ncontext summary"
+        );
+        assert_eq!(rewritten["input"].as_array().unwrap().len(), 1);
     }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

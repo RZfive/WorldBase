@@ -91,6 +91,7 @@ fn response_usage(value: &Value) -> TokenUsage {
             .or_else(|| usage["prompt_tokens_details"]["cached_tokens"].as_u64())
             .unwrap_or(0),
         cache_creation_tokens: 0,
+        input_includes_cache_read: true,
     }
 }
 
@@ -1675,6 +1676,7 @@ impl Provider for OpenAIProvider {
                         output_tokens: self.output_tokens,
                         cache_read_tokens: self.cache_read_tokens,
                         cache_creation_tokens: 0,
+                        input_includes_cache_read: true,
                     },
                 }));
                 self.finished = true;

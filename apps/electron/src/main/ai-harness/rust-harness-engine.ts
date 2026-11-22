@@ -3,7 +3,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { USER_ABORT_MESSAGE } from './abort-utils.js'
 import { toolRunEventFromFrame } from './tool-run-summary.js'
-import type { UsageStore } from '../settings/usage-store.js'
 import type { ChatContentPart, ChatMessage, MessageContent, ToolDefinition } from './contracts.js'
 import {
   RustHarnessClient,
@@ -47,7 +46,6 @@ function shouldExecuteInElectronHost (name: string, descriptor?: { electronNativ
 export interface RustHarnessEngineOptions {
   client: RustHarnessClient
   services: ElectronToolRegistryServices
-  usageStore?: UsageStore
   /** Notify Electron views after a Rust-native domain mutation completes. */
   onNativeToolResult?: (name: string, result: unknown, context: AIRequestOptions) => void | Promise<void>
   /**
@@ -80,7 +78,6 @@ export class RustHarnessEngine implements AIHarness {
   private readonly client: RustHarnessClient
   private readonly services: ElectronToolRegistryServices
   private readonly electronTools: ElectronToolRegistry
-  private readonly usageStore?: UsageStore
   private readonly onNativeToolResult?: RustHarnessEngineOptions['onNativeToolResult']
   private readonly onPlanModeChanged?: RustHarnessEngineOptions['onPlanModeChanged']
   private baseConfig: AIConfigInput = {}
@@ -93,7 +90,6 @@ export class RustHarnessEngine implements AIHarness {
   constructor (options: RustHarnessEngineOptions) {
     this.client = options.client
     this.services = options.services
-    this.usageStore = options.usageStore
     this.onNativeToolResult = options.onNativeToolResult
     this.onPlanModeChanged = options.onPlanModeChanged
     this.electronTools = new ElectronToolRegistry({
@@ -248,7 +244,6 @@ export class RustHarnessEngine implements AIHarness {
         assistantText = checkpointAssistantText
         assistantContent = checkpointAssistantContent
       }
-      if (frame.kind === 'usage') this.recordUsage(frame, effectiveConfig)
       if (frame.kind === 'tool_call' && typeof frame.call_id === 'string') {
         const args = frame.args
         if (args && typeof args === 'object' && !Array.isArray(args)) {
@@ -495,29 +490,6 @@ export class RustHarnessEngine implements AIHarness {
 
   setBudgetLimit (limit: number | null): void {
     this.budgetLimit = typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? limit : null
-  }
-
-  private recordUsage (frame: RustEventFrame, fallback: AIConfigInput): void {
-    const inputTokens = positiveInteger(frame.inputTokens)
-    const outputTokens = positiveInteger(frame.outputTokens)
-    const cacheReadTokens = positiveInteger(frame.cacheReadTokens)
-    const cacheCreationTokens = positiveInteger(frame.cacheCreationTokens)
-    if (inputTokens === 0 && outputTokens === 0 && cacheReadTokens === 0 && cacheCreationTokens === 0) return
-
-    const providerId = stringValue(frame.providerId) || fallback.providerId || 'unknown'
-    const providerName = stringValue(frame.providerName) || fallback.providerName || providerId
-    const model = stringValue(frame.model) || fallback.model || 'unknown'
-    this.usageStore?.record({
-      providerId,
-      providerName,
-      model,
-      usage: {
-        prompt_tokens: inputTokens,
-        completion_tokens: outputTokens,
-        prompt_tokens_details: { cached_tokens: cacheReadTokens },
-        cache_creation_input_tokens: cacheCreationTokens
-      }
-    })
   }
 
   private async collectCustomTools (options?: AIRequestOptions): Promise<RustCustomToolRegistration[]> {

@@ -103,6 +103,8 @@ pub enum EventKind {
         output_tokens: u64,
         cache_read_tokens: u64,
         cache_creation_tokens: u64,
+        #[serde(default)]
+        input_includes_cache_read: bool,
         cost: f64,
         total_cost: f64,
         total_input_tokens: u64,

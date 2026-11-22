@@ -9,6 +9,7 @@ import { USER_ABORT_MESSAGE } from '../../src/main/ai-harness/abort-utils.js'
 import { resolveModelPricing, type ModelPricing } from '../../src/main/ai-harness/cost-tracker.js'
 import type { MCPServerSnapshot, MCPStateSnapshot } from '../../src/main/mcp/mcp-service.js'
 import type { AIProvidersConfig, MCPServerConfig } from '../../src/main/settings/settings-store.js'
+import type { UsageRecordInput } from '../../src/main/settings/usage-store.js'
 import type { AgentDefinition, AgentGroupDefinition, MemoryEmbeddingRuntimeConfig, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
 import type { LocalAgentKind, RoomLocalWorker, RoomLocalWorkerOptions } from '../../src/shared/local-agent-types.js'
 import type { ImageStudioGenerateRequest, ImageStudioTask } from '../../src/shared/image-studio-types.js'
@@ -203,6 +204,7 @@ export interface RustHarnessClientOptions {
   /** Read the Electron MCP catalog used to configure the Rust process. */
   getMcpServers?: () => MCPServerConfig[]
   onEvent: (sessionId: string, frame: RustEventFrame) => void
+  onUsage?: (usage: UsageRecordInput) => void
   onHostRequest?: (request: RustHostRequest) => Promise<JsonRpcResult> | JsonRpcResult
   onPermissionRequest?: (request: { requestId: string; toolName: string; argsSummary: string; sessionId: string }) => Promise<boolean> | boolean
 }
@@ -1407,7 +1409,9 @@ export class RustHarnessClient {
       return
     }
     if (message.method === 'event' && message.params) {
-      this.handleEvent(message.params)
+      const frame = message.params
+      if (frame.kind === 'usage') this.recordLiveUsage(frame)
+      this.handleEvent(frame)
       return
     }
     if (message.id === undefined || message.id === null) {
@@ -1434,6 +1438,27 @@ export class RustHarnessClient {
       request.reject(new Error(message.error.message || 'Rust harness request failed'))
     } else {
       request.resolve(message.result ?? null)
+    }
+  }
+
+  private recordLiveUsage (frame: RustEventFrame): void {
+    const providerId = normalizeOptionalString(frame.providerId) || 'unknown'
+    try {
+      this.options.onUsage?.({
+        providerId,
+        providerName: normalizeOptionalString(frame.providerName) || providerId,
+        model: normalizeOptionalString(frame.model) || 'unknown',
+        timestampMs: Date.parse(frame.ts),
+        usage: {
+          prompt_tokens: frame.inputTokens,
+          completion_tokens: frame.outputTokens,
+          prompt_tokens_details: { cached_tokens: frame.cacheReadTokens },
+          cache_creation_input_tokens: frame.cacheCreationTokens,
+          input_includes_cache_read: frame.inputIncludesCacheRead
+        }
+      })
+    } catch (error) {
+      console.error('[rust-harness] Usage tracking failed:', error)
     }
   }
 

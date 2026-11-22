@@ -8608,9 +8608,15 @@ async fn run_chat_inner(
                         let model_name = model_override.as_deref().unwrap_or(provider.model());
                         let (pin, pout, pcache) =
                             hub.model_prices(provider_entry.as_ref(), model_name);
-                        let cost = usage.input_tokens as f64 / 1_000_000.0 * pin
+                        let uncached_input_tokens = if usage.input_includes_cache_read {
+                            usage.input_tokens.saturating_sub(usage.cache_read_tokens)
+                        } else {
+                            usage.input_tokens
+                        };
+                        let cost = uncached_input_tokens as f64 / 1_000_000.0 * pin
                             + usage.output_tokens as f64 / 1_000_000.0 * pout
-                            + usage.cache_read_tokens as f64 / 1_000_000.0 * pcache;
+                            + usage.cache_read_tokens as f64 / 1_000_000.0 * pcache
+                            + usage.cache_creation_tokens as f64 / 1_000_000.0 * pin;
                         let _ = hub.store.record_usage(
                             Some(&conversation_id),
                             provider_entry.as_ref().map(|e| e.id.as_str()),
@@ -8620,7 +8626,9 @@ async fn run_chat_inner(
                             cost,
                         );
                         total_cost += cost;
-                        total_input_tokens += usage.input_tokens;
+                        total_input_tokens += uncached_input_tokens
+                            + usage.cache_read_tokens
+                            + usage.cache_creation_tokens;
                         total_output_tokens += usage.output_tokens;
                         token_estimator.calibrate_from_actual(request_estimate, usage.input_tokens);
                         publish(
@@ -8638,6 +8646,7 @@ async fn run_chat_inner(
                                 output_tokens: usage.output_tokens,
                                 cache_read_tokens: usage.cache_read_tokens,
                                 cache_creation_tokens: usage.cache_creation_tokens,
+                                input_includes_cache_read: usage.input_includes_cache_read,
                                 cost,
                                 total_cost,
                                 total_input_tokens,

@@ -1443,7 +1443,7 @@ const zhCN = {
       filterAll: '全部',
       chartDaily: '用量趋势',
       chartCacheRate: '缓存命中对比',
-      cacheRateHint: '缓存率 = 缓存命中 token ÷ 输入 token，越高表示越多请求命中缓存、单价越低。',
+      cacheRateHint: '缓存率 = 缓存命中 token ÷ 总输入 token。总输入包含未缓存、缓存读取与缓存写入；越高表示越多请求命中缓存、单价越低。',
       chartEmpty: '所选范围暂无数据'
     },
     general: {

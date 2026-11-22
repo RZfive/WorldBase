@@ -173,6 +173,14 @@ impl AnthropicProvider {
             turns.push((message.role, blocks));
         }
 
+        if let Some((_, content)) = turns.last_mut() {
+            if let Some(last_block) = content.last_mut() {
+                if last_block.get("cache_control").is_none() {
+                    last_block["cache_control"] = json!({ "type": "ephemeral" });
+                }
+            }
+        }
+
         if turns.first().is_none_or(|(role, _)| *role != LlmRole::User) {
             turns.insert(
                 0,
@@ -460,6 +468,7 @@ impl StreamState {
                 output_tokens: self.output_tokens,
                 cache_read_tokens: self.cache_read_tokens,
                 cache_creation_tokens: self.cache_creation_tokens,
+                input_includes_cache_read: false,
             },
         }));
         self.finished = true;
@@ -1119,6 +1128,38 @@ mod tests {
     }
 
     #[test]
+    fn latest_history_checkpoint_reuses_cached_system_prefix() {
+        let provider = AnthropicProvider::new(
+            "key".into(),
+            "claude-sonnet-4-5".into(),
+            Some("https://api.anthropic.com/v1".into()),
+        )
+        .unwrap();
+        let body = provider.request_body(
+            Some("stable rules"),
+            &[
+                LlmMessage::text(LlmRole::User, "first"),
+                LlmMessage::text(LlmRole::Assistant, "answer"),
+                LlmMessage::text(LlmRole::User, "next"),
+            ],
+            &[],
+            8192,
+            &ChatOptions::default(),
+        );
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert!(body["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
     fn request_messages_merge_roles_and_always_start_with_user() {
         let provider = AnthropicProvider::new(
             "key".into(),
@@ -1613,6 +1654,7 @@ mod tests {
                     "tool_use_id": "toolu_1",
                     "content": "sunny",
                     "is_error": false,
+                    "cache_control": { "type": "ephemeral" },
                 })
             );
 

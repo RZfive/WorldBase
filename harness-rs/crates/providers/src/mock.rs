@@ -177,6 +177,7 @@ impl Provider for MockProvider {
                 output_tokens: output_est,
                 cache_read_tokens: 0,
                 cache_creation_tokens: 0,
+                input_includes_cache_read: false,
             },
         });
 

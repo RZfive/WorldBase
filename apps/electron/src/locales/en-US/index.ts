@@ -1443,7 +1443,7 @@ const enUS: MessageSchema = {
       filterAll: 'All',
       chartDaily: 'Usage trend',
       chartCacheRate: 'Cache hit comparison',
-      cacheRateHint: 'Cache rate = cache hit tokens ÷ input tokens. Higher means more requests hit the cache and cost less.',
+      cacheRateHint: 'Cache rate = cache hit tokens ÷ total input tokens. Total input includes uncached input, cache reads, and cache writes. Higher means lower cost.',
       chartEmpty: 'No data for the selected range'
     },
     general: {

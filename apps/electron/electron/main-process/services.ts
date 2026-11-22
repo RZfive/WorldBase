@@ -1045,13 +1045,13 @@ export async function initializeServices (): Promise<void> {
     onAgentGroupsHandoff: groups => mirrorRustAgentGroupsOnHandoff(groups),
     getMcpServers: () => mainState.settingsStore!.getMcpServers(),
     onEvent: () => {},
+    onUsage: usage => mainState.usageStore?.record(usage),
     onHostRequest: async (request) => await handleRustHostRequest(request),
     onPermissionRequest: async (request) => await handleRustPermissionRequest(request)
   })
   mainState.rustHarnessEngine = new RustHarnessEngine({
     client: mainState.rustHarness,
     services: aiEngineServices,
-    usageStore: mainState.usageStore ?? undefined,
     // The model ends plan mode via the native exit_plan_mode tool; mirror that
     // into the renderer toggle so the next turn does not re-enter planning and
     // the toggle the user sees stays truthful.
