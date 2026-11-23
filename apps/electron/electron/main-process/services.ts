@@ -311,6 +311,8 @@ function saveRustNativeAgentGroup (result: unknown): string | null {
     description: stringFromRecord(group, 'description') || undefined,
     coordinatorAgentId,
     memberAgentIds: stringArrayFromRecord(group, 'memberAgentIds', 'member_agent_ids'),
+    localWorkers: Array.isArray(group.localWorkers) ? group.localWorkers as AgentGroupDefinition['localWorkers'] : undefined,
+    roomContextId: stringFromRecord(group, 'roomContextId') || undefined,
     maxRounds: Number(group.maxRounds ?? group.max_rounds) || undefined,
     maxParallelWorkers: Number(group.maxParallelWorkers ?? group.max_parallel_workers) || undefined,
     sharedMemoryScopes: stringArrayFromRecord(group, 'sharedMemoryScopes', 'shared_memory_scopes')
@@ -935,6 +937,14 @@ export async function initializeServices (): Promise<void> {
   const snapshotsDir = getSnapshotsDir()
   const userDataPath = app.getPath('userData')
 
+  try {
+    const { LocalAgentRegistry } = await import('../../src/main/local-agents/registry.js')
+    mainState.localAgentRegistry = new LocalAgentRegistry(userDataPath)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`LocalAgentRegistry initialization failed: ${detail}`, { cause: error })
+  }
+
   mainState.settingsStore = new SettingsStore(userDataPath)
   mainState.updateService = new UpdateService(mainState.settingsStore)
   mainState.updateService.on('stateChanged', (state: AppUpdateState) => {
@@ -1035,13 +1045,13 @@ export async function initializeServices (): Promise<void> {
     onAgentGroupsHandoff: groups => mirrorRustAgentGroupsOnHandoff(groups),
     getMcpServers: () => mainState.settingsStore!.getMcpServers(),
     onEvent: () => {},
+    onUsage: usage => mainState.usageStore?.record(usage),
     onHostRequest: async (request) => await handleRustHostRequest(request),
     onPermissionRequest: async (request) => await handleRustPermissionRequest(request)
   })
   mainState.rustHarnessEngine = new RustHarnessEngine({
     client: mainState.rustHarness,
     services: aiEngineServices,
-    usageStore: mainState.usageStore ?? undefined,
     // The model ends plan mode via the native exit_plan_mode tool; mirror that
     // into the renderer toggle so the next turn does not re-enter planning and
     // the toggle the user sees stays truthful.

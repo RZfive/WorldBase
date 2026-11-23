@@ -22,6 +22,7 @@ mod embedding;
 mod embedding_service;
 mod embedding_store;
 mod ingest;
+mod room_store;
 mod search;
 mod transcript_store;
 mod vector;
@@ -1689,17 +1690,21 @@ impl Store {
 
     /// Return up to `limit` most recent messages in chronological order.
     pub fn list_messages(&self, conversation_id: &str, limit: u32) -> Result<Vec<ChatMessage>> {
+        self.list_messages_before(conversation_id, limit, i64::MAX)
+    }
+
+    pub fn list_messages_before(&self, conversation_id: &str, limit: u32, before_id: i64) -> Result<Vec<ChatMessage>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT * FROM (
                 SELECT * FROM messages
-                WHERE conversation_id = ?1
+                WHERE conversation_id = ?1 AND id < ?3
                 ORDER BY id DESC
                 LIMIT ?2
              )
              ORDER BY id ASC",
         )?;
-        let rows = stmt.query_map(params![conversation_id, limit], Self::row_to_message)?;
+        let rows = stmt.query_map(params![conversation_id, limit, before_id], Self::row_to_message)?;
         let messages: Vec<_> = rows.filter_map(|r| r.ok()).collect();
         Ok(repair_empty_tool_message_ids(messages))
     }

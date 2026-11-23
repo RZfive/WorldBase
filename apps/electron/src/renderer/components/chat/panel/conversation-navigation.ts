@@ -48,7 +48,6 @@ interface ChatConversationNavigationOptions {
   selectedModel: Ref<string>
   streamingConversationIds: Set<string>
   backgroundStreamMessages: Map<string, BackgroundStreamState>
-  activeStreamSessionIds: Map<string, string>
   conversationTargets: Map<string, string | null>
   agentsById: ComputedRef<Map<string, AgentDefinition>>
   groupsById: ComputedRef<Map<string, AgentGroupDefinition>>
@@ -60,6 +59,7 @@ interface ChatConversationNavigationOptions {
   rememberConversationContext: (conversationId: string) => void
   loadConversations: () => Promise<void>
   saveConversation: (conversationId: string, messages: ChatMessage[], options?: SaveConversationOptions) => Promise<void>
+  deleteSavedConversation: (conversationId: string) => Promise<boolean>
   setConversationTarget: (conversationId: string, projectId: string | null | undefined) => void
   setConversationProject: (conversationId: string, projectId: string | null | undefined) => void
   resetTransientStreamState: () => void
@@ -88,7 +88,6 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     selectedModel,
     streamingConversationIds,
     backgroundStreamMessages,
-    activeStreamSessionIds,
     conversationTargets,
     agentsById,
     groupsById,
@@ -100,6 +99,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     rememberConversationContext,
     loadConversations,
     saveConversation,
+    deleteSavedConversation,
     setConversationTarget,
     setConversationProject,
     resetTransientStreamState
@@ -109,19 +109,23 @@ export function createChatConversationNavigation (options: ChatConversationNavig
   const conversationDetailState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const conversationDetailError = ref<string | null>(null)
 
-  function resetConversationComposerState (): void {
-    conversationDetailState.value = 'idle'
-    conversationDetailError.value = null
+  function resetConversationMessages (): void {
     messages.value = []
-    targetProjectId.value = null
-    currentAuthMode.value = 'strict'
-    reasoningStrength.value = DEFAULT_REASONING_STRENGTH
-    conversationTemperature.value = null
     inputText.value = ''
     resetTransientStreamState()
     pendingImages.value = []
     pendingFiles.value = []
     uploadFeedback.value = ''
+  }
+
+  function resetConversationComposerState (): void {
+    conversationDetailState.value = 'idle'
+    conversationDetailError.value = null
+    resetConversationMessages()
+    targetProjectId.value = null
+    currentAuthMode.value = 'strict'
+    reasoningStrength.value = DEFAULT_REASONING_STRENGTH
+    conversationTemperature.value = null
     resetWorkspaceState()
   }
 
@@ -423,15 +427,43 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     resetWorkspaceState()
   }
 
-  async function deleteConversation (conversationId: string): Promise<void> {
-    if (!window.electronAPI) return
+  function resetCurrentRoomMessages (): void {
+    navigationVersion++
+    resetConversationMessages()
+    conversationDetailState.value = 'ready'
+    conversationDetailError.value = null
+  }
 
-    await window.electronAPI.deleteConversation(conversationId)
-    conversationTargets.delete(conversationId)
-    backgroundStreamMessages.delete(conversationId)
-    activeStreamSessionIds.delete(conversationId)
-    if (currentConversationId.value === conversationId) newConversation()
+  async function onRoomHistoryRemoved (groupId: string, deleted: boolean): Promise<void> {
+    const ids = new Set(conversations.value.filter(conversation => conversation.groupId === groupId).map(conversation => conversation.id))
+    const activeConversationId = currentConversationId.value
+    if (selectedGroupId.value === groupId || (activeConversationId && ids.has(activeConversationId))) {
+      if (activeConversationId) ids.add(activeConversationId)
+      if (deleted) newConversation()
+      else resetCurrentRoomMessages()
+    }
+    for (const id of ids) {
+      backgroundStreamMessages.delete(id)
+      clearConversationUnread(id)
+      if (deleted) conversationTargets.delete(id)
+    }
     await loadConversations()
+  }
+
+  async function deleteConversation (conversationId: string): Promise<boolean> {
+    if (streamingConversationIds.has(conversationId)) throw new Error(t('chatUi.stopBeforeDeletingConversation'))
+    const isRoom = Boolean(conversations.value.find(conversation => conversation.id === conversationId)?.groupId ||
+      (currentConversationId.value === conversationId && selectedGroupId.value))
+    if (!await deleteSavedConversation(conversationId)) return false
+    if (!isRoom) conversationTargets.delete(conversationId)
+    backgroundStreamMessages.delete(conversationId)
+    clearConversationUnread(conversationId)
+    if (currentConversationId.value === conversationId) {
+      if (isRoom) resetCurrentRoomMessages()
+      else newConversation()
+    }
+    await loadConversations()
+    return true
   }
 
   function updateFolderWorkspaceState (state: ConversationFolderWorkspaceState | null): void {
@@ -458,6 +490,7 @@ export function createChatConversationNavigation (options: ChatConversationNavig
     deleteConversation,
     loadConversation,
     newConversation,
+    onRoomHistoryRemoved,
     startBlankConversation,
     openAgentWorkspaceConversation,
     openGroupWorkspaceConversation,

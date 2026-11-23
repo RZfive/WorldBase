@@ -1,5 +1,6 @@
 import type { Ref } from 'vue'
 import type { ComposerTranslation } from 'vue-i18n'
+import type { RoomMemberMessage } from '../../../../shared/agent-workspace-types.js'
 import {
   buildUploadedFilesPrompt,
   extractCodeTagRefs,
@@ -40,18 +41,12 @@ import {
   setAssistantErrorState,
   syncLegacyToolRuns,
   syncTodoBlock,
-  appendGroupDirectReplyBlock,
   appendGroupPeerMessageBlock,
   appendGroupUserInjectionBlock,
-  upsertAgentSidechatBlock,
-  upsertGroupBoardBlock,
-  upsertGroupCollaborationPlanBlock,
-  upsertGroupProgressBlock,
-  upsertGroupTranscriptBlock
+  upsertGroupProgressBlock
 } from './message-blocks'
 import {
   finalizePendingAuthBlocks,
-  findLatestAssistantMessage,
   getMessageTextContent,
   hasRenderableContent,
   markAssistantMessageStopped,
@@ -108,6 +103,7 @@ interface ChatMessageSenderOptions {
   isLoading: Readonly<Ref<boolean>>
   shouldUseConversationProviderOverride: Readonly<Ref<boolean>>
   currentModelLabel: Readonly<Ref<string>>
+  isDeletingConversation: (conversationId: string | null) => boolean
   streamingConversationIds: Set<string>
   activeCleanups: Map<string, () => void>
   activeStreamSessionIds: Map<string, string>
@@ -117,7 +113,7 @@ interface ChatMessageSenderOptions {
   codingStatusByConversation: Map<string, CodingStatus>
   codingDiffByConversation: Map<string, CodingDiffState>
   setConversationTarget: (conversationId: string, projectId: string | null | undefined) => void
-  resolveAssistantSpeakerName: (sourceText: string) => string
+  resolveAssistantSpeaker: (sourceText: string) => Pick<ChatMessage, 'speakerName' | 'speakerIcon'>
   saveConversation: (conversationId: string, messages: ChatMessage[], options?: { refreshSidebar?: boolean }) => Promise<void>
   resetTransientStreamState: () => void
   /** Drops ask-user panels that can no longer be answered once a stream ends. */
@@ -129,6 +125,7 @@ const PROJECT_TAG_PATTERN = /\[\[project:([^\]|]+)(?:\|([^\]]*))?\]\]/g
 const CODE_TAG_PATTERN = /\[\[code:([^\]#|]+)#L(\d+)(?:-L?(\d+))?(?:\|([^\]]*))?\]\]/g
 const LEGACY_FILE_PREVIEW_STAGE = '\u6587\u4ef6\u9884\u89c8'
 const STREAM_RENDER_FLUSH_INTERVAL_MS = 50
+const activeStreamStops = new Map<string, () => void>()
 
 /**
  * A user message built outside the composer - used by edit & resend, so the
@@ -199,6 +196,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     isLoading,
     shouldUseConversationProviderOverride,
     currentModelLabel,
+    isDeletingConversation,
     streamingConversationIds: streamingConvIds,
     activeCleanups,
     activeStreamSessionIds,
@@ -208,7 +206,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     codingStatusByConversation,
     codingDiffByConversation,
     setConversationTarget,
-    resolveAssistantSpeakerName,
+    resolveAssistantSpeaker,
     saveConversation: doSaveConversation,
     resetTransientStreamState,
     clearPendingAskUserRequests
@@ -220,6 +218,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     content: t('chatUi.stoppedMessage')
   })
   const getNoResponseText = () => t('chatUi.noResponse')
+  const isSendBlocked = () => isLoading.value || isUploadingFiles.value || isDeletingConversation(currentConversationId.value)
 
   const persistCodingState = (convId: string): void => {
     scheduleCodingStateSave(convId, {
@@ -235,9 +234,9 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       activeCleanups.delete(sessionId)
     }
 
+    activeGroupSessionIds.delete(sessionId)
     if (activeStreamSessionIds.get(convId) !== sessionId) return
     activeStreamSessionIds.delete(convId)
-    activeGroupSessionIds.delete(sessionId)
     streamingConvIds.delete(convId)
     backgroundStreamMessages.delete(convId)
     // If a stream wraps up while the user is looking at a different conversation,
@@ -254,42 +253,13 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     if (!window.electronAPI || !convId) return
     const sessionId = activeStreamSessionIds.get(convId)
     if (!sessionId) return
-    const isForeground = currentConversationId.value === convId
-    const targetMessages = isForeground ? messages.value : null
-
     try {
       await window.electronAPI.stopChatStream(sessionId)
     } catch (err) {
       console.warn('[chat] Failed to request stream stop:', (err as Error).message)
     }
 
-    // Reflect the user's stop immediately; the harness may emit its own
-    // cancelled status after the listener has already been torn down.
-    const currentStatus = codingStatusByConversation.get(convId)
-    const cancelledStatus = codingStatusForCancelledRun(currentStatus)
-    if (cancelledStatus && cancelledStatus !== currentStatus) {
-      codingStatusByConversation.set(convId, cancelledStatus)
-    }
-    if (cancelledStatus) {
-      saveCodingStateNow(convId, {
-        status: cancelledStatus,
-        diff: codingDiffByConversation.get(convId) ?? null
-      })
-    }
-
-    if (!streamingConvIds.has(convId)) return
-    // Background streams finalize through their own event handler, which owns
-    // the assistant message object and its save target.
-    if (!isForeground || !targetMessages) return
-
-    const assistantMessage = findLatestAssistantMessage(targetMessages)
-    if (assistantMessage) {
-      markAssistantMessageStopped(assistantMessage, getAssistantStopCopy())
-    }
-
-    releaseStreamSession(convId, sessionId)
-    resetTransientStreamState()
-    void doSaveConversation(convId, targetMessages)
+    activeStreamStops.get(sessionId)?.()
   }
 
   /**
@@ -300,7 +270,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
   async function retryLastUserMessage (conversationId?: string): Promise<void> {
     const convId = conversationId || currentConversationId.value
     if (!convId || convId !== currentConversationId.value) return
-    if (isLoading.value || isUploadingFiles.value) return
+    if (isSendBlocked()) return
 
     let lastUserIndex = -1
     for (let index = messages.value.length - 1; index >= 0; index -= 1) {
@@ -332,7 +302,9 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
   }
 
   async function sendMessage (prepared?: PreparedUserMessage, sendOptions?: SendMessageOptions) {
-    if (isLoading.value || isUploadingFiles.value) return
+    if (isSendBlocked()) return
+    const previousMessages = messages.value
+    const previousConversationId = currentConversationId.value
 
     let messageContent: ChatMessage['content']
     let text: string
@@ -407,6 +379,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       text = normalizedText
     }
 
+    if (currentConversationId.value !== previousConversationId || messages.value !== previousMessages || isSendBlocked()) return
     const convId = currentConversationId.value || generateId()
     currentConversationId.value = convId
 
@@ -424,14 +397,12 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     }
     resetTransientStreamState()
 
-    const assistantSpeakerName = resolveAssistantSpeakerName(text)
-
     messages.value.push({
       role: 'assistant',
       id: generateId(),
       content: '',
       thinking: '',
-      speakerName: assistantSpeakerName,
+      ...resolveAssistantSpeaker(text),
       modelLabel: currentModelLabel.value,
       toolRuns: [],
       blocks: []
@@ -440,9 +411,11 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     const targetMessages = messages.value
     const assistantMessage = targetMessages[targetMessages.length - 1]
     const sessionId = generateId()
-    let thinkingAccum = ''
+    const ownsStream = () => activeStreamSessionIds.get(convId) === sessionId
+    let roomReplyCount = 0
     let contentAccum = ''
     const toolRuns: ToolRun[] = []
+    const runningCalls = new Map<string, ToolRun>()
     let pendingThinkingText = ''
     let pendingContentText = ''
     let streamFlushTimer: number | null = null
@@ -466,7 +439,7 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       if (streamSaveTimer != null) return
       streamSaveTimer = window.setTimeout(() => {
         streamSaveTimer = null
-        if (!streamSaveDirty || !streamingConvIds.has(convId)) return
+        if (!streamSaveDirty || !ownsStream()) return
         streamSaveDirty = false
         flushPendingStreamText()
         void doSaveConversation(convId, targetMessages, { refreshSidebar: false })
@@ -484,22 +457,13 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       }
     }
 
-    let hadToolSinceLastThinking = false
-
     const flushPendingStreamText = () => {
       clearPendingStreamFlush()
 
       if (pendingThinkingText) {
-        // When thinking arrives after tool calls, start a new thinking block
-        // for the current iteration instead of appending to the previous one.
-        if (hadToolSinceLastThinking) {
-          thinkingAccum = ''
-          hadToolSinceLastThinking = false
-        }
-        thinkingAccum += pendingThinkingText
-        assistantMessage.thinking = thinkingAccum
         const thinkingBlock = ensureThinkingBlock(assistantMessage)
-        thinkingBlock.text = thinkingAccum
+        thinkingBlock.text += pendingThinkingText
+        assistantMessage.thinking = thinkingBlock.text
         pendingThinkingText = ''
       }
 
@@ -537,8 +501,97 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
       if (existing) return existing
       const created = createToolRun(name)
       toolRuns.push(created)
+      if (assistantMessage.roomReplyStatus) {
+        closeOpenThinkingBlocks(assistantMessage)
+        ensureBlocks(assistantMessage).push(createToolBlock(created))
+      }
       syncAssistantToolRuns()
       return created
+    }
+
+    const finishRunningTools = (error?: string, stage = t('chatUi.toolStageError')) => {
+      for (const toolRun of toolRuns) {
+        if (toolRun.status !== 'running') continue
+        toolRun.status = error ? 'failed' : 'completed'
+        toolRun.endedAt = Date.now()
+        if (error) toolRun.progress.push({ stage, detail: error })
+      }
+      runningCalls.clear()
+      syncAssistantToolRuns()
+    }
+
+    const appendRoomReply = (reply: RoomMemberMessage) => {
+      if (!reply.content.trim()) return
+      flushPendingStreamText()
+      if (roomReplyCount) {
+        targetMessages.push({ ...reply, id: generateId(), role: 'assistant', blocks: [createContentBlock(reply.content)] })
+      } else {
+        if (reply.speakerName !== assistantMessage.speakerName) delete assistantMessage.roomReplyStatus
+        Object.assign(assistantMessage, reply)
+        delete assistantMessage.modelLabel
+        if (assistantMessage.roomReplyStatus) {
+          closeOpenThinkingBlocks(assistantMessage)
+          finishRunningTools()
+          ensureBlocks(assistantMessage).push(createContentBlock(reply.content))
+          if (assistantMessage.roomReplyStatus === 'queued' || assistantMessage.roomReplyStatus === 'running') {
+            assistantMessage.roomReplyStatus = 'completed'
+          }
+        } else {
+          ensureBlocks(assistantMessage).unshift(createContentBlock(reply.content))
+        }
+      }
+      roomReplyCount++
+    }
+
+    const finishStream = (event: StreamEvent = { type: 'done' }, errorStage = t('chatUi.toolStageError')) => {
+      if (!ownsStream()) return
+      try {
+        flushPendingStreamText()
+        closeOpenThinkingBlocks(assistantMessage)
+        finalizePendingAuthBlocks(assistantMessage)
+        const isRoomMemberPending = assistantMessage.roomReplyStatus === 'queued' || assistantMessage.roomReplyStatus === 'running'
+
+        if (event.type === 'stopped') {
+          if (isRoomMemberPending) assistantMessage.roomReplyStatus = 'stopped'
+          markAssistantMessageStopped(assistantMessage, getAssistantStopCopy())
+          const cancelledStatus = codingStatusForCancelledRun(codingStatusByConversation.get(convId))
+          if (cancelledStatus) {
+            codingStatusByConversation.set(convId, cancelledStatus)
+            saveCodingStateNow(convId, { status: cancelledStatus, diff: codingDiffByConversation.get(convId) ?? null })
+          }
+        } else if (event.type === 'error') {
+          if (isRoomMemberPending) assistantMessage.roomReplyStatus = 'failed'
+          const error = event.error || t('chatUi.streamFailedUnknown')
+          finishRunningTools(error, errorStage)
+          setAssistantErrorState(assistantMessage, error, getMessageTextContent)
+        } else {
+          finishRunningTools()
+
+          if (!roomReplyCount && event.message?.content !== undefined) {
+            assistantMessage.content = event.message.content
+            appendFinalContentBlock(assistantMessage, event.message.content)
+          }
+          const hasReply = hasRenderableContent(assistantMessage)
+          if (isRoomMemberPending) assistantMessage.roomReplyStatus = hasReply ? 'completed' : 'failed'
+          if (!hasReply) {
+            const noResponseText = getNoResponseText()
+            assistantMessage.content = noResponseText
+            ensureBlocks(assistantMessage).push(createContentBlock(noResponseText))
+          }
+          if (event.thinking && !assistantMessage.thinking) {
+            assistantMessage.thinking = event.thinking
+            ensureBlocks(assistantMessage).push(createThinkingBlock(event.thinking))
+          }
+          if (!roomReplyCount) positionGroupMetaBlocks(assistantMessage)
+        }
+      } finally {
+        clearPendingStreamSave()
+        flushCodingStateSave(convId)
+        releaseStreamSession(convId, sessionId)
+        clearPendingAskUserRequests(convId)
+        void doSaveConversation(convId, targetMessages)
+        if (currentConversationId.value === convId) resetTransientStreamState()
+      }
     }
 
     streamingConvIds.add(convId)
@@ -553,30 +606,23 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
     try {
       if (window.electronAPI) {
         const cleanup = window.electronAPI.onStreamEvent(sessionId, (event) => {
+          if (!ownsStream()) return
           const isForeground = currentConversationId.value === convId
           scheduleStreamingSave()
-          const finishSession = (saveConversation = false) => {
-            flushPendingStreamText()
-            clearPendingStreamSave()
-            flushCodingStateSave(convId)
-            releaseStreamSession(convId, sessionId)
-            // No pending panel of this conversation can be answered by the
-            // model anymore; keep stale panels from stacking above the input.
-            clearPendingAskUserRequests(convId)
-            if (saveConversation) {
-              void doSaveConversation(convId, targetMessages)
-            }
-            if (isForeground) {
-              resetTransientStreamState()
-            }
-          }
 
           try {
             if (event.type === 'thinking' && event.content) {
               enqueueThinkingText(event.content)
             } else if (event.type === 'reset') {
+              pendingThinkingText = ''
+              if (assistantMessage.roomReplyStatus) {
+                for (const block of ensureBlocks(assistantMessage)) {
+                  if (block.kind === 'thinking' && block.endedAt == null) block.text = ''
+                }
+                assistantMessage.thinking = ''
+              }
               flushPendingStreamText()
-              thinkingAccum = ''
+              if (!assistantMessage.roomReplyStatus) closeOpenThinkingBlocks(assistantMessage)
               contentAccum = typeof assistantMessage.content === 'string' ? assistantMessage.content : ''
               if (isForeground) {
                 resetTransientStreamState()
@@ -639,9 +685,14 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
             } else if (event.type === 'web_fetch_result' && event.result) {
               flushPendingStreamText()
               ensureBlocks(assistantMessage).push(createWebFetchBlock(event.result as WebFetchResultEntry, event.query))
-            } else if (event.type === 'group_collaboration_plan' && event.plan) {
-              flushPendingStreamText()
-              upsertGroupCollaborationPlanBlock(assistantMessage, event.plan)
+            } else if (event.type === 'room_member_status' && event.roomMemberStatus) {
+              const { speakerName, speakerIcon, status } = event.roomMemberStatus
+              if (!roomReplyCount) {
+                Object.assign(assistantMessage, { speakerName, speakerIcon, roomReplyStatus: status })
+                if (status === 'running') ensureThinkingBlock(assistantMessage)
+              }
+            } else if (event.type === 'room_message' && event.roomMessage) {
+              appendRoomReply(event.roomMessage)
             } else if (event.type === 'group_session_state' && event.groupId) {
               flushPendingStreamText()
               if (event.active) activeGroupSessionIds.add(sessionId)
@@ -649,18 +700,6 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
             } else if (event.type === 'group_progress' && event.groupProgress) {
               flushPendingStreamText()
               upsertGroupProgressBlock(assistantMessage, event.groupProgress)
-            } else if (event.type === 'agent_sidechat' && event.sidechat) {
-              flushPendingStreamText()
-              upsertAgentSidechatBlock(assistantMessage, event.sidechat)
-            } else if (event.type === 'group_transcript' && event.transcript) {
-              flushPendingStreamText()
-              upsertGroupTranscriptBlock(assistantMessage, event.transcript)
-            } else if (event.type === 'group_board' && event.board) {
-              flushPendingStreamText()
-              upsertGroupBoardBlock(assistantMessage, event.board)
-            } else if (event.type === 'group_direct_reply' && event.directReply) {
-              flushPendingStreamText()
-              appendGroupDirectReplyBlock(assistantMessage, event.directReply)
             } else if (event.type === 'group_user_injection' && event.injection) {
               flushPendingStreamText()
               appendGroupUserInjectionBlock(assistantMessage, event.injection)
@@ -675,10 +714,10 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
               persistCodingState(convId)
             } else if (event.type === 'tool_start' && event.name) {
               flushPendingStreamText()
-              hadToolSinceLastThinking = true
               closeOpenThinkingBlocks(assistantMessage)
               const toolRun = createToolRun(event.name, event.filePath)
               if (event.summary) toolRun.summary = event.summary
+              if (event.callId) runningCalls.set(event.callId, toolRun)
               toolRuns.push(toolRun)
               ensureBlocks(assistantMessage).push(createToolBlock(toolRun))
               syncAssistantToolRuns()
@@ -692,7 +731,10 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
               syncAssistantToolRuns()
             } else if (event.type === 'tool_end') {
               flushPendingStreamText()
-              const activeToolRun = findLastRunningToolRun(toolRuns, event.name) || findLastRunningToolRun(toolRuns)
+              const activeToolRun = event.callId
+                ? runningCalls.get(event.callId)
+                : findLastRunningToolRun(toolRuns, event.name) || findLastRunningToolRun(toolRuns)
+              if (event.callId) runningCalls.delete(event.callId)
               if (activeToolRun) {
                 if (event.error) {
                   activeToolRun.status = 'failed'
@@ -703,97 +745,26 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
                 activeToolRun.endedAt = Date.now()
                 syncAssistantToolRuns()
               }
-            } else if (event.type === 'done') {
-              try {
-                flushPendingStreamText()
-                closeOpenThinkingBlocks(assistantMessage)
-                for (const toolRun of toolRuns) {
-                  if (toolRun.status === 'running') {
-                    toolRun.status = 'completed'
-                    toolRun.endedAt = Date.now()
-                  }
-                }
-                finalizePendingAuthBlocks(assistantMessage)
-                syncAssistantToolRuns()
-
-                if (event.message?.content !== undefined) {
-                  assistantMessage.content = event.message.content
-                  contentAccum = typeof event.message.content === 'string' ? event.message.content : ''
-                  appendFinalContentBlock(assistantMessage, event.message.content)
-                }
-                if (!hasRenderableContent(assistantMessage)) {
-                  const noResponseText = getNoResponseText()
-                  assistantMessage.content = noResponseText
-                  contentAccum = noResponseText
-                  ensureBlocks(assistantMessage).push(createContentBlock(noResponseText))
-                }
-                if (event.thinking && !assistantMessage.thinking) {
-                  assistantMessage.thinking = event.thinking
-                  thinkingAccum = event.thinking
-                  ensureBlocks(assistantMessage).push(createThinkingBlock(event.thinking))
-                }
-                positionGroupMetaBlocks(assistantMessage)
-              } finally {
-                finishSession(true)
-              }
-            } else if (event.type === 'error') {
-              try {
-                flushPendingStreamText()
-                closeOpenThinkingBlocks(assistantMessage)
-                const activeToolRun = findLastRunningToolRun(toolRuns)
-                if (activeToolRun) {
-                  activeToolRun.status = 'failed'
-                  activeToolRun.endedAt = Date.now()
-                  activeToolRun.progress.push({ stage: t('chatUi.toolStageError'), detail: event.error })
-                  syncAssistantToolRuns()
-                }
-                finalizePendingAuthBlocks(assistantMessage)
-                setAssistantErrorState(assistantMessage, event.error || t('chatUi.streamFailedUnknown'), getMessageTextContent)
-              } finally {
-                // Save the partially generated turn plus the error state:
-                // losing streamed content on a failed stream reads as data
-                // loss after a reload.
-                finishSession(true)
-              }
-            } else if (event.type === 'stopped') {
-              try {
-                flushPendingStreamText()
-                closeOpenThinkingBlocks(assistantMessage)
-                markAssistantMessageStopped(assistantMessage, getAssistantStopCopy())
-                syncAssistantToolRuns()
-              } finally {
-                finishSession(true)
-              }
+            } else if (event.type === 'done' || event.type === 'error' || event.type === 'stopped') {
+              finishStream(event)
             }
           } catch (err) {
-            flushPendingStreamText()
-            closeOpenThinkingBlocks(assistantMessage)
             console.error('[chat] Failed to handle stream event:', event, err)
-
-            const activeToolRun = findLastRunningToolRun(toolRuns)
-            if (activeToolRun) {
-              activeToolRun.status = 'failed'
-              activeToolRun.endedAt = Date.now()
-              activeToolRun.progress.push({ stage: t('chatUi.toolStageRenderError'), detail: (err as Error).message })
-              syncAssistantToolRuns()
-            }
-
-            finalizePendingAuthBlocks(assistantMessage)
-            setAssistantErrorState(assistantMessage, (err as Error).message, getMessageTextContent)
-            finishSession(true)
+            finishStream({ type: 'error', error: (err as Error).message }, t('chatUi.toolStageRenderError'))
           }
         })
 
-        activeCleanups.set(sessionId, cleanup)
-        activeGroupSessionIds.delete(sessionId)
+        activeStreamStops.set(sessionId, () => finishStream({ type: 'stopped' }))
+        activeCleanups.set(sessionId, () => {
+          cleanup()
+          clearPendingStreamFlush()
+          clearPendingStreamSave()
+          activeStreamStops.delete(sessionId)
+        })
 
         const chatMessages = JSON.parse(JSON.stringify(await buildOutgoingMessagesWithDocumentWorkspaceContext(targetMessages.slice(0, -1))))
-        if (activeStreamSessionIds.get(convId) !== sessionId || !streamingConvIds.has(convId)) {
-          cleanup()
-          activeCleanups.delete(sessionId)
-          return
-        }
-        await window.electronAPI.chatStream(
+        if (!ownsStream()) return
+        const result = await window.electronAPI.chatStream(
           chatMessages,
           sessionId,
           convId,
@@ -814,19 +785,9 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
           sendOptions?.codingWorkspaceRoot ?? undefined
         )
 
-        if (streamingConvIds.has(convId)) {
-          releaseStreamSession(convId, sessionId)
-          if (!hasRenderableContent(assistantMessage)) {
-            const noResponseText = getNoResponseText()
-            assistantMessage.content = noResponseText
-            ensureBlocks(assistantMessage).push(createContentBlock(noResponseText))
-          }
-          finalizePendingAuthBlocks(assistantMessage)
-          void doSaveConversation(convId, targetMessages)
-          if (currentConversationId.value === convId) {
-            resetTransientStreamState()
-          }
-        }
+        if (!ownsStream()) return
+        for (const reply of result?.roomReplies?.slice(roomReplyCount) || []) appendRoomReply(reply)
+        finishStream()
       } else {
         const chatMessages = JSON.parse(JSON.stringify(await buildOutgoingMessagesWithDocumentWorkspaceContext(targetMessages.slice(0, -1))))
         const res = await fetch('/api/ai/chat', {
@@ -835,25 +796,10 @@ export function createChatMessageSender (options: ChatMessageSenderOptions) {
           body: JSON.stringify({ messages: chatMessages })
         })
         const response = await res.json() as { content?: string }
-        assistantMessage.content = response.content || getNoResponseText()
-        ensureBlocks(assistantMessage).push(createContentBlock(assistantMessage.content))
-        finalizePendingAuthBlocks(assistantMessage)
-        activeStreamSessionIds.delete(convId)
-        activeGroupSessionIds.delete(sessionId)
-        streamingConvIds.delete(convId)
-        void doSaveConversation(convId, targetMessages)
-        if (currentConversationId.value === convId) {
-          resetTransientStreamState()
-        }
+        finishStream({ type: 'done', message: { role: 'assistant', content: response.content ?? '' } })
       }
     } catch (err) {
-      flushCodingStateSave(convId)
-      releaseStreamSession(convId, sessionId)
-      setAssistantErrorState(assistantMessage, (err as Error).message, getMessageTextContent)
-      finalizePendingAuthBlocks(assistantMessage)
-      if (currentConversationId.value === convId) {
-        resetTransientStreamState()
-      }
+      finishStream({ type: 'error', error: (err as Error).message })
     }
   }
 

@@ -2,12 +2,10 @@ import { randomUUID } from 'node:crypto'
 import type { MessageContent } from '../../../src/main/ai-harness/contracts.js'
 import type { AgentDefinition, ChannelBinding, ChannelEvent } from '../../../src/shared/agent-workspace-types.js'
 import { mainState } from '../state.js'
-import { getLastUserMessageText, getMessageText } from '../chat-message-utils.js'
+import { getMessageText } from '../chat-message-utils.js'
 import { resolveAgentRuntimeContext } from './agent-context.js'
-import { buildDirectGroupReplyPromptSection, parseGroupRouting, resolveDirectGroupReplyRoute } from './group-deliberation.js'
-import { buildNativeRustGroupDeliberation } from './native-rust-group-deliberation.js'
+import { formatRoomReplies, runNativeRoom } from './native-rust-room.js'
 import { startSelectedRustHarness } from './selected-execution-engine.js'
-import type { RustChatOptions } from '../rust-harness-client.js'
 
 export async function generateImGatewayReply (binding: ChannelBinding, event: ChannelEvent): Promise<string | null> {
   // Rust is the only execution backend.
@@ -33,28 +31,35 @@ export async function generateImGatewayReply (binding: ChannelBinding, event: Ch
     channelBindingId: binding.id,
     requestedTargetProjectId: binding.targetProjectId || undefined
   })
-  const groupRouting = runtimeContext.group
-    ? parseGroupRouting(runtimeContext.group, getLastUserMessageText(messages))
-    : null
-  const directGroupReply = resolveDirectGroupReplyRoute(runtimeContext.group, messages, groupRouting)
-  const groupDeliberation = runtimeContext.group && !directGroupReply
-    ? await buildNativeImGroupDeliberation({
-        binding,
-        event,
-        messages,
-        planner: rustHarness,
-        group: runtimeContext.group,
-        routing: groupRouting || parseGroupRouting(runtimeContext.group, getLastUserMessageText(messages)),
+  const group = runtimeContext.group
+  if (group) {
+    const client = mainState.rustHarness
+    if (!client) throw new Error('Rust harness client is not initialized.')
+    const replies = await runNativeRoom({
+      client,
+      hostTools: rustHarness,
+      group,
+      agents: [group.coordinatorAgentId, ...group.memberAgentIds]
+        .map(id => mainState.agentStore?.get(id))
+        .filter((agent): agent is AgentDefinition => Boolean(agent)),
+      messages,
+      sessionId: `im-rust-room-${binding.id}-${event.messageId}-${randomUUID()}`,
+      context: {
+        authMode: 'strict',
         targetProjectId: runtimeContext.effectiveTargetProjectId,
         enableThinking: runtimeContext.providerConfig?.enableThinking,
         reasoningEffort: runtimeContext.providerConfig?.reasoningEffort,
         temperature: runtimeContext.providerConfig?.temperature,
-        activeSkillContents: runtimeContext.activeSkillContents,
-        systemPromptSections: runtimeContext.systemPromptSections,
-        runtimeMemoryScopes: runtimeContext.memoryScopes,
-        runtimeMemoryEmbedding: runtimeContext.memoryEmbedding
-      })
-    : { promptSection: null, transcript: null }
+        systemPromptSections: [
+          ...runtimeContext.systemPromptSections.filter(section => !section.startsWith('## Active custom agent')),
+          '## IM reply instructions\nReply concisely for the external chat as yourself.'
+        ],
+        memoryScopes: runtimeContext.memoryScopes,
+        memoryEmbedding: runtimeContext.memoryEmbedding
+      }
+    })
+    return formatRoomReplies(replies) || null
+  }
 
   const requestOptions = {
     agentId: runtimeContext.agent?.id || binding.defaultAgentId,
@@ -63,9 +68,7 @@ export async function generateImGatewayReply (binding: ChannelBinding, event: Ch
     activeSkillContents: runtimeContext.activeSkillContents,
     systemPromptSections: [
       ...runtimeContext.systemPromptSections,
-      '## IM reply instructions\nReply concisely for the external chat. Do not mention internal routing unless the user asked.',
-      ...(directGroupReply ? [buildDirectGroupReplyPromptSection(directGroupReply)] : []),
-      ...(groupDeliberation.promptSection ? [groupDeliberation.promptSection] : [])
+      '## IM reply instructions\nReply concisely for the external chat. Do not mention internal routing unless the user asked.'
     ],
     allowedToolNames: runtimeContext.allowedToolNames,
     deniedToolNames: runtimeContext.deniedToolNames,
@@ -93,56 +96,5 @@ export async function generateImGatewayReply (binding: ChannelBinding, event: Ch
   }
 
   return reply || null
-}
-
-async function buildNativeImGroupDeliberation (input: {
-  binding: ChannelBinding
-  event: ChannelEvent
-  messages: Array<{ role: string; content: MessageContent }>
-  planner: NonNullable<typeof mainState.rustHarnessEngine>
-  group: NonNullable<Awaited<ReturnType<typeof resolveAgentRuntimeContext>>['group']>
-  routing: NonNullable<ReturnType<typeof parseGroupRouting>>
-  targetProjectId: string | null
-  enableThinking?: boolean
-  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
-  temperature?: number
-  activeSkillContents: string[]
-  systemPromptSections: string[]
-  runtimeMemoryScopes: NonNullable<RustChatOptions['memoryScopes']>
-  runtimeMemoryEmbedding?: RustChatOptions['memoryEmbedding']
-}) {
-  const client = mainState.rustHarness
-  if (!client) throw new Error('Rust harness client is not initialized.')
-  const groupAgentIds = Array.from(new Set([
-    input.group.coordinatorAgentId,
-    ...input.group.memberAgentIds
-  ]))
-  const agents = groupAgentIds
-    .map(id => mainState.agentStore?.get(id))
-    .filter((agent): agent is AgentDefinition => Boolean(agent))
-  // Each Rust member receives its own synced persona. Keep only shared
-  // channel/group/memory context so the coordinator persona does not leak
-  // into other members' native runs.
-  const sharedSections = input.systemPromptSections.filter(section => !section.startsWith('## Active custom agent'))
-  return await buildNativeRustGroupDeliberation({
-    client,
-    planner: input.planner,
-    group: input.group,
-    agents,
-    messages: input.messages,
-    routing: input.routing,
-    sessionId: `im-rust-group-${input.binding.id}-${input.event.messageId}-${randomUUID()}`,
-    context: {
-      targetProjectId: input.targetProjectId,
-      enableThinking: input.enableThinking,
-      reasoningEffort: input.reasoningEffort,
-      temperature: input.temperature,
-      systemPromptSections: sharedSections,
-      activeSkillContents: input.activeSkillContents,
-      memoryScopes: input.runtimeMemoryScopes,
-      memoryQuery: getLastUserMessageText(input.messages),
-      memoryEmbedding: input.runtimeMemoryEmbedding
-    }
-  })
 }
 

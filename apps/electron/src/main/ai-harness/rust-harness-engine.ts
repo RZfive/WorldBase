@@ -2,8 +2,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { USER_ABORT_MESSAGE } from './abort-utils.js'
-import { buildToolRunSummary, filePathForToolRun } from './tool-run-summary.js'
-import type { UsageStore } from '../settings/usage-store.js'
+import { toolRunEventFromFrame } from './tool-run-summary.js'
 import type { ChatContentPart, ChatMessage, MessageContent, ToolDefinition } from './contracts.js'
 import {
   RustHarnessClient,
@@ -47,7 +46,6 @@ function shouldExecuteInElectronHost (name: string, descriptor?: { electronNativ
 export interface RustHarnessEngineOptions {
   client: RustHarnessClient
   services: ElectronToolRegistryServices
-  usageStore?: UsageStore
   /** Notify Electron views after a Rust-native domain mutation completes. */
   onNativeToolResult?: (name: string, result: unknown, context: AIRequestOptions) => void | Promise<void>
   /**
@@ -80,7 +78,6 @@ export class RustHarnessEngine implements AIHarness {
   private readonly client: RustHarnessClient
   private readonly services: ElectronToolRegistryServices
   private readonly electronTools: ElectronToolRegistry
-  private readonly usageStore?: UsageStore
   private readonly onNativeToolResult?: RustHarnessEngineOptions['onNativeToolResult']
   private readonly onPlanModeChanged?: RustHarnessEngineOptions['onPlanModeChanged']
   private baseConfig: AIConfigInput = {}
@@ -93,7 +90,6 @@ export class RustHarnessEngine implements AIHarness {
   constructor (options: RustHarnessEngineOptions) {
     this.client = options.client
     this.services = options.services
-    this.usageStore = options.usageStore
     this.onNativeToolResult = options.onNativeToolResult
     this.onPlanModeChanged = options.onPlanModeChanged
     this.electronTools = new ElectronToolRegistry({
@@ -181,6 +177,7 @@ export class RustHarnessEngine implements AIHarness {
     // believe it lacked the capability, so it redirected users to a manual UI
     // flow that does not exist.
     const deniedToolNames = mergeStrings(options?.deniedToolNames)
+    const planModeActive = options?.planModeActive ?? this.planModeDefault
     const priorMessages = pendingIndex >= 0 ? messages.slice(0, pendingIndex) : messages.slice(0, -1)
     const historySystemPromptSections = priorMessages
       .filter(message => message.role === 'system' || message.role === 'developer')
@@ -189,7 +186,7 @@ export class RustHarnessEngine implements AIHarness {
     const systemPromptSections = mergeStrings(
       historySystemPromptSections,
       options?.systemPromptSections,
-      this.planModeDefault
+      planModeActive
         ? ['Plan mode is active. Mutating tools (create/modify files, projects, installs, builds, process control, MCP calls) stay visible but every call is rejected until exit_plan_mode has completed — this is a temporary block, not a missing capability. Present the plan, call exit_plan_mode, then execute the plan yourself with those tools. Never tell the user to create or modify projects manually in the UI.']
         : undefined
     )
@@ -247,7 +244,6 @@ export class RustHarnessEngine implements AIHarness {
         assistantText = checkpointAssistantText
         assistantContent = checkpointAssistantContent
       }
-      if (frame.kind === 'usage') this.recordUsage(frame, effectiveConfig)
       if (frame.kind === 'tool_call' && typeof frame.call_id === 'string') {
         const args = frame.args
         if (args && typeof args === 'object' && !Array.isArray(args)) {
@@ -399,7 +395,7 @@ export class RustHarnessEngine implements AIHarness {
         enableThinking: effectiveConfig.enableThinking,
         reasoningEffort: effectiveConfig.reasoningEffort,
         temperature: effectiveConfig.temperature,
-        planModeActive: this.planModeDefault,
+        planModeActive,
         budgetLimit: this.budgetLimit,
         computerUseEnabled: options?.computerUseEnabled === true,
         autoApprovePermissions: options?.autoApprovePermissions === true
@@ -494,29 +490,6 @@ export class RustHarnessEngine implements AIHarness {
 
   setBudgetLimit (limit: number | null): void {
     this.budgetLimit = typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? limit : null
-  }
-
-  private recordUsage (frame: RustEventFrame, fallback: AIConfigInput): void {
-    const inputTokens = positiveInteger(frame.inputTokens)
-    const outputTokens = positiveInteger(frame.outputTokens)
-    const cacheReadTokens = positiveInteger(frame.cacheReadTokens)
-    const cacheCreationTokens = positiveInteger(frame.cacheCreationTokens)
-    if (inputTokens === 0 && outputTokens === 0 && cacheReadTokens === 0 && cacheCreationTokens === 0) return
-
-    const providerId = stringValue(frame.providerId) || fallback.providerId || 'unknown'
-    const providerName = stringValue(frame.providerName) || fallback.providerName || providerId
-    const model = stringValue(frame.model) || fallback.model || 'unknown'
-    this.usageStore?.record({
-      providerId,
-      providerName,
-      model,
-      usage: {
-        prompt_tokens: inputTokens,
-        completion_tokens: outputTokens,
-        prompt_tokens_details: { cached_tokens: cacheReadTokens },
-        cache_creation_input_tokens: cacheCreationTokens
-      }
-    })
   }
 
   private async collectCustomTools (options?: AIRequestOptions): Promise<RustCustomToolRegistration[]> {
@@ -1174,27 +1147,9 @@ function frameToStreamEvent (frame: RustEventFrame, assistantContent: MessageCon
       // Rust emits this before a provider-stream retry. Preserve Node's
       // renderer contract so partial token/thinking buffers are discarded.
       return { type: 'reset' }
-    case 'tool_call': {
-      const name = typeof frame.name === 'string' ? frame.name : 'tool'
-      const summary = buildToolRunSummary(name, frame.args)
-      // Full (unclamped) target path for file tools so the renderer can open
-      // the file in a workspace tab from the row title.
-      const filePath = filePathForToolRun(name, frame.args)
-      return {
-        type: 'tool_start',
-        name,
-        ...(summary ? { summary } : {}),
-        ...(filePath ? { filePath } : {})
-      }
-    }
+    case 'tool_call':
     case 'tool_result':
-      // Native tool failures stay silent otherwise: the renderer would keep
-      // showing the run as completed even though the model saw an error.
-      return {
-        type: 'tool_end',
-        name: typeof frame.name === 'string' ? frame.name : 'tool',
-        ...(frame.isError === true ? { error: typeof frame.content === 'string' ? frame.content : 'tool failed' } : {})
-      }
+      return toolRunEventFromFrame(frame)
     case 'usage':
       return {
         type: 'cost_update',

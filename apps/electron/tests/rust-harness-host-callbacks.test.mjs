@@ -19,6 +19,7 @@ import {
 } from '../src/renderer/components/chat/panel/coding-status-storage.ts'
 import { ElectronToolRegistry } from '../src/main/ai-harness/electron-tool-registry.ts'
 import { MCPService } from '../src/main/mcp/mcp-service.ts'
+import { UsageStore, cacheHitRate, totalInputTokens } from '../src/main/settings/usage-store.ts'
 import { RustHarnessClient } from '../electron/main-process/rust-harness-client.ts'
 import { normalizeRustAskUserQuestions, normalizeRustAskUserResponse } from '../electron/main-process/ai/rust-ask-user-contract.ts'
 import {
@@ -807,6 +808,141 @@ test('Rust client answers direct document host requests without a session mappin
     result: { success: true, supported: true }
   }])
   assert.equal(client.backlog.has('document-open-direct'), false)
+})
+
+test('Rust usage is persisted once for native room and regular chat frames', async context => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'worldbase-rust-usage-'))
+  context.after(() => fs.rm(dataDir, { recursive: true, force: true }))
+  const recordedAt = new Date(2026, 10, 21, 0, 21)
+  context.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 22, 0, 1) })
+  const store = new UsageStore(dataDir)
+  const client = new RustHarnessClient({
+    workspace: process.cwd(),
+    dataDir,
+    onEvent: () => {},
+    onUsage: usage => store.record(usage)
+  })
+  const sendFrame = (streamId, seq, frame) => client.handleLine(JSON.stringify({
+    method: 'event',
+    params: { streamId, seq, ts: recordedAt.toISOString(), ...frame }
+  }))
+  const usage = {
+    kind: 'usage',
+    providerId: 'test-provider',
+    providerName: 'Test Provider',
+    model: 'test-model',
+    inputTokens: 32,
+    outputTokens: 5,
+    cacheReadTokens: 7,
+    cacheCreationTokens: 2,
+    inputIncludesCacheRead: false,
+    totalCost: 0.01,
+    totalInputTokens: 80,
+    totalOutputTokens: 10
+  }
+  client.start = async () => {}
+  client.syncSettings = async () => {}
+  client.ensureConversation = async () => {}
+  client.syncConversationHistory = async () => {}
+  client.request = async method => {
+    if (method === 'group.message') {
+      sendFrame('room-usage:member:reviewer:child', 0, usage)
+      sendFrame('room-usage', 0, { kind: 'done', stopReason: 'group_complete' })
+      return { streamId: 'room-usage' }
+    }
+    if (method === 'chat.send') {
+      sendFrame('chat-usage', 0, { ...usage, inputTokens: 13, outputTokens: 3 })
+      sendFrame('chat-usage', 1, { kind: 'assistant_message', content: 'Done' })
+      sendFrame('chat-usage', 2, { kind: 'done', stopReason: 'stop' })
+      return { streamId: 'chat-usage' }
+    }
+    assert.fail(`Unexpected method: ${method}`)
+  }
+
+  await client.startNativeGroupRound({ sessionId: 'room-session', groupId: 'room-usage', text: 'Review' })
+  const engine = new RustHarnessEngine({ client, services: createServices() })
+  const chatEvents = []
+  for await (const event of engine.chatStream([{ role: 'user', content: 'Hello' }])) chatEvents.push(event)
+
+  assert.deepEqual(chatEvents.filter(event => event.type === 'cost_update'), [{
+    type: 'cost_update', totalCost: 0.01, inputTokens: 80, outputTokens: 10
+  }])
+  const persisted = new UsageStore(dataDir)
+  assert.deepEqual(persisted.getDaily(), [{
+    date: '2026-11-21',
+    hourBucket: 0,
+    providerId: 'test-provider',
+    providerName: 'Test Provider',
+    model: 'test-model',
+    inputTokens: 45,
+    outputTokens: 8,
+    cacheReadTokens: 14,
+    cacheCreationTokens: 4,
+    inputIncludesCacheRead: false,
+    knownUncachedInputTokens: 45,
+    callCount: 2
+  }])
+})
+
+test('cache rates aggregate OpenAI and Anthropic input conventions consistently', async context => {
+  assert.equal(totalInputTokens(100, 40), 100)
+  assert.equal(cacheHitRate(60, 40), 0.4)
+  assert.equal(totalInputTokens(10, 40, 5), 55)
+  assert.equal(cacheHitRate(10, 40, 5), 40 / 55)
+  assert.equal(cacheHitRate(0, 0, 0), 0)
+
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'worldbase-cache-rate-'))
+  context.after(() => fs.rm(dataDir, { recursive: true, force: true }))
+  const store = new UsageStore(dataDir)
+  const timestampMs = new Date(2026, 10, 21, 12).getTime()
+  store.record({
+    providerId: 'openai',
+    providerName: 'OpenAI',
+    model: 'gpt-test',
+    timestampMs,
+    usage: { input_tokens: 100, input_includes_cache_read: true, input_tokens_details: { cached_tokens: 40 } }
+  })
+  store.record({
+    providerId: 'anthropic',
+    providerName: 'Anthropic',
+    model: 'claude-test',
+    timestampMs,
+    usage: { input_tokens: 10, input_includes_cache_read: false, cache_read_input_tokens: 40, cache_creation_input_tokens: 5 }
+  })
+
+  const summary = store.getSummary()
+  assert.equal(summary.find(provider => provider.providerId === 'openai')?.cacheHitRate, 0.4)
+  assert.equal(summary.find(provider => provider.providerId === 'anthropic')?.cacheHitRate, 40 / 55)
+})
+
+test('legacy usage records gain a stable uncached-input baseline on update', async context => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'worldbase-legacy-cache-'))
+  context.after(() => fs.rm(dataDir, { recursive: true, force: true }))
+  const timestampMs = new Date(2026, 10, 21, 12).getTime()
+  await fs.writeFile(path.join(dataDir, 'usage-records.json'), JSON.stringify([{
+    date: '2026-11-21',
+    hourBucket: 12,
+    providerId: 'anthropic',
+    providerName: 'Anthropic',
+    model: 'claude-test',
+    inputTokens: 20,
+    outputTokens: 0,
+    cacheReadTokens: 5,
+    cacheCreationTokens: 0,
+    callCount: 1
+  }]))
+  const store = new UsageStore(dataDir)
+  store.record({
+    providerId: 'anthropic',
+    providerName: 'Anthropic',
+    model: 'claude-test',
+    timestampMs,
+    usage: { input_tokens: 10, input_includes_cache_read: false, cache_read_input_tokens: 5 }
+  })
+
+  const [record] = store.getDaily()
+  assert.equal(record.knownUncachedInputTokens, 25)
+  assert.equal(store.getSummary()[0].cacheHitRate, 10 / 35)
 })
 
 test('Rust native group keeps its Electron session through child completion and releases only at group completion', async () => {

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use worldbase_core::context::candidate::CandidateManager;
+use worldbase_core::context::engine::assemble_request_with_evidence_tail;
 use worldbase_core::context::{
     apply_tool_result_capability_snapshot, assemble_request, microcompact, AttemptOutcome,
     CompactionCandidate, CompactionCheckpoint, CompactionNoteState, CompactionVersion,
@@ -159,6 +160,79 @@ fn checkpoint_and_ledger_are_user_evidence_not_system_context() {
         .all(|message| message.role == LlmRole::User || message.role == LlmRole::Assistant));
     let system = "base system prompt only";
     assert!(!system.contains(&checkpoint.summary));
+}
+
+#[test]
+fn changing_run_evidence_keeps_the_checkpoint_and_history_prefix() {
+    let mut ledger = RunStateLedger::from_real_user_request("objective", 7, "full objective");
+    let checkpoint = checkpoint_for(&ledger);
+    let mut history = vec![LlmMessage::text(LlmRole::User, "Review the project")];
+    let mut compaction_note = CompactionNoteState::new();
+    compaction_note.arm(&checkpoint);
+    let before = assemble_request_with_evidence_tail(
+        "conversation-1",
+        Some(&checkpoint),
+        &ledger,
+        &history,
+        compaction_note.drain_for_provider_request(),
+    );
+    ledger
+        .record_tool_attempt(
+            "read_file",
+            "read-1",
+            &serde_json::json!({ "path": "src/main.rs" }),
+            AttemptOutcome::Success,
+            "file content",
+            1,
+        )
+        .unwrap();
+    history.extend([
+        LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "read-1".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({ "path": "src/main.rs" }),
+                raw_input: None,
+                input_error: None,
+            }],
+        },
+        LlmMessage {
+            role: LlmRole::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "read-1".into(),
+                content: "file content".into(),
+                is_error: false,
+            }],
+        },
+    ]);
+    let after = assemble_request_with_evidence_tail(
+        "conversation-1",
+        Some(&checkpoint),
+        &ledger,
+        &history,
+        compaction_note.drain_for_provider_request(),
+    );
+
+    assert_eq!(
+        serde_json::to_value(&before[..3]).unwrap(),
+        serde_json::to_value(&after[..3]).unwrap()
+    );
+    assert_ne!(before[3].text_view(), after[5].text_view());
+    assert_eq!(after[5].role, LlmRole::User);
+    assert!(after[5].text_view().contains("read_file"));
+    assert_eq!(
+        serde_json::to_value(&after[3..5]).unwrap(),
+        serde_json::to_value(&history[1..]).unwrap()
+    );
+    assert!(before
+        .last()
+        .unwrap()
+        .text_view()
+        .contains("COMPACTION_NOTE"));
+    assert!(after
+        .iter()
+        .all(|message| !message.text_view().contains("COMPACTION_NOTE")));
 }
 
 #[test]

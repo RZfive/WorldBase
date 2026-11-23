@@ -72,13 +72,6 @@ export function getAllUserMessageTexts (messages: Array<{ role: string; content:
     .filter(Boolean)
 }
 
-export function firstNonEmptyLine (value: string): string {
-  return value
-    .split(/\r?\n/)
-    .map(line => line.trim())
-    .find(Boolean) || ''
-}
-
 export function truncateSectionText (value: string, maxChars = 6000): string {
   const normalized = value.trim()
   if (normalized.length <= maxChars) return normalized

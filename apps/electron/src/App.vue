@@ -586,14 +586,17 @@ function enqueuePageAutomation<T> (
   return next
 }
 
-const PAGE_SCREENSHOT_RECOVERY_BUDGET_MS = 20000
+// The capture has an internal fallback but must never rebuild/reload the page.
+// A fallback timeout is terminal for this request; the live page stays usable
+// for the next screenshot instead of being replaced after a stalled capture.
+const PAGE_SCREENSHOT_FALLBACK_BUDGET_MS = 1000
 
 function extractUserTimeoutMs (request: PageAutomationRendererRequest): number | undefined {
   if (request.type === 'screenshot') {
     if (typeof request.timeoutMs !== 'number' || !Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0) {
       return PAGE_AUTOMATION_QUEUE_TIMEOUT_MS
     }
-    return Math.min(PAGE_AUTOMATION_QUEUE_TIMEOUT_MS, request.timeoutMs + PAGE_SCREENSHOT_RECOVERY_BUDGET_MS)
+    return Math.min(PAGE_AUTOMATION_QUEUE_TIMEOUT_MS, request.timeoutMs + PAGE_SCREENSHOT_FALLBACK_BUDGET_MS)
   }
   if (request.type === 'action') {
     const action = request.action
@@ -2717,18 +2720,20 @@ onUnmounted(() => {
 
 .background-page-hosts {
   position: fixed;
-  left: -20000px;
-  top: 0;
-  width: 1280px;
-  height: 800px;
-  opacity: 0.01;
+  inset: 0;
+  /* A completely offscreen webview has no compositor frames: both
+   * capturePage() and CDP Page.captureScreenshot can wait forever. Keep the
+   * live page behind the opaque application, not outside the viewport. */
+  z-index: -1;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
   overflow: hidden;
 }
 
 .background-page-host {
-  width: 1280px;
-  height: 800px;
+  width: 100%;
+  height: 100%;
 }
 
 .app-layout {

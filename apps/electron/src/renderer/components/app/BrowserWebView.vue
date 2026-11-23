@@ -107,7 +107,6 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const webviewRef = ref<WebviewLikeElement | null>(null);
-const webviewGeneration = ref(0);
 const addressInputRef = ref<HTMLInputElement | null>(null);
 const currentUrl = ref(props.url);
 const currentTitle = ref(props.title);
@@ -1509,71 +1508,6 @@ async function renderScreenshotDataUrl(
   }
 }
 
-const SCREENSHOT_RECOVERY_BUDGET_MS = 20_000;
-const SCREENSHOT_RECOVERY_READY_TIMEOUT_MS = 8_000;
-let screenshotHostRecovery: Promise<void> | null = null;
-
-function isScreenshotTimeoutError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return error.name === "TimeoutError" || /timed?\s*out|timeout/i.test(error.message);
-}
-
-async function recoverPageHostAfterScreenshotTimeout(): Promise<void> {
-  if (screenshotHostRecovery) return await screenshotHostRecovery;
-  const previousWebview = webviewRef.value;
-  if (!previousWebview) throw new Error("Page screenshots are unavailable for this page surface.");
-
-  const recoveryUrl = readWebviewUrl(previousWebview) || currentUrl.value;
-  const recovery = (async () => {
-    currentUrl.value = recoveryUrl;
-    syncAddressInput(recoveryUrl);
-    detachListeners?.();
-    detachListeners = null;
-    diagnosticsHookInstall = null;
-    diagnosticsNavigationId += 1;
-    diagnosticsNetworkClearedAt = Date.now();
-    consoleBuffer.length = 0;
-    pageErrorBuffer.length = 0;
-    webviewGeneration.value += 1;
-    await nextTick();
-
-    const webview = webviewRef.value;
-    if (!webview || webview === previousWebview) {
-      throw new Error("The page surface could not be rebuilt after the screenshot timed out.");
-    }
-    detachListeners = attachWebviewListeners();
-    const deadline = Date.now() + SCREENSHOT_RECOVERY_READY_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      if (webviewRef.value !== webview) {
-        throw new Error("The recovered page surface was replaced before it became ready.");
-      }
-      try {
-        const readyState = await withTimeout(
-          Promise.resolve(webview.executeJavaScript?.("document.readyState")),
-          1000,
-          "Recovered page readiness",
-        );
-        if (!webview.isLoading?.() && (readyState === "interactive" || readyState === "complete")) {
-          void syncPageThemeToGuest(webview);
-          syncFromWebview();
-          emitStateChange();
-          return;
-        }
-      } catch {
-        // The replacement guest can reject or stall until it has attached.
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 50));
-    }
-    throw new Error("Timed out waiting for the rebuilt page surface to become ready.");
-  })();
-  screenshotHostRecovery = recovery;
-  try {
-    await recovery;
-  } finally {
-    if (screenshotHostRecovery === recovery) screenshotHostRecovery = null;
-  }
-}
-
 async function captureScreenshotAttempt(options: {
   fullPage?: boolean;
   maxWidth?: number;
@@ -1594,6 +1528,8 @@ async function captureScreenshotAttempt(options: {
   const fullPage = Boolean(options.fullPage);
   const defaultTimeoutMs = fullPage ? SCREENSHOT_FULL_PAGE_TIMEOUT_MS : SCREENSHOT_VIEWPORT_TIMEOUT_MS;
   const timeoutMs = normalizeScreenshotTimeout(options.timeoutMs ?? defaultTimeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  const remainingMs = () => Math.max(1, deadline - Date.now());
   const webContentsId = getWebContentsId();
   const captureBridge = window.electronAPI?.captureBrowserPageScreenshot;
   let note: string | undefined;
@@ -1606,7 +1542,7 @@ async function captureScreenshotAttempt(options: {
         format,
         quality,
         timeoutMs,
-      }), Math.min(timeoutMs + 1000, SCREENSHOT_MAX_TIMEOUT_MS + 1000), fullPage ? "Full-page screenshot" : "Page screenshot");
+      }), remainingMs(), fullPage ? "Full-page screenshot" : "Page screenshot");
       if (shot?.dataUrl) {
         let dataUrl = shot.dataUrl;
         let width = shot.width;
@@ -1645,7 +1581,7 @@ async function captureScreenshotAttempt(options: {
     throw new Error("This browser surface does not support screenshots.");
   }
 
-  let image = await withTimeout(webview.capturePage(), timeoutMs, "Page screenshot");
+  let image = await withTimeout(webview.capturePage(), remainingMs(), "Page screenshot");
   let size = image.getSize();
   let dataUrl = image.toDataURL();
   const converted = screenshotExceedsCaps(size.width, size.height, maxWidth) || format === "jpeg"
@@ -1681,49 +1617,11 @@ async function captureScreenshot(options: {
 } = {}): Promise<BrowserAutomationScreenshot> {
   const defaultTimeoutMs = options.fullPage ? SCREENSHOT_FULL_PAGE_TIMEOUT_MS : SCREENSHOT_VIEWPORT_TIMEOUT_MS;
   const timeoutMs = normalizeScreenshotTimeout(options.timeoutMs ?? defaultTimeoutMs);
-  const deadline = Date.now() + timeoutMs + SCREENSHOT_RECOVERY_BUDGET_MS;
-  const captureAttempt = async (attemptTimeoutMs: number) => await withTimeout(
-    captureScreenshotAttempt({ ...options, timeoutMs: attemptTimeoutMs }),
-    Math.min(attemptTimeoutMs + 1000, SCREENSHOT_MAX_TIMEOUT_MS + 1000),
+  return await withTimeout(
+    captureScreenshotAttempt({ ...options, timeoutMs }),
+    timeoutMs + 250,
     options.fullPage ? "Full-page screenshot" : "Page screenshot",
   );
-
-  try {
-    return await captureAttempt(timeoutMs);
-  } catch (error) {
-    if (!isScreenshotTimeoutError(error)) throw error;
-    console.warn("[browser-webview] screenshot timed out; rebuilding page host", { appId: props.appId });
-    const remainingMs = deadline - Date.now();
-    if (remainingMs < SCREENSHOT_MIN_TIMEOUT_MS + 2000) throw error;
-    try {
-      await withTimeout(
-        recoverPageHostAfterScreenshotTimeout(),
-        Math.min(SCREENSHOT_RECOVERY_READY_TIMEOUT_MS, remainingMs - SCREENSHOT_MIN_TIMEOUT_MS - 1000),
-        "Page host recovery",
-      );
-    } catch (recoveryError) {
-      const detail = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
-      throw new Error(`Screenshot timed out and page-host recovery failed: ${detail}`);
-    }
-
-    const retryTimeoutMs = Math.min(timeoutMs, deadline - Date.now() - 1000);
-    if (retryTimeoutMs < SCREENSHOT_MIN_TIMEOUT_MS) {
-      throw new Error("Screenshot timed out; the rebuilt page host left too little time to retry the capture.");
-    }
-    try {
-      const screenshot = await captureAttempt(retryTimeoutMs);
-      return {
-        ...screenshot,
-        note: [
-          "The page host was rebuilt after the screenshot timed out; the page was reloaded and its emulation was reset.",
-          screenshot.note,
-        ].filter(Boolean).join(" "),
-      };
-    } catch (retryError) {
-      const detail = retryError instanceof Error ? retryError.message : String(retryError);
-      throw new Error(`Screenshot failed after rebuilding the page host: ${detail}`);
-    }
-  }
 }
 
 interface WebviewLoadWaiter {
@@ -4062,7 +3960,6 @@ onUnmounted(() => {
     <div class="browser-view-stage">
       <webview
         ref="webviewRef"
-        :key="webviewGeneration"
         class="browser-view-webview"
         :style="agentViewport ? { width: `${agentViewport.width}px`, height: `${agentViewport.height}px`, flex: '0 0 auto' } : undefined"
         :src="currentUrl"

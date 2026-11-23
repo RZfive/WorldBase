@@ -526,6 +526,7 @@ mod tests {
                                 output_tokens: 10,
                                 cache_read_tokens: 0,
                                 cache_creation_tokens: 0,
+                                input_includes_cache_read: false,
                             },
                         }),
                     ])))

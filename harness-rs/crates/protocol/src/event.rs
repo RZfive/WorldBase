@@ -70,9 +70,12 @@ pub enum EventKind {
     /// 群组：成员发言。
     GroupMessage {
         member: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
         round: u32,
         content: String,
     },
+    GroupMemberFailed { agent_id: String, message: String },
     /// 群组：黑板更新。`update` is present for a first-class collaboration
     /// tool write and absent for a legacy/full-board refresh.
     BoardUpdate {
@@ -100,6 +103,8 @@ pub enum EventKind {
         output_tokens: u64,
         cache_read_tokens: u64,
         cache_creation_tokens: u64,
+        #[serde(default)]
+        input_includes_cache_read: bool,
         cost: f64,
         total_cost: f64,
         total_input_tokens: u64,
@@ -132,6 +137,7 @@ impl EventKind {
             EventKind::PermissionRequest { .. } => "permission_request",
             EventKind::AssistantMessage { .. } => "assistant_message",
             EventKind::GroupMessage { .. } => "group_message",
+            EventKind::GroupMemberFailed { .. } => "group_member_failed",
             EventKind::BoardUpdate { .. } => "board_update",
             EventKind::GroupPeerMessage { .. } => "group_peer_message",
             EventKind::GroupDirectReply { .. } => "group_direct_reply",

@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads'
 import type { ConversationMetadataPatch } from '../../shared/conversation-metadata.js'
 import { t } from '../i18n/main-i18n.js'
 import type { AIExecutionAuthMode } from './settings-store.js'
-import type { AgentGroupDirectReply, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentSidechatSession, SharedBoardSnapshot } from '../../shared/agent-workspace-types.js'
+import type { AgentGroupDirectReply, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentSidechatSession, AuthRequestPayload, RoomReplyStatus, SharedBoardSnapshot } from '../../shared/agent-workspace-types.js'
 import type { ConversationFolderWorkspaceState } from '../../shared/folder-workspace-types.js'
 
 export type ChatMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
@@ -76,7 +76,7 @@ export type ChatMessageBlock =
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }
-  | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; status: 'pending' | 'approved' | 'denied' }
+  | { id: string; kind: 'auth_request'; requestId: string; title: string; detail: string; purpose?: AuthRequestPayload['purpose']; status: 'pending' | 'approved' | 'denied' }
   | { id: string; kind: 'sudo_password_request'; requestId: string; command: string; status: 'pending' | 'submitted' | 'canceled' }
 
 export interface ChatMessage {
@@ -86,6 +86,8 @@ export interface ChatMessage {
   id?: string
   thinking?: string
   speakerName?: string
+  speakerIcon?: string
+  roomReplyStatus?: RoomReplyStatus
   modelLabel?: string
   toolRuns?: ToolRun[]
   blocks?: ChatMessageBlock[]

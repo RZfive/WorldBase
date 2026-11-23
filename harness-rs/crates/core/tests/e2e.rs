@@ -33,6 +33,7 @@ struct RepairingInvalidToolProvider {
 #[derive(Debug, Clone)]
 struct CapturedProviderRequest {
     system: Option<String>,
+    messages: Vec<LlmMessage>,
     tools: Vec<String>,
     options: ChatOptions,
 }
@@ -61,13 +62,14 @@ impl Provider for CapturingProvider {
     async fn chat_stream(
         &self,
         system: Option<&str>,
-        _messages: Vec<LlmMessage>,
+        messages: Vec<LlmMessage>,
         tools: Vec<LlmTool>,
         _max_tokens: u32,
         options: ChatOptions,
     ) -> anyhow::Result<ChunkStream> {
         self.requests.lock().unwrap().push(CapturedProviderRequest {
             system: system.map(ToOwned::to_owned),
+            messages,
             tools: tools.into_iter().map(|tool| tool.name).collect(),
             options,
         });
@@ -956,6 +958,341 @@ async fn live_ad_hoc_group_uses_member_names_for_hitl_routing() {
     })
     .await
     .expect("aborted ad-hoc group did not finish promptly");
+}
+
+#[tokio::test]
+async fn native_room_member_reads_shared_history_and_calls_host_catalog() {
+    let hub = test_hub(vec![
+        MockTurn {
+            text: String::new(),
+            tool_calls: vec![("read-room".into(), "read_room_messages".into(), serde_json::json!({}))],
+            stream_in_chunks: false,
+        },
+        MockTurn {
+            text: String::new(),
+            tool_calls: vec![("discover-cli".into(), "discover_local_agents".into(), serde_json::json!({}))],
+            stream_in_chunks: false,
+        },
+        MockTurn {
+            text: String::new(),
+            tool_calls: vec![("finish-room".into(), "finish_task".into(), serde_json::json!({
+                "task_summary": "Read room history and discovered local agents.", "status": "completed"
+            }))],
+            stream_in_chunks: false,
+        },
+    ]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    dispatch(&hub, &ctx, method::AGENT_SAVE, serde_json::json!({
+        "agent": { "id": "room_lead", "name": "Lead", "allowedTools": ["read_file"] }
+    })).await.unwrap();
+    dispatch(&hub, &ctx, method::GROUP_CREATE, serde_json::json!({
+        "sessionId": "catalog-room", "topic": "Shared room", "room": true, "mode": "coordinator_only",
+        "members": [{ "name": "Lead", "persona": "Coordinate work", "agentId": "room_lead" }]
+    })).await.unwrap();
+    dispatch(&hub, &ctx, method::GROUP_INJECT, serde_json::json!({
+        "id": "catalog-room", "content": "Earlier user instruction", "targetAgentIds": ["room_lead"]
+    })).await.unwrap();
+    let mut events = hub.event_tx.subscribe();
+    dispatch(&hub, &ctx, method::GROUP_MESSAGE, serde_json::json!({
+        "id": "catalog-room", "text": "Find a local collaborator", "memberIds": ["room_lead"],
+        "context": { "customTools": [{
+            "name": "discover_local_agents", "description": "Discover local agents",
+            "inputSchema": { "type": "object", "properties": {} }, "domain": "host", "permission": "allow"
+        }] }
+    })).await.unwrap();
+    let mut read_history = false;
+    let mut called_host = false;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = events.recv().await.unwrap();
+            match frame.kind {
+                EventKind::HostRequest { request_id, request_kind, payload } => {
+                    assert_eq!(request_kind, "tool.execute");
+                    assert_eq!(payload["name"], "discover_local_agents");
+                    called_host = true;
+                    hub.host_respond(&request_id, serde_json::json!({ "agents": [] }));
+                }
+                EventKind::ToolResult { name, content, is_error, .. } if name == "read_room_messages" => {
+                    assert!(!is_error, "{content}");
+                    read_history = content.contains("Earlier user instruction");
+                }
+                EventKind::Done { stop_reason } if frame.stream_id == "catalog-room" => {
+                    assert_eq!(stop_reason, "group_complete");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }).await.expect("room catalog run did not complete");
+    assert!(read_history);
+    assert!(called_host);
+}
+
+#[tokio::test]
+async fn cleared_room_erases_histories_and_attributed_memory() {
+    let hub = test_hub(vec![]).await;
+    let provider = Arc::new(CapturingProvider::default());
+    hub.set_custom_provider(provider.clone());
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    dispatch(&hub, &ctx, method::AGENT_SAVE, serde_json::json!({
+        "agent": { "id": "room_member", "name": "Reviewer" }
+    })).await.unwrap();
+    dispatch(&hub, &ctx, method::AGENT_GROUP_SAVE, serde_json::json!({
+        "group": { "id": "clear-test", "name": "Room", "coordinatorAgentId": "room_member" }
+    })).await.unwrap();
+    let mut create = serde_json::json!({
+        "sessionId": "room-clear-test", "logicalGroupId": "clear-test", "topic": "Room",
+        "room": true, "mode": "coordinator_only",
+        "members": [{ "name": "Reviewer", "persona": "Review results", "agentId": "room_member" }]
+    });
+    dispatch(&hub, &ctx, method::GROUP_CREATE, create.clone()).await.unwrap();
+    dispatch(&hub, &ctx, method::GROUP_INJECT, serde_json::json!({
+        "id": "room-clear-test", "content": "obsolete-shared-context", "targetAgentIds": ["room_member"]
+    })).await.unwrap();
+    dispatch(&hub, &ctx, method::CONVERSATION_SYNC, serde_json::json!({
+        "id": "group-room-clear-test-room_member", "agentId": "room_member", "title": "Old member history",
+        "messages": [{ "role": "user", "content": "obsolete-private-context" }]
+    })).await.unwrap();
+    let former_member = "group-room-clear-test-former_member";
+    dispatch(&hub, &ctx, method::CONVERSATION_SYNC, serde_json::json!({
+        "id": former_member, "agentId": "former_member", "title": "Removed member history",
+        "messages": [
+            { "role": "assistant", "content": "", "toolCalls": [
+                { "id": "save-legacy", "name": "memory_add", "args": { "content": "obsolete-legacy-memory" } }
+            ] },
+            { "role": "user", "content": "", "toolResults": [
+                { "toolCallId": "save-legacy", "name": "", "content": "{\"id\":\"obsolete-legacy-memory\",\"stored\":true}" }
+            ] }
+        ]
+    })).await.unwrap();
+    let visible_id = "visible-room-conversation";
+    let similar_room_member = "group-room-clear-test-review-room_member";
+    for (id, text) in [
+        (visible_id, "obsolete-visible-context"),
+        (similar_room_member, "unrelated-room-context"),
+        ("direct-agent-chat", "unrelated-direct-context"),
+    ] {
+        dispatch(&hub, &ctx, method::CONVERSATION_SYNC, serde_json::json!({
+            "id": id, "agentId": "room_member", "title": text,
+            "messages": [{ "role": "user", "content": text }]
+        })).await.unwrap();
+    }
+
+    let memories = [
+        ("obsolete-legacy-memory", "user", "local-user", None),
+        ("obsolete-room-memory", "group", "clear-test", None),
+        ("obsolete-project-memory", "project", "shared-project", Some(former_member)),
+        ("obsolete-visible-memory", "user", "local-user", Some(visible_id)),
+        ("unrelated-room-memory", "user", "local-user", Some(similar_room_member)),
+        ("unrelated-direct-memory", "user", "local-user", Some("direct-agent-chat")),
+        ("unrelated-group-scope", "group", "room-clear-test", None),
+    ];
+    for (id, scope_type, scope_id, source_id) in memories {
+        hub.store.save_workspace_memory(&serde_json::from_value(serde_json::json!({
+            "id": id, "title": id, "summary": id, "pinned": true,
+            "scopeType": scope_type, "scopeId": scope_id, "sourceConversationId": source_id
+        })).unwrap()).unwrap();
+    }
+    hub.store.save_compaction_checkpoint(&worldbase_memory::StoredCompactionCheckpoint {
+        id: "room-checkpoint".into(),
+        conversation_id: former_member.into(),
+        summary: "obsolete-room-checkpoint".into(),
+        knowledge_gaps_json: "[]".into(),
+        ledger_json: "{}".into(),
+        first_kept_message_id: 1,
+        last_summarized_message_id: 0,
+        history_version: 1,
+        model_slug: "mock".into(),
+        prompt_hash: String::new(),
+        tool_catalog_version: 0,
+        created_at: worldbase_protocol::event::now_rfc3339(),
+    }).unwrap();
+    let cleared = dispatch(&hub, &ctx, method::GROUP_CLEAR_CONTEXT, serde_json::json!({
+        "logicalGroupId": "clear-test", "conversationIds": [visible_id]
+    })).await.unwrap();
+    for id in ["group-room-clear-test", "group-room-clear-test-room_member", former_member, visible_id] {
+        assert!(hub.store.get_conversation(id).unwrap().is_none(), "{id} survived clear");
+    }
+    assert!(hub.store.latest_compaction_checkpoint(former_member).unwrap().is_none());
+    assert!(hub.store.get_conversation(similar_room_member).unwrap().is_some());
+    for (id, _, _, _) in memories {
+        let survives = id.starts_with("unrelated-");
+        assert_eq!(hub.store.get_workspace_memory(id).unwrap().is_some(), survives, "{id}");
+        if !survives {
+            assert!(hub.store.get_embedding_document("memory", id).unwrap().is_none());
+        }
+    }
+    let context_id = cleared["group"]["roomContextId"].as_str().unwrap();
+    let fresh_id = format!("room:{context_id}");
+    assert!(dispatch(&hub, &ctx, method::GROUP_CREATE, create.clone()).await.is_err());
+    create["sessionId"] = serde_json::json!(&fresh_id);
+    dispatch(&hub, &ctx, method::GROUP_CREATE, create).await.unwrap();
+    let mut events = hub.event_tx.subscribe();
+    dispatch(&hub, &ctx, method::GROUP_MESSAGE, serde_json::json!({
+        "id": &fresh_id, "text": "fresh-room-request", "memberIds": ["room_member"],
+        "context": { "memoryScopes": [{ "scopeType": "user", "scopeId": "local-user" }] }
+    })).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = events.recv().await.unwrap();
+            if frame.stream_id == fresh_id {
+                if let EventKind::Done { stop_reason } = frame.kind {
+                    assert_eq!(stop_reason, "group_complete");
+                    break;
+                }
+            }
+        }
+    }).await.unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    let prompt = requests[0].messages.iter().flat_map(|message| &message.content).filter_map(|block| {
+        match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        }
+    }).collect::<Vec<_>>().join("\n");
+    assert!(prompt.contains("fresh-room-request"));
+    assert!(!prompt.contains("obsolete-"));
+    let system = requests[0].system.as_deref().unwrap();
+    assert!(system.contains("unrelated-direct-memory"));
+    assert!(!system.contains("obsolete-"));
+}
+
+#[tokio::test]
+async fn deleting_room_forgets_member_tool_memory_even_in_direct_chat() {
+    let hub = test_hub(vec![
+        MockTurn {
+            text: String::new(),
+            tool_calls: vec![("remember".into(), "memory_add".into(), serde_json::json!({
+                "content": "unique room-only fact"
+            }))],
+            stream_in_chunks: false,
+        },
+        MockTurn {
+            text: String::new(),
+            tool_calls: vec![("finish".into(), "finish_task".into(), serde_json::json!({
+                "task_summary": "Saved the fact", "status": "completed"
+            }))],
+            stream_in_chunks: false,
+        },
+    ]).await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let member_id = "remembering_member";
+    let scopes = serde_json::json!([{ "scopeType": "user", "scopeId": "local-user" }]);
+    dispatch(&hub, &ctx, method::AGENT_SAVE, serde_json::json!({
+        "agent": { "id": member_id, "name": "Memory keeper" }
+    })).await.unwrap();
+    dispatch(&hub, &ctx, method::AGENT_GROUP_SAVE, serde_json::json!({
+        "group": { "id": "delete-room", "name": "Room", "coordinatorAgentId": member_id }
+    })).await.unwrap();
+    let group = dispatch(&hub, &ctx, method::GROUP_CLEAR_CONTEXT, serde_json::json!({
+        "logicalGroupId": "delete-room"
+    })).await.unwrap();
+    let native_id = format!("room:{}", group["group"]["roomContextId"].as_str().unwrap());
+    let member_conversation_id = format!("group-{native_id}-{member_id}");
+    dispatch(&hub, &ctx, method::GROUP_CREATE, serde_json::json!({
+        "sessionId": &native_id, "logicalGroupId": "delete-room", "room": true, "topic": "Room", "mode": "coordinator_only",
+        "members": [{ "agentId": member_id, "name": "Memory keeper", "persona": "Record requested facts" }]
+    })).await.unwrap();
+    let mut events = hub.event_tx.subscribe();
+    dispatch(&hub, &ctx, method::GROUP_MESSAGE, serde_json::json!({
+        "id": &native_id, "text": "Remember the fact", "context": { "memoryScopes": scopes }
+    })).await.unwrap();
+    let saved_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut saved_id = None;
+        loop {
+            let frame = events.recv().await.unwrap();
+            match frame.kind {
+                EventKind::ToolResult { name, content, is_error, .. } if name == "memory_add" => {
+                    assert!(!is_error, "{content}");
+                    let result: serde_json::Value = serde_json::from_str(&content).unwrap();
+                    saved_id = Some(result["id"].as_str().unwrap().to_owned());
+                }
+                EventKind::Done { stop_reason } if frame.stream_id == native_id => {
+                    assert_eq!(stop_reason, "group_complete");
+                    return saved_id.expect("member did not save memory");
+                }
+                _ => {}
+            }
+        }
+    }).await.unwrap();
+    let saved = hub.store.get_workspace_memory(&saved_id).unwrap().unwrap();
+    assert_eq!(saved.source_conversation_id.as_deref(), Some(member_conversation_id.as_str()));
+    assert!(saved.source_session_id.unwrap().starts_with(&format!("{native_id}:member:")));
+
+    dispatch(&hub, &ctx, method::MEMORY_SAVE, serde_json::json!({
+        "entry": { "id": "independent", "scopeType": "user", "scopeId": "local-user",
+            "title": "Independent memory", "summary": "Remember this independent fact", "pinned": true }
+    })).await.unwrap();
+    let deleted = dispatch(&hub, &ctx, method::AGENT_GROUP_DELETE, serde_json::json!({ "id": "delete-room" })).await.unwrap();
+    assert_eq!(deleted["deleted"], true);
+    assert!(hub.store.get_workspace_memory(&saved_id).unwrap().is_none());
+    assert!(hub.store.get_conversation(&member_conversation_id).unwrap().is_none());
+    assert!(hub.store.get_agent(member_id).unwrap().is_some());
+
+    let provider = Arc::new(CapturingProvider::default());
+    hub.set_custom_provider(provider.clone());
+    let direct = hub.store.create_conversation("Direct chat", Some(member_id)).unwrap();
+    let sent = dispatch(&hub, &ctx, method::CHAT_SEND, serde_json::json!({
+        "conversationId": direct.id, "text": "What do you remember?",
+        "memoryQuery": "fact", "memoryScopes": scopes
+    })).await.unwrap();
+    let stream_id = sent["streamId"].as_str().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = events.recv().await.unwrap();
+            if frame.stream_id == stream_id && matches!(frame.kind, EventKind::Done { .. }) {
+                break;
+            }
+        }
+    }).await.unwrap();
+    let requests = provider.requests();
+    let system = requests[0].system.as_deref().unwrap();
+    assert!(system.contains("Remember this independent fact"));
+    assert!(!system.contains("unique room-only fact"));
+}
+
+#[tokio::test]
+async fn room_cleanup_rejects_an_active_member_turn() {
+    let hub = test_hub(vec![]).await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    hub.set_custom_provider(Arc::new(BlockingProvider {
+        stage: BlockingProviderStage::BeforeStream,
+        started: started.clone(),
+    }));
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    let native_id = "room-busy";
+    dispatch(&hub, &ctx, method::AGENT_GROUP_SAVE, serde_json::json!({
+        "group": { "id": "busy", "name": "Busy room", "coordinatorAgentId": "reviewer" }
+    })).await.unwrap();
+    dispatch(&hub, &ctx, method::GROUP_CREATE, serde_json::json!({
+        "sessionId": native_id, "logicalGroupId": "busy", "topic": "Busy room", "room": true,
+        "mode": "coordinator_only", "members": [{"name": "Reviewer", "agentId": "reviewer", "persona": "Review"}]
+    })).await.unwrap();
+    let mut events = hub.event_tx.subscribe();
+    dispatch(&hub, &ctx, method::GROUP_MESSAGE, serde_json::json!({
+        "id": native_id, "text": "A running assignment"
+    })).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified()).await.unwrap();
+    for (method, params) in [
+        (method::GROUP_CLEAR_CONTEXT, serde_json::json!({ "logicalGroupId": "busy" })),
+        (method::AGENT_GROUP_DELETE, serde_json::json!({ "id": "busy" })),
+    ] {
+        let error = dispatch(&hub, &ctx, method, params).await.unwrap_err();
+        assert_eq!(error.code, INVALID_PARAMS);
+        assert!(error.message.contains("stop the current room run"));
+    }
+    assert_eq!(hub.store.list_messages("group-room-busy", 10).unwrap()[0].content, "A running assignment");
+    dispatch(&hub, &ctx, method::CHAT_ABORT, serde_json::json!({ "streamId": native_id })).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = events.recv().await.unwrap();
+            if frame.stream_id == native_id && matches!(frame.kind, EventKind::Done { .. }) {
+                break;
+            }
+        }
+    }).await.unwrap();
 }
 
 #[tokio::test]

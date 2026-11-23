@@ -83,6 +83,7 @@ impl Tool for MemoryAddTool {
             .find(|scope| scope.scope_type == "user" && !scope.scope_id.trim().is_empty())
             .ok_or_else(|| anyhow::anyhow!("user memory scope is not enabled for this run"))?;
         let now = worldbase_protocol::event::now_rfc3339();
+        let stream_id = services.current_stream.lock().unwrap().clone();
         let saved = services
             .store
             .save_workspace_memory(&WorkspaceMemoryEntry {
@@ -94,8 +95,8 @@ impl Tool for MemoryAddTool {
                 summary: content,
                 details: None,
                 tags: parse_tags(&input),
-                source_conversation_id: None,
-                source_session_id: None,
+                source_conversation_id: services.conversation_id.clone(),
+                source_session_id: Some(stream_id),
                 source_message_ids: Vec::new(),
                 source_text: None,
                 importance: 0.5,

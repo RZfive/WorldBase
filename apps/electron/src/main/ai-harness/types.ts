@@ -22,8 +22,8 @@ export interface ProgressCallback {
 export type StreamEvent =
   | { type: 'token'; content: string }
   | { type: 'thinking'; content: string }
-  | { type: 'tool_start'; name: string; summary?: string; filePath?: string }
-  | { type: 'tool_end'; name: string; error?: string }
+  | { type: 'tool_start'; name: string; callId?: string; summary?: string; filePath?: string }
+  | { type: 'tool_end'; name: string; callId?: string; error?: string }
   | ProgressEvent
   | { type: 'coding_status'; status: CodingStatus }
   | { type: 'coding_diff'; diff: CodingDiffState }
@@ -66,6 +66,7 @@ export interface AIRequestOptions {
   workspaceRoot?: string | null
   /** Enable the Rust coding verification gate for this run. */
   codingMode?: boolean
+  planModeActive?: boolean
   providerConfig?: AIConfigInput
   abortSignal?: AbortSignal
   conversationId?: string

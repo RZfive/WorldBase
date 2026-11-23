@@ -129,6 +129,14 @@ export function createChatAuthorizationState (options: ChatAuthorizationStateOpt
   }
 
   function handleAuthRequest (request: AuthRequestPayload): void {
+    if (request.purpose) {
+      const conversationId = resolveConversationId(request)
+      if (!conversationId || !request.sessionId || activeStreamSessionIds.get(conversationId) !== request.sessionId) {
+        window.electronAPI?.respondAuth(request.requestId, false)
+        return
+      }
+      if (conversationId !== currentConversationId.value) unreadConversationIds.add(conversationId)
+    }
     if (!trackPendingAuthRequest(request)) {
       console.warn('[chat] Ignoring auth request that could not be routed to a conversation', request)
     }
@@ -154,7 +162,10 @@ export function createChatAuthorizationState (options: ChatAuthorizationStateOpt
   }
 
   function respondToAuthRequest (requestId: string, approved: boolean): void {
-    emitAuthResolution({ requestId, approved })
+    const isRoomApproval = [...pendingAuthRequestsByConversation.values()].some(requests => {
+      return requests.some(request => request.requestId === requestId && request.purpose !== undefined)
+    })
+    if (!isRoomApproval) emitAuthResolution({ requestId, approved })
     window.electronAPI?.respondAuth(requestId, approved)
   }
 

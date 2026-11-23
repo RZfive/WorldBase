@@ -1,5 +1,5 @@
 const ELECTRON_STUB_URL = 'data:text/javascript,' + encodeURIComponent([
-  'export const app = { getLocale: () => "en-US", getPath: () => "/tmp" }',
+  'export const app = { getLocale: () => "en-US", getPath: () => "/tmp", getAppPath: () => process.cwd() }',
   'export const dialog = {}',
   'export const BrowserWindow = class {}',
   'export const ipcMain = { handle: () => {} }',

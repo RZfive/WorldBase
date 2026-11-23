@@ -1,6 +1,8 @@
 import { computed, type ComputedRef, type Ref } from 'vue'
 import type { ComposerTranslation } from 'vue-i18n'
 import type { LongTermGoalDefinition } from '../../../../shared/long-term-goal-types.js'
+import { resolveRoomAddress, ROOM_ALL_MENTIONS, ROOM_DEFAULT_MENTIONS } from '../../../../shared/group-mentions.js'
+import { roomLocalWorkerName } from '../../../../shared/local-agent-types.js'
 import {
   formatConversationSubtitle,
   getAgentIcon,
@@ -50,48 +52,8 @@ function buildSidebarSearchText (parts: Array<string | null | undefined>): strin
     .join('\n')
 }
 
-function normalizeMentionToken (value: string): string {
-  return value
-    .replace(/^@+/, '')
-    .replace(/[【】\[\]（）(){}<>《》「」『』"'“”‘’`~!?,.:;，。！？、：；]/g, '')
-    .replace(/\s+/g, '')
-    .trim()
-    .toLowerCase()
-}
-
-function resolveKnownMentionMatch (candidate: string, normalizedKnownMentions: string[]): string | null {
-  for (const token of normalizedKnownMentions) {
-    for (let endOffset = 1; endOffset <= candidate.length; endOffset++) {
-      if (normalizeMentionToken(candidate.slice(0, endOffset)) === token) return token
-    }
-  }
-  return null
-}
-
-function extractMentionTokens (value: string, knownMentions: Iterable<string> = []): string[] {
-  const normalizedKnownMentions = Array.from(new Set(Array.from(knownMentions)
-    .map(token => normalizeMentionToken(token))
-    .filter(Boolean)))
-    .sort((left, right) => right.length - left.length)
-
-  if (normalizedKnownMentions.length === 0) {
-    const matches = value.match(/@([^\s@]+)/g) || []
-    return matches.map(token => normalizeMentionToken(token))
-  }
-
-  const matches: string[] = []
-  for (let index = 0; index < value.length; index++) {
-    if (value[index] !== '@') continue
-
-    const nextAt = value.indexOf('@', index + 1)
-    const candidateEnd = nextAt >= 0 ? nextAt : value.length
-    const resolved = resolveKnownMentionMatch(value.slice(index + 1, candidateEnd), normalizedKnownMentions)
-    if (!resolved) continue
-
-    matches.push(resolved)
-    index = Math.max(index, candidateEnd - 1)
-  }
-  return matches
+function roomMemberIds (group: AgentGroupDefinition): string[] {
+  return [...new Set([group.coordinatorAgentId, ...group.memberAgentIds].filter(Boolean))]
 }
 
 export function createChatSidebarState (options: ChatSidebarStateOptions) {
@@ -186,18 +148,17 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
   const groupSidebarItems = computed<SidebarGroupItem[]>(() => {
     return availableAgentGroups.value.map((group) => {
       const conversation = getPinnedGroupConversation(conversations.value, group.id)
-      const coordinatorName = group.coordinatorAgentId
-        ? agentsById.value.get(group.coordinatorAgentId)?.name || t('chatUi.unsetCoordinatorAgent')
-        : t('chatUi.unsetCoordinatorAgent')
+      const memberIds = roomMemberIds(group)
 
       return {
         id: group.id,
         conversationId: conversation?.id || null,
         title: group.name,
-        subtitle: t('chatUi.groupSidebarSubtitle', { count: group.memberAgentIds.length, coordinator: coordinatorName }),
+        subtitle: t('chatUi.groupSidebarSubtitle', { count: memberIds.length + (group.localWorkers?.length || 0) }),
         searchText: buildSidebarSearchText([
           group.name,
-          coordinatorName,
+          ...memberIds.map(id => agentsById.value.get(id)?.name),
+          ...(group.localWorkers || []).map(worker => worker.role),
           conversation?.title,
           conversation?.previewText,
         ]),
@@ -366,7 +327,8 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
         : (currentLongTermGoal.value.progressSummary || t('chatUi.longTermGoalAutoAdvancing'))
     }
     if (currentGroupDefinition.value) {
-      return t('chatUi.groupContextDetail', { count: currentGroupDefinition.value.memberAgentIds.length })
+      const group = currentGroupDefinition.value
+      return t('chatUi.groupContextDetail', { count: roomMemberIds(group).length + (group.localWorkers?.length || 0) })
     }
     return currentModelLabel.value
   })
@@ -375,72 +337,45 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
     const group = currentGroupDefinition.value
     if (!group) return []
 
-    const hints: GroupMentionHint[] = []
-    const coordinator = group.coordinatorAgentId
-      ? agentsById.value.get(group.coordinatorAgentId) || null
-      : null
-    if (coordinator || group.coordinatorAgentId) {
-      hints.push({
-        token: '@主Agent',
-        label: coordinator?.name || t('chatUi.mainAgentFallback'),
-        aliases: [
-          '主Agent',
-          '主协调',
-          '协调Agent',
-          'coordinator',
-          'mainagent',
-          coordinator?.name || '',
-          group.coordinatorAgentId || ''
-        ].filter(Boolean)
-      })
-    }
-    hints.push({
+    const hints: GroupMentionHint[] = [{
       token: '@all',
-      label: t('chatUi.groupAllDiscussionLabel', { name: group.name }),
-      aliases: ['all', 'everyone', '全组', '全员', '全部agent', '所有agent']
-    })
+      label: t('chatUi.groupAllDiscussionLabel'),
+      aliases: ROOM_ALL_MENTIONS
+    }]
 
     const seenTokens = new Set(hints.map(item => item.token))
-    const workerMemberIds = Array.from(new Set(group.memberAgentIds.filter(memberId => memberId && memberId !== group.coordinatorAgentId)))
-    for (const memberId of workerMemberIds) {
+    for (const memberId of roomMemberIds(group)) {
       const agent = agentsById.value.get(memberId)
       const token = `@${agent?.name || memberId}`
       if (seenTokens.has(token)) continue
       seenTokens.add(token)
       hints.push({
         token,
+        agentId: memberId,
         label: agent?.name || memberId,
-        aliases: [agent?.name || '', memberId].filter(Boolean)
+        aliases: [memberId, ...(memberId === group.coordinatorAgentId ? ROOM_DEFAULT_MENTIONS : [])]
       })
+    }
+    for (const worker of group.localWorkers || []) {
+      const name = roomLocalWorkerName(worker)
+      hints.push({ token: `@${name}`, agentId: worker.id, label: name, aliases: [worker.role, worker.kind, worker.id] })
     }
     return hints
   })
 
-  function resolveAssistantSpeakerName (sourceText: string): string {
-    if (currentGroupDefinition.value) {
-      const knownMentionValues = groupMentionHints.value.flatMap(hint => [hint.token, hint.label, ...(hint.aliases || [])])
-      const mentionTokens = extractMentionTokens(sourceText, knownMentionValues)
-      const fullGroupRequested = mentionTokens.some(token => {
-        return token === 'all' || token === 'everyone' || token === '全组' || token === '全员' || token === '全部agent' || token === '所有agent'
-      })
-      const matchedLabels = Array.from(new Set(groupMentionHints.value
-        .filter((hint) => {
-          const searchableTokens = [hint.token, hint.label, ...(hint.aliases || [])]
-            .map(normalizeMentionToken)
-            .filter(Boolean)
-          return mentionTokens.some(token => searchableTokens.includes(token))
-        })
-        .map(hint => hint.label)))
-
-      if (!fullGroupRequested && matchedLabels.length === 1) return matchedLabels[0]
-
-      const coordinatorName = currentGroupDefinition.value.coordinatorAgentId
-        ? agentsById.value.get(currentGroupDefinition.value.coordinatorAgentId)?.name || ''
-        : ''
-      return coordinatorName || currentGroupDefinition.value.name
+  function resolveAssistantSpeaker (sourceText: string): { speakerName: string; speakerIcon?: string } {
+    const group = currentGroupDefinition.value
+    if (group) {
+      const workers = (group.localWorkers || []).map(worker => ({ id: worker.id, name: roomLocalWorkerName(worker), icon: '⌘' }))
+      const members = [...roomMemberIds(group).flatMap(id => agentsById.value.get(id) || []), ...workers]
+      const address = resolveRoomAddress(sourceText, members, group.coordinatorAgentId)
+      const agent = address.agentIds.length === 1 ? members.find(member => member.id === address.agentIds[0]) : undefined
+      return {
+        speakerName: agent?.name || group.name,
+        speakerIcon: agent ? getAgentIcon(agent) : getGroupIcon(group)
+      }
     }
-    if (currentAgentDefinition.value) return currentAgentDefinition.value.name
-    return 'WorldBase AI'
+    return { speakerName: currentAgentDefinition.value?.name || 'WorldBase AI' }
   }
 
   return {
@@ -464,7 +399,7 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
     longTermGoalSidebarItems,
     nonDefaultAgents,
     providersById,
-    resolveAssistantSpeakerName,
+    resolveAssistantSpeaker,
     shouldUseConversationProviderOverride
   }
 }

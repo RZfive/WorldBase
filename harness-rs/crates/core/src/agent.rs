@@ -7730,7 +7730,18 @@ async fn run_chat_inner(
             .denied_tool_names
             .push("spawn_subagentstasks".into());
     }
-    let tool_policy = run_tool_policy(&context, agent.as_ref());
+    let mut tool_policy = run_tool_policy(&context, agent.as_ref());
+    if let (Some(_), Some(allowed)) = (&group_collaboration, &mut tool_policy.allowed) {
+        allowed.insert("read_room_messages".into());
+        for tool in &context.custom_tools {
+            if matches!(
+                tool.name.as_str(),
+                "discover_local_agents" | "invite_local_agent" | "handoff_room_task"
+            ) {
+                allowed.insert(tool.name.clone());
+            }
+        }
+    }
 
     let provider_result = if req_provider_id.is_some() || req_model.is_some() {
         hub.provider_by_ids(req_provider_id.as_deref(), req_model.as_deref())
@@ -7828,7 +7839,7 @@ async fn run_chat_inner(
         catalog_custom_tools.retain(|tool| {
             !matches!(
                 tool.name.as_str(),
-                "message_agent" | "read_board" | "update_board" | "reply_to_user"
+                "message_agent" | "read_board" | "read_room_messages" | "update_board" | "reply_to_user"
             )
         });
     }
@@ -8464,16 +8475,28 @@ async fn run_chat_inner(
             .lock()
             .map(|ledger| ledger.clone())
             .unwrap_or_default();
-        let mut request_messages = crate::context::assemble_request(
-            &conversation_id,
-            checkpoint.as_ref(),
-            &ledger_snapshot,
-            &llm_messages,
-        );
-        if let Some(note) = compaction_note.drain_for_provider_request() {
-            let insert_at = request_messages.len().saturating_sub(llm_messages.len());
-            request_messages.insert(insert_at, note);
-        }
+        let note = compaction_note.drain_for_provider_request();
+        let request_messages = if provider.name() == "openai-responses" {
+            crate::context::engine::assemble_request_with_evidence_tail(
+                &conversation_id,
+                checkpoint.as_ref(),
+                &ledger_snapshot,
+                &llm_messages,
+                note,
+            )
+        } else {
+            let mut messages = crate::context::assemble_request(
+                &conversation_id,
+                checkpoint.as_ref(),
+                &ledger_snapshot,
+                &llm_messages,
+            );
+            if let Some(note) = note {
+                let insert_at = messages.len().saturating_sub(llm_messages.len());
+                messages.insert(insert_at, note);
+            }
+            messages
+        };
         let request_estimate =
             token_estimator.estimate_request(&system, &request_messages, &tools_meta);
 
@@ -8585,9 +8608,15 @@ async fn run_chat_inner(
                         let model_name = model_override.as_deref().unwrap_or(provider.model());
                         let (pin, pout, pcache) =
                             hub.model_prices(provider_entry.as_ref(), model_name);
-                        let cost = usage.input_tokens as f64 / 1_000_000.0 * pin
+                        let uncached_input_tokens = if usage.input_includes_cache_read {
+                            usage.input_tokens.saturating_sub(usage.cache_read_tokens)
+                        } else {
+                            usage.input_tokens
+                        };
+                        let cost = uncached_input_tokens as f64 / 1_000_000.0 * pin
                             + usage.output_tokens as f64 / 1_000_000.0 * pout
-                            + usage.cache_read_tokens as f64 / 1_000_000.0 * pcache;
+                            + usage.cache_read_tokens as f64 / 1_000_000.0 * pcache
+                            + usage.cache_creation_tokens as f64 / 1_000_000.0 * pin;
                         let _ = hub.store.record_usage(
                             Some(&conversation_id),
                             provider_entry.as_ref().map(|e| e.id.as_str()),
@@ -8597,7 +8626,9 @@ async fn run_chat_inner(
                             cost,
                         );
                         total_cost += cost;
-                        total_input_tokens += usage.input_tokens;
+                        total_input_tokens += uncached_input_tokens
+                            + usage.cache_read_tokens
+                            + usage.cache_creation_tokens;
                         total_output_tokens += usage.output_tokens;
                         token_estimator.calibrate_from_actual(request_estimate, usage.input_tokens);
                         publish(
@@ -8615,6 +8646,7 @@ async fn run_chat_inner(
                                 output_tokens: usage.output_tokens,
                                 cache_read_tokens: usage.cache_read_tokens,
                                 cache_creation_tokens: usage.cache_creation_tokens,
+                                input_includes_cache_read: usage.input_includes_cache_read,
                                 cost,
                                 total_cost,
                                 total_input_tokens,

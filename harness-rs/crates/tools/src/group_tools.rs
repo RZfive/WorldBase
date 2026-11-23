@@ -15,6 +15,7 @@ use std::sync::Arc;
 pub trait GroupCollaborationRuntime: Send + Sync {
     async fn message_agent(&self, target_agent_id: &str, message: &str) -> Result<String>;
     async fn read_board(&self) -> Result<Value>;
+    async fn read_room_messages(&self, before_id: i64, limit: u32) -> Result<Value>;
     async fn update_board(
         &self,
         field: &str,
@@ -75,6 +76,45 @@ impl Tool for MessageAgentTool {
 }
 
 pub struct ReadBoardTool;
+
+pub struct ReadRoomMessagesTool;
+
+#[async_trait]
+impl Tool for ReadRoomMessagesTool {
+    fn name(&self) -> &str {
+        "read_room_messages"
+    }
+
+    fn description(&self) -> &str {
+        "Read the shared discussion in this room. Use the returned beforeId to read older messages."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "beforeId": { "type": "integer", "minimum": 1 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 25 }
+            },
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(&self, input: Value, services: &ToolServices) -> Result<Value> {
+        let before_id = input
+            .get("beforeId")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MAX);
+        let limit = input
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(12)
+            .clamp(1, 25) as u32;
+        runtime(services)?
+            .read_room_messages(before_id, limit)
+            .await
+    }
+}
 
 #[async_trait]
 impl Tool for ReadBoardTool {
@@ -178,6 +218,7 @@ pub fn group_collaboration_tools() -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(MessageAgentTool),
         Arc::new(ReadBoardTool),
+        Arc::new(ReadRoomMessagesTool),
         Arc::new(UpdateBoardTool),
         Arc::new(ReplyToUserTool),
     ]

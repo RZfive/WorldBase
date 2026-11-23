@@ -9,7 +9,9 @@ import { USER_ABORT_MESSAGE } from '../../src/main/ai-harness/abort-utils.js'
 import { resolveModelPricing, type ModelPricing } from '../../src/main/ai-harness/cost-tracker.js'
 import type { MCPServerSnapshot, MCPStateSnapshot } from '../../src/main/mcp/mcp-service.js'
 import type { AIProvidersConfig, MCPServerConfig } from '../../src/main/settings/settings-store.js'
+import type { UsageRecordInput } from '../../src/main/settings/usage-store.js'
 import type { AgentDefinition, AgentGroupDefinition, MemoryEmbeddingRuntimeConfig, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
+import type { LocalAgentKind, RoomLocalWorker, RoomLocalWorkerOptions } from '../../src/shared/local-agent-types.js'
 import type { ImageStudioGenerateRequest, ImageStudioTask } from '../../src/shared/image-studio-types.js'
 import type { ToolDefinition } from '../../src/main/ai-harness/contracts.js'
 
@@ -106,6 +108,9 @@ export interface RustCustomToolRegistration {
   permission?: 'allow' | 'ask' | 'deny'
 }
 
+export type RustCustomToolDefinition = Omit<RustCustomToolRegistration, 'handler'>
+type NativeGroupToolFactory = (streamId: string, signal: AbortSignal) => RustCustomToolRegistration[]
+
 export interface RustChatOptions {
   providerId?: string
   model?: string
@@ -155,6 +160,7 @@ export interface RustNativeGroupMember {
   agentId?: string | null
   allowedToolNames?: string[]
   deniedToolNames?: string[]
+  localRuntime?: boolean
 }
 
 export interface RustNativeGroupSession extends Record<string, unknown> {
@@ -174,10 +180,13 @@ export interface RustNativeGroupRoundOptions {
   text: string
   round?: number
   memberIds?: string[]
+  memberRequests?: Record<string, string>
+  recordMessage?: boolean
   authMode?: 'strict' | 'auto'
   context?: RustChatOptions
+  customToolDefinitions?: RustCustomToolDefinition[]
   /** Build isolated Electron handlers lazily for each Rust member stream. */
-  customToolsForStream?: (streamId: string) => RustCustomToolRegistration[]
+  customToolsForStream?: NativeGroupToolFactory
   onEvent?: (frame: RustEventFrame) => void
 }
 
@@ -195,6 +204,7 @@ export interface RustHarnessClientOptions {
   /** Read the Electron MCP catalog used to configure the Rust process. */
   getMcpServers?: () => MCPServerConfig[]
   onEvent: (sessionId: string, frame: RustEventFrame) => void
+  onUsage?: (usage: UsageRecordInput) => void
   onHostRequest?: (request: RustHostRequest) => Promise<JsonRpcResult> | JsonRpcResult
   onPermissionRequest?: (request: { requestId: string; toolName: string; argsSummary: string; sessionId: string }) => Promise<boolean> | boolean
 }
@@ -239,9 +249,9 @@ export class RustHarnessClient {
   /** Electron stream session -> durable Rust group session. */
   private readonly nativeGroups = new Map<string, string>()
   /** Electron stream session -> factory for isolated native-group member tools. */
-  private readonly nativeGroupToolFactories = new Map<string, (streamId: string) => RustCustomToolRegistration[]>()
+  private readonly nativeGroupToolFactories = new Map<string, NativeGroupToolFactory>()
   /** Original Rust member stream -> its stateful Electron handler set. */
-  private readonly nativeGroupMemberTools = new Map<string, Map<string, RustCustomToolRegistration>>()
+  private readonly nativeGroupMemberTools = new Map<string, { tools: Map<string, RustCustomToolRegistration>; controller: AbortController }>()
   private readonly nativeGroupMemberStreams = new Map<string, Set<string>>()
   private modelPricing: Record<string, ModelPricing> = {}
   private availableTools: RustToolDescriptor[] = []
@@ -566,6 +576,9 @@ export class RustHarnessClient {
    * the Rust harness after this call.
    */
   async createNativeGroup (params: {
+    sessionId?: string
+    logicalGroupId?: string
+    room?: boolean
     topic: string
     mode: string
     members: RustNativeGroupMember[]
@@ -581,13 +594,17 @@ export class RustHarnessClient {
         persona: member.persona?.trim() || member.name.trim(),
         agentId: normalizeOptionalString(member.agentId),
         allowedToolNames: normalizeStringArray(member.allowedToolNames),
-        deniedToolNames: normalizeStringArray(member.deniedToolNames)
+        deniedToolNames: normalizeStringArray(member.deniedToolNames),
+        localRuntime: member.localRuntime === true
       }))
-    if (members.length < 2) throw new Error('A native Rust group requires at least two members.')
+    if (members.length === 0) throw new Error('A native Rust group requires a member.')
     await this.start()
     await this.syncSettings()
     const result = await this.request<RustNativeGroupSession>('group.create', {
       topic,
+      sessionId: normalizeOptionalString(params.sessionId),
+      logicalGroupId: normalizeOptionalString(params.logicalGroupId),
+      room: params.room === true,
       mode: params.mode || 'discussion',
       members,
       coordinator: normalizeOptionalString(params.coordinator),
@@ -603,6 +620,30 @@ export class RustHarnessClient {
     const id = groupId.trim()
     if (!id) throw new Error('A Rust group id is required.')
     return await this.call('group.get', { id }) as RustNativeGroupSession
+  }
+
+  async addNativeGroupMember (logicalGroupId: string, agentId: string, nativeGroupId?: string): Promise<{ group: AgentGroupDefinition; added: boolean; joinedLive: boolean }> {
+    return await this.call('group.add_member', {
+      id: normalizeOptionalString(nativeGroupId),
+      agentId: agentId.trim(),
+      logicalGroupId: logicalGroupId.trim()
+    }) as { group: AgentGroupDefinition; added: boolean; joinedLive: boolean }
+  }
+
+  async addRoomLocalWorker (logicalGroupId: string, kind: LocalAgentKind, options: RoomLocalWorkerOptions, nativeGroupId?: string): Promise<{ group: AgentGroupDefinition; worker: RoomLocalWorker }> {
+    return await this.call('group.add_local_worker', { ...options, logicalGroupId, kind, id: nativeGroupId }) as { group: AgentGroupDefinition; worker: RoomLocalWorker }
+  }
+
+  async removeRoomLocalWorker (logicalGroupId: string, workerId: string): Promise<{ group: AgentGroupDefinition; removed: boolean }> {
+    return await this.call('group.remove_local_worker', { logicalGroupId, workerId }) as { group: AgentGroupDefinition; removed: boolean }
+  }
+
+  async clearRoomContext (logicalGroupId: string, conversationIds?: string[]): Promise<{ group: AgentGroupDefinition; previousContextId: string | null }> {
+    return await this.call('group.clear_context', { logicalGroupId, conversationIds }) as { group: AgentGroupDefinition; previousContextId: string | null }
+  }
+
+  async recordRoomHandoff (id: string, fromAgentId: string, toAgentId: string, task: string): Promise<void> {
+    await this.callRunning('group.record_handoff', { id, fromAgentId, toAgentId, task })
   }
 
   /**
@@ -645,12 +686,12 @@ export class RustHarnessClient {
     return result.group as AgentGroupDefinition
   }
 
-  async deleteAgentGroup (id: string): Promise<boolean> {
+  async deleteAgentGroup (id: string, conversationIds?: string[]): Promise<boolean> {
     const normalizedId = id.trim()
     if (!normalizedId) throw new Error('An Agent Workspace group id is required.')
     await this.start()
     await this.syncSettings()
-    const result = await this.request<{ deleted?: unknown }>('agentGroup.delete', { id: normalizedId })
+    const result = await this.request<{ deleted?: unknown }>('agentGroup.delete', { id: normalizedId, conversationIds })
     return result?.deleted === true
   }
 
@@ -742,7 +783,9 @@ export class RustHarnessClient {
           ? Math.max(1, Math.floor(options.round))
           : undefined,
         memberIds: normalizeStringArray(options.memberIds),
-        context: nativeGroupContext(options.context)
+        memberRequests: options.memberRequests,
+        recordMessage: options.recordMessage,
+        context: nativeGroupContext(options.context, options.customToolDefinitions)
       })
       const streamId = result.streamId || result.stream_id || groupId
       if (streamId !== groupId) throw new Error('Rust group round returned an unexpected stream id.')
@@ -770,7 +813,7 @@ export class RustHarnessClient {
 
   async injectNativeGroup (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]): Promise<{ queued?: number }> {
     const expectedGroupId = this.nativeGroups.get(sessionId)
-    if (!expectedGroupId || expectedGroupId !== groupId) {
+    if (expectedGroupId && expectedGroupId !== groupId) {
       throw new Error('No active Rust group session matches this stream.')
     }
     const text = content.trim()
@@ -917,7 +960,11 @@ export class RustHarnessClient {
     // Keep the session mapping until the Rust run publishes its terminal
     // frame.  Removing it immediately races the cancellation path and makes
     // the renderer wait forever for the corresponding `done` event.
-    await this.call('chat.abort', { streamId })
+    for (const memberStreamId of this.nativeGroupMemberStreams.get(sessionId) || []) {
+      this.nativeGroupMemberTools.get(memberStreamId)?.controller.abort(new Error(USER_ABORT_MESSAGE))
+    }
+    if (this.startingSessions.has(sessionId)) this.stopRequested.add(sessionId)
+    await this.callRunning('chat.abort', { streamId })
     return true
   }
 
@@ -1142,6 +1189,7 @@ export class RustHarnessClient {
     this.sessionCustomTools.clear()
     this.nativeGroups.clear()
     this.nativeGroupToolFactories.clear()
+    for (const { controller } of this.nativeGroupMemberTools.values()) controller.abort(error)
     this.nativeGroupMemberTools.clear()
     this.nativeGroupMemberStreams.clear()
     for (const waiters of this.terminalWaiters.values()) {
@@ -1361,7 +1409,9 @@ export class RustHarnessClient {
       return
     }
     if (message.method === 'event' && message.params) {
-      this.handleEvent(message.params)
+      const frame = message.params
+      if (frame.kind === 'usage') this.recordLiveUsage(frame)
+      this.handleEvent(frame)
       return
     }
     if (message.id === undefined || message.id === null) {
@@ -1388,6 +1438,27 @@ export class RustHarnessClient {
       request.reject(new Error(message.error.message || 'Rust harness request failed'))
     } else {
       request.resolve(message.result ?? null)
+    }
+  }
+
+  private recordLiveUsage (frame: RustEventFrame): void {
+    const providerId = normalizeOptionalString(frame.providerId) || 'unknown'
+    try {
+      this.options.onUsage?.({
+        providerId,
+        providerName: normalizeOptionalString(frame.providerName) || providerId,
+        model: normalizeOptionalString(frame.model) || 'unknown',
+        timestampMs: Date.parse(frame.ts),
+        usage: {
+          prompt_tokens: frame.inputTokens,
+          completion_tokens: frame.outputTokens,
+          prompt_tokens_details: { cached_tokens: frame.cacheReadTokens },
+          cache_creation_input_tokens: frame.cacheCreationTokens,
+          input_includes_cache_read: frame.inputIncludesCacheRead
+        }
+      })
+    } catch (error) {
+      console.error('[rust-harness] Usage tracking failed:', error)
     }
   }
 
@@ -1560,14 +1631,15 @@ export class RustHarnessClient {
     streamId: string
   ): Map<string, RustCustomToolRegistration> | undefined {
     const existing = this.nativeGroupMemberTools.get(streamId)
-    if (existing) return existing
+    if (existing) return existing.tools
     const factory = this.nativeGroupToolFactories.get(sessionId)
     if (!factory) return undefined
-    const registrations = factory(streamId)
+    const controller = new AbortController()
+    const registrations = factory(streamId, controller.signal)
     const tools = new Map(registrations
       .filter(tool => Boolean(tool.definition?.name?.trim()))
       .map(tool => [tool.definition.name, tool]))
-    this.nativeGroupMemberTools.set(streamId, tools)
+    this.nativeGroupMemberTools.set(streamId, { tools, controller })
     const streams = this.nativeGroupMemberStreams.get(sessionId) || new Set<string>()
     streams.add(streamId)
     this.nativeGroupMemberStreams.set(sessionId, streams)
@@ -1575,6 +1647,7 @@ export class RustHarnessClient {
   }
 
   private releaseNativeGroupMemberTools (sessionId: string, streamId: string): void {
+    this.nativeGroupMemberTools.get(streamId)?.controller.abort(new Error(USER_ABORT_MESSAGE))
     this.nativeGroupMemberTools.delete(streamId)
     const streams = this.nativeGroupMemberStreams.get(sessionId)
     if (!streams) return
@@ -1586,7 +1659,7 @@ export class RustHarnessClient {
     this.nativeGroupToolFactories.delete(sessionId)
     const streams = this.nativeGroupMemberStreams.get(sessionId)
     if (!streams) return
-    for (const streamId of streams) this.nativeGroupMemberTools.delete(streamId)
+    for (const streamId of streams) this.releaseNativeGroupMemberTools(sessionId, streamId)
     this.nativeGroupMemberStreams.delete(sessionId)
   }
 
@@ -1767,7 +1840,7 @@ function normalizeBudgetLimit (value: unknown): number | null {
 }
 
 /** Serialize the portable portion of a chat run for Rust group members. */
-function nativeGroupContext (options?: RustChatOptions): Record<string, unknown> {
+function nativeGroupContext (options?: RustChatOptions, additionalTools: RustCustomToolDefinition[] = []): Record<string, unknown> {
   const enableThinking = options?.enableThinking
   const reasoningEffort = enableThinking === false ? undefined : options?.reasoningEffort
   return {
@@ -1775,7 +1848,7 @@ function nativeGroupContext (options?: RustChatOptions): Record<string, unknown>
     activeSkillContents: normalizeStringArray(options?.activeSkillContents),
     allowedToolNames: normalizeStringArray(options?.allowedToolNames),
     deniedToolNames: normalizeStringArray(options?.deniedToolNames),
-    customTools: (options?.customTools || []).map(toRustToolDescriptor),
+    customTools: [...(options?.customTools || []), ...additionalTools].map(toRustToolDescriptor),
     workspaceRoot: normalizeOptionalString(options?.workspaceRoot),
     targetProjectId: normalizeOptionalString(options?.targetProjectId),
     allowedMcpServerIds: normalizeMcpServerSelection(options?.allowedMcpServerIds),
@@ -1798,7 +1871,7 @@ function isValidModelPricing (value: ModelPricing): boolean {
       (Number.isFinite(value.cacheReadPerMillion) && value.cacheReadPerMillion >= 0))
 }
 
-function toRustToolDescriptor (tool: RustCustomToolRegistration): RustToolDescriptor {
+function toRustToolDescriptor (tool: RustCustomToolDefinition): RustToolDescriptor {
   return {
     name: tool.definition.name,
     description: tool.definition.description,

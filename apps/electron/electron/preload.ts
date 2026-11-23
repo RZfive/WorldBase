@@ -1,7 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { ComputerUsePermissionTarget } from '../src/shared/computer-use-permissions.js'
 import type { ConversationMetadataPatch } from '../src/shared/conversation-metadata.js'
-import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentMemoryScope, AgentSidechatSession, ChannelBinding, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../src/shared/agent-workspace-types.js'
+import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupUserInjection, AgentMemoryScope, AuthRequestPayload, ChannelBinding, ChatStreamResult, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType, RoomMemberMessage, RoomMemberStatus } from '../src/shared/agent-workspace-types.js'
+import type { LocalAgentProfile, LocalAgentSessionSummary, RoomLocalWorker, RoomLocalWorkerOptions, RoomLocalWorkspace } from '../src/shared/local-agent-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, BrowserAutomationNetworkEntry, BrowserPageContextMenuPayload, BrowserPageKeyDispatchRequest, BrowserPageKeyDispatchResult, BrowserPageScreenshotRequest, BrowserPageScreenshotResult, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
 import type { WorkspaceTabControlRequestEnvelope, WorkspaceTabControlResponseEnvelope } from '../src/shared/workspace-control-types.js'
@@ -81,9 +82,11 @@ interface AISettings {
 }
 
 interface StreamEvent {
-  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'group_collaboration_plan' | 'group_session_state' | 'group_progress' | 'group_transcript' | 'agent_sidechat' | 'group_board' | 'group_direct_reply' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'coding_status' | 'coding_diff' | 'reset' | 'done' | 'error' | 'stopped'
+  type: 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'progress' | 'todo_update' | 'file_preview_start' | 'file_preview_end' | 'room_message' | 'room_member_status' | 'group_session_state' | 'group_progress' | 'group_user_injection' | 'group_peer_message' | 'web_search_result' | 'web_fetch_result' | 'coding_status' | 'coding_diff' | 'reset' | 'done' | 'error' | 'stopped'
   content?: string
   name?: string
+  callId?: string
+  summary?: string
   message?: ChatMessage
   thinking?: string
   error?: string
@@ -99,12 +102,9 @@ interface StreamEvent {
   removed?: number
   groupId?: string
   active?: boolean
-  plan?: import('../src/shared/agent-workspace-types.js').AgentGroupCollaborationPlan
+  roomMessage?: RoomMemberMessage
+  roomMemberStatus?: RoomMemberStatus
   groupProgress?: AgentGroupProgressSnapshot
-  transcript?: AgentGroupTranscript
-  sidechat?: AgentSidechatSession
-  board?: import('../src/shared/agent-workspace-types.js').SharedBoardSnapshot
-  directReply?: import('../src/shared/agent-workspace-types.js').AgentGroupDirectReply
   injection?: AgentGroupUserInjection
   peerMessage?: import('../src/shared/agent-workspace-types.js').AgentGroupMessage
   query?: string
@@ -573,7 +573,7 @@ interface SystemStatusSnapshot {
 export interface ElectronAPI {
   // AI
   chat: (messages: ChatMessage[], providerId?: string, modelId?: string, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, targetProjectId?: string, activePageContext?: ActivePageAutomationContext, folderWorkspaceRoot?: string) => Promise<ChatMessage>
-  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext, codingWorkspaceRoot?: string) => Promise<{ ok: boolean }>
+  chatStream: (messages: ChatMessage[], sessionId: string, conversationId?: string, providerId?: string, modelId?: string, targetProjectId?: string, authMode?: AIExecutionAuthMode, reasoningStrength?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra', agentId?: string, groupId?: string, channelBindingId?: string, activePageContext?: ActivePageAutomationContext, temperature?: number, folderWorkspaceRoot?: string, computerUseEnabled?: boolean, activeTerminalContext?: ActiveTerminalContext, activeCodeContext?: ActiveCodeViewContext, codingWorkspaceRoot?: string) => Promise<ChatStreamResult>
   updateChatSessionAuthMode: (sessionId: string, authMode: AIExecutionAuthMode) => Promise<{ ok: boolean; updated: boolean }>
   stopChatStream: (sessionId: string) => Promise<{ ok: boolean; stopped: boolean }>
   injectGroupClarification: (sessionId: string, groupId: string, content: string, targetAgentIds?: string[]) => Promise<{ ok: boolean; injected: boolean; injection?: AgentGroupUserInjection; error?: string }>
@@ -632,6 +632,13 @@ export interface ElectronAPI {
   getAgentGroup: (id: string) => Promise<AgentGroupDefinition | null>
   saveAgentGroup: (group: Partial<AgentGroupDefinition>) => Promise<AgentGroupDefinition>
   deleteAgentGroup: (id: string) => Promise<boolean>
+  discoverLocalAgents: () => Promise<LocalAgentProfile[]>
+  getRoomLocalWorkspace: (groupId: string, taskDirectory?: string | null, projectId?: string | null) => Promise<RoomLocalWorkspace>
+  joinLocalAgentGroup: (agentId: string, groupId: string) => Promise<{ agent: AgentDefinition; group: AgentGroupDefinition }>
+  inviteRoomLocalWorker: (agentId: string, groupId: string, options: RoomLocalWorkerOptions) => Promise<{ worker: RoomLocalWorker; group: AgentGroupDefinition }>
+  removeRoomLocalWorker: (groupId: string, workerId: string) => Promise<{ group: AgentGroupDefinition; removed: boolean }>
+  listLocalAgentSessions: (agentId: string, workspaceRoot: string) => Promise<LocalAgentSessionSummary[]>
+  resumeLocalAgentInGroup: (agentId: string, groupId: string, sessionId: string, workspaceRoot: string) => Promise<{ agent: AgentDefinition; group: AgentGroupDefinition }>
   onAgentWorkspaceChanged: (callback: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void) => () => void
   listImConnectors: () => Promise<ConnectorDefinition[]>
   listChannelBindings: () => Promise<ChannelBinding[]>
@@ -831,7 +838,7 @@ export interface ElectronAPI {
   setMinimumWindowWidth: (minimumWidth: number) => Promise<{ success: boolean; width: number }>
 
   // Auth (in-app authorization dialogs)
-  onAuthRequest: (callback: (request: { requestId: string; conversationId?: string; sessionId?: string; title: string; detail: string }) => void) => () => void
+  onAuthRequest: (callback: (request: AuthRequestPayload) => void) => () => void
   onAuthResolved: (callback: (payload: { requestId: string; approved: boolean }) => void) => () => void
   respondAuth: (requestId: string, approved: boolean) => void
   onSudoPasswordRequest: (callback: (req: { requestId: string; conversationId?: string; sessionId?: string; command: string }) => void) => () => void
@@ -960,6 +967,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAgentGroup: (id: string) => ipcRenderer.invoke('agentGroups:get', id),
   saveAgentGroup: (group: Partial<AgentGroupDefinition>) => ipcRenderer.invoke('agentGroups:save', group),
   deleteAgentGroup: (id: string) => ipcRenderer.invoke('agentGroups:delete', id),
+  discoverLocalAgents: () => ipcRenderer.invoke('localAgents:discover'),
+  getRoomLocalWorkspace: (groupId: string, taskDirectory?: string | null, projectId?: string | null) => ipcRenderer.invoke('localAgents:roomWorkspace', groupId, taskDirectory, projectId),
+  joinLocalAgentGroup: (agentId: string, groupId: string) => ipcRenderer.invoke('localAgents:joinGroup', agentId, groupId),
+  inviteRoomLocalWorker: (agentId: string, groupId: string, options: RoomLocalWorkerOptions) => ipcRenderer.invoke('localAgents:inviteWorker', agentId, groupId, options),
+  removeRoomLocalWorker: (groupId: string, workerId: string) => ipcRenderer.invoke('localAgents:removeWorker', groupId, workerId),
+  listLocalAgentSessions: (agentId: string, workspaceRoot: string) => ipcRenderer.invoke('localAgents:listSessions', agentId, workspaceRoot),
+  resumeLocalAgentInGroup: (agentId: string, groupId: string, sessionId: string, workspaceRoot: string) => ipcRenderer.invoke('localAgents:resumeInGroup', agentId, groupId, sessionId, workspaceRoot),
   onAgentWorkspaceChanged: (callback: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => callback(event)
     ipcRenderer.on('agentWorkspace:changed', handler)
@@ -1276,8 +1290,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setMinimumWindowWidth: (minimumWidth: number) => ipcRenderer.invoke('window:setMinimumWidth', minimumWidth),
 
   // Auth (in-app authorization dialogs)
-  onAuthRequest: (callback: (request: { requestId: string; conversationId?: string; sessionId?: string; title: string; detail: string }) => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, request: { requestId: string; conversationId?: string; sessionId?: string; title: string; detail: string }) => callback(request)
+  onAuthRequest: (callback: (request: AuthRequestPayload) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, request: AuthRequestPayload) => callback(request)
     ipcRenderer.on('auth:request', handler)
     return () => { ipcRenderer.removeListener('auth:request', handler) }
   },

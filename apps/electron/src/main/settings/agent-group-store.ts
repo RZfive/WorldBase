@@ -44,6 +44,8 @@ function normalizeGroup (value: Partial<AgentGroupDefinition>, existing?: AgentG
     description: typeof value.description === 'string' ? value.description.trim() : (existing?.description || ''),
     coordinatorAgentId: typeof value.coordinatorAgentId === 'string' ? value.coordinatorAgentId.trim() : (existing?.coordinatorAgentId || ''),
     memberAgentIds: normalizeUniqueStringArray(value.memberAgentIds ?? existing?.memberAgentIds ?? []),
+    localWorkers: value.localWorkers ?? existing?.localWorkers ?? [],
+    roomContextId: value.roomContextId ?? existing?.roomContextId,
     maxRounds: Math.max(1, Math.min(5, Number(value.maxRounds ?? existing?.maxRounds ?? 2) || 2)),
     maxParallelWorkers: Math.max(1, Math.min(5, Number(value.maxParallelWorkers ?? existing?.maxParallelWorkers ?? 2) || 2)),
     sharedMemoryScopes: normalizeUniqueStringArray(value.sharedMemoryScopes ?? existing?.sharedMemoryScopes ?? ['group']).filter((item): item is AgentGroupDefinition['sharedMemoryScopes'][number] => {

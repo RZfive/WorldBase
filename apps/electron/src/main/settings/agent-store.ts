@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { t } from '../i18n/main-i18n.js'
 import type { AgentDefinition, AgentMemoryWritePolicy } from '../../shared/agent-workspace-types.js'
+const LOCAL_AGENT_RUNTIME_KEY = 'local-cli'
 
 const DEFAULT_AGENT_ID = 'agent_default'
 
@@ -154,6 +155,9 @@ export class AgentStore {
 
   save (value: Partial<AgentDefinition>): AgentDefinition {
     const existing = value.id ? this.get(value.id) : null
+    if (existing?.providerId === LOCAL_AGENT_RUNTIME_KEY) {
+      value = { ...value, providerId: LOCAL_AGENT_RUNTIME_KEY, modelId: existing?.modelId }
+    }
     const normalized = normalizeAgent(value, existing)
     fs.writeFileSync(this.filePath(normalized.id), JSON.stringify(normalized, null, 2), 'utf-8')
     return normalized

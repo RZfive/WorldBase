@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { cacheHitRate as calculateCacheHitRate, totalInputTokens } from '../../../main/settings/usage-store'
 
 /** 模型行 = 后端 UsageSummary.models 元素 + 前端补算的 cacheHitRate。 */
 interface ModelRow {
@@ -9,6 +10,7 @@ interface ModelRow {
   outputTokens: number
   cacheReadTokens: number
   cacheCreationTokens: number
+  uncachedInputTokens: number
   callCount: number
   cacheHitRate: number
 }
@@ -19,6 +21,7 @@ interface ProviderGroup {
   outputTokens: number
   cacheReadTokens: number
   cacheCreationTokens: number
+  uncachedInputTokens: number
   callCount: number
   cacheHitRate: number
   models: ModelRow[]
@@ -34,6 +37,8 @@ interface DailyRecord {
   outputTokens: number
   cacheReadTokens: number
   cacheCreationTokens: number
+  inputIncludesCacheRead?: boolean
+  knownUncachedInputTokens?: number
   callCount: number
 }
 
@@ -101,9 +106,7 @@ async function loadUsage () {
   }
 }
 
-/** 后端 UsageSummary 已含 provider 级 cacheHitRate；模型级在前端补算。 */
 function normalizeSummary (s: UsageSummary): ProviderGroup {
-  const cacheHitRate = s.inputTokens > 0 ? s.cacheReadTokens / s.inputTokens : 0
   return {
     providerId: s.providerId,
     providerName: s.providerName,
@@ -111,16 +114,18 @@ function normalizeSummary (s: UsageSummary): ProviderGroup {
     outputTokens: s.outputTokens,
     cacheReadTokens: s.cacheReadTokens,
     cacheCreationTokens: s.cacheCreationTokens,
+    uncachedInputTokens: s.uncachedInputTokens,
     callCount: s.callCount,
-    cacheHitRate: s.cacheHitRate ?? cacheHitRate,
+    cacheHitRate: calculateCacheHitRate(s.uncachedInputTokens, s.cacheReadTokens, s.cacheCreationTokens),
     models: s.models.map<ModelRow>(m => ({
       model: m.model,
       inputTokens: m.inputTokens,
       outputTokens: m.outputTokens,
       cacheReadTokens: m.cacheReadTokens,
       cacheCreationTokens: m.cacheCreationTokens,
+      uncachedInputTokens: m.uncachedInputTokens,
       callCount: m.callCount,
-      cacheHitRate: m.inputTokens > 0 ? m.cacheReadTokens / m.inputTokens : 0
+      cacheHitRate: calculateCacheHitRate(m.uncachedInputTokens, m.cacheReadTokens, m.cacheCreationTokens)
     }))
   }
 }
@@ -153,15 +158,16 @@ function fmtPercent (rate: number): string {
 }
 
 const totals = computed(() => {
-  const acc = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, calls: 0 }
+  const acc = { input: 0, uncachedInput: 0, output: 0, cacheRead: 0, cacheCreation: 0, calls: 0 }
   for (const s of summaries.value) {
     acc.input += s.inputTokens
+    acc.uncachedInput += s.uncachedInputTokens
     acc.output += s.outputTokens
     acc.cacheRead += s.cacheReadTokens
     acc.cacheCreation += s.cacheCreationTokens
     acc.calls += s.callCount
   }
-  return { ...acc, cacheHitRate: acc.input > 0 ? acc.cacheRead / acc.input : 0 }
+  return { ...acc, cacheHitRate: calculateCacheHitRate(acc.uncachedInput, acc.cacheRead, acc.cacheCreation) }
 })
 
 const rangeLabel = computed(() => {
@@ -179,7 +185,7 @@ const filteredDaily = computed(() => {
 /** 按展示粒度聚合的多系列数据（输入/输出/缓存同图，不同色）。今天按小时，7 天按两小时桶，大范围按天。 */
 const dailyChartData = computed(() => {
   const granularity = chartGranularity.value
-  const byBucket = new Map<string, { date: string; hourBucket: number; input: number; output: number; cache: number }>()
+  const byBucket = new Map<string, { date: string; hourBucket: number; input: number; uncachedInput: number; output: number; cache: number; cacheCreation: number }>()
   for (const r of filteredDaily.value) {
     // hour: 直接用记录小时(0-23)；twoHour: 聚合到 0/2/.../22；day: 不分小时。
     const hour = granularity === 'hour'
@@ -190,12 +196,18 @@ const dailyChartData = computed(() => {
     const key = granularity === 'day' ? r.date : `${r.date}#${hour}`
     let bucket = byBucket.get(key)
     if (!bucket) {
-      bucket = { date: r.date, hourBucket: hour, input: 0, output: 0, cache: 0 }
+      bucket = { date: r.date, hourBucket: hour, input: 0, uncachedInput: 0, output: 0, cache: 0, cacheCreation: 0 }
       byBucket.set(key, bucket)
     }
     bucket.input += r.inputTokens
+    bucket.uncachedInput += r.knownUncachedInputTokens ?? (r.inputIncludesCacheRead === true
+      ? Math.max(0, r.inputTokens - r.cacheReadTokens)
+      : r.inputIncludesCacheRead === false
+        ? r.inputTokens
+        : totalInputTokens(r.inputTokens, r.cacheReadTokens) - r.cacheReadTokens)
     bucket.output += r.outputTokens
     bucket.cache += r.cacheReadTokens
+    bucket.cacheCreation += r.cacheCreationTokens
   }
   return [...byBucket.values()]
     .sort((a, b) => a.date.localeCompare(b.date) || a.hourBucket - b.hourBucket)
@@ -209,8 +221,8 @@ const cacheRateChartData = computed(() => {
       providerId: s.providerId,
       providerName: s.providerName,
       cacheHitRate: s.cacheHitRate,
-      inputTokens: s.inputTokens,
-      cacheReadTokens: s.cacheReadTokens
+      cacheReadTokens: s.cacheReadTokens,
+      totalInputTokens: s.uncachedInputTokens + s.cacheReadTokens + s.cacheCreationTokens
     }))
     .sort((a, b) => b.cacheHitRate - a.cacheHitRate)
 })
@@ -336,13 +348,11 @@ const tooltipRows = computed(() => {
   if (i === null) return null
   const point = dailyChartData.value[i]
   if (!point) return null
-  const input = lineSeries.value.find(s => s.key === 'input')?.values[i] ?? 0
-  const cache = lineSeries.value.find(s => s.key === 'cache')?.values[i] ?? 0
   return {
     x: pointX(i),
     label: chartPointLabel(point),
     rows: lineSeries.value.map(s => ({ label: s.label, color: s.color, value: s.values[i] })),
-    cacheHitRate: input > 0 ? cache / input : 0
+    cacheHitRate: calculateCacheHitRate(point.uncachedInput, point.cache, point.cacheCreation)
   }
 })
 
@@ -361,17 +371,11 @@ const tooltipBox = computed(() => {
   return { x, y: LINE_CHART.pad.t + 4, w: TOOLTIP.w, h, px: data.x, label: data.label, rows: data.rows, cacheHitRate: data.cacheHitRate }
 })
 
-/** 缓存率横向条形图常量。宽度复用折线图的自适应宽度；轨道满格 = rateScaleMax。 */
+/** 缓存率横向条形图常量。宽度复用折线图的自适应宽度；轨道满格 = 100%。 */
 const RATE_CHART = { barH: 24, gap: 10, pad: { l: 130, r: 56, t: 8, b: 8 } }
 const rateChartWidth = lineChartWidth
 const rateChartInnerW = computed(() => rateChartWidth.value - RATE_CHART.pad.l - RATE_CHART.pad.r)
-// 命中率可能超过 100%（部分供应商 input 口径不含 cache read）：刻度上限自适应取
-// max(1, 最大命中率)，条形/轨道按该上限缩放，>100% 时叠加一条 100% 参考线。
-const rateScaleMax = computed(() => Math.max(1, ...cacheRateChartData.value.map(d => d.cacheHitRate)))
-const rateHasOverHundred = computed(() => rateScaleMax.value > 1.0001)
-// >100% 时顶部预留一行放 "100%" 参考标注。
-const ratePadTop = computed(() => (rateHasOverHundred.value ? RATE_CHART.pad.t + 14 : RATE_CHART.pad.t))
-const rateHundredX = computed(() => RATE_CHART.pad.l + rateChartInnerW.value / rateScaleMax.value)
+const ratePadTop = computed(() => RATE_CHART.pad.t)
 const rateChartHeight = computed(() =>
   Math.max(ratePadTop.value + RATE_CHART.pad.b + 40,
     ratePadTop.value + RATE_CHART.pad.b + cacheRateChartData.value.length * (RATE_CHART.barH + RATE_CHART.gap))
@@ -380,7 +384,7 @@ function rateBarY (index: number): number {
   return ratePadTop.value + index * (RATE_CHART.barH + RATE_CHART.gap)
 }
 function rateBarW (rate: number): number {
-  return rateChartInnerW.value * (rate / rateScaleMax.value)
+  return rateChartInnerW.value * rate
 }
 
 const providerFilterLabel = computed(() => {
@@ -559,12 +563,7 @@ onBeforeUnmount(() => {
           <h4 class="chart-title">{{ $t('settings.usage.chartCacheRate') }}</h4>
           <div v-if="cacheRateChartData.length === 0" class="chart-empty">{{ $t('settings.usage.chartEmpty') }}</div>
           <svg v-else class="rate-chart" :viewBox="`0 0 ${rateChartWidth} ${rateChartHeight}`" preserveAspectRatio="xMidYMid meet" role="img" :aria-label="$t('settings.usage.chartCacheRate')">
-            <!-- 100% reference line when the adaptive scale exceeds 100%. -->
-            <template v-if="rateHasOverHundred">
-              <line :x1="rateHundredX" :x2="rateHundredX" :y1="ratePadTop - 4" :y2="rateChartHeight - RATE_CHART.pad.b" class="rate-hundred-line" />
-              <text :x="rateHundredX" :y="ratePadTop - 8" class="rate-hundred-label" text-anchor="middle">100%</text>
-            </template>
-            <!-- Track background (full track = adaptive scale max) -->
+            <!-- Track background (full track = 100%) -->
             <rect
               v-for="(d, i) in cacheRateChartData" :key="`track-${d.providerId}`"
               :x="RATE_CHART.pad.l" :y="rateBarY(i)"
@@ -578,7 +577,7 @@ onBeforeUnmount(() => {
               :width="rateBarW(d.cacheHitRate)" :height="RATE_CHART.barH"
               class="rate-bar" :class="{ 'rate-low': d.cacheHitRate < 0.1 }" rx="4"
             >
-              <title>{{ d.providerName }} · {{ fmtPercent(d.cacheHitRate) }} ({{ fmtTokens(d.cacheReadTokens) }}/{{ fmtTokens(d.inputTokens) }})</title>
+              <title>{{ d.providerName }} · {{ fmtPercent(d.cacheHitRate) }} ({{ fmtTokens(d.cacheReadTokens) }}/{{ fmtTokens(d.totalInputTokens) }})</title>
             </rect>
             <!-- Provider name labels -->
             <text
@@ -802,10 +801,6 @@ onBeforeUnmount(() => {
 .rate-label { font-size: 11px; fill: var(--app-text-soft); }
 .rate-pct { font-size: 11px; font-weight: 600; fill: var(--app-success, #2faa5e); }
 .rate-pct.pct-low { fill: var(--app-text-muted); }
-/* >100% 时的 100% 参考线（刻度自适应后 100% 落在轨道内部）。 */
-.rate-hundred-line { stroke: var(--app-border-strong); stroke-width: 1; stroke-dasharray: 4 3; }
-.rate-hundred-label { font-size: 9px; fill: var(--app-text-faint); }
-
 .chart-empty { padding: 28px 12px; text-align: center; color: var(--app-text-muted); font-size: 0.84em; }
 .chart-range-label, .chart-hint { margin: 6px 0 0; font-size: 0.76em; color: var(--app-text-faint); }
 

@@ -1,7 +1,7 @@
 {
   "name": "the-world",
   "productName": "WorldBase",
-  "version": "1.7.4",
+  "version": "1.7.5",
   "description": "AI-powered project generator and manager",
   "license": "Apache-2.0",
   "repository": {
@@ -35,7 +35,8 @@
     "test:workspace-tab-control": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/workspace-tab-control.test.mjs",
     "test:conversation-grouping": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/conversation-grouping.test.mjs",
     "test:terminal-snapshot": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/terminal-snapshot.test.mjs",
-    "test:group-rust-routing": "node --test tests/group-rust-routing.test.mjs",
+    "test:group-rust-routing": "node --test tests/native-room-routing.test.mjs && node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/room-message-stream.test.mjs",
+    "test:local-agents": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/local-agent-group.test.mjs",
     "test:hot-bootstrap": "node scripts/build-main.mjs && node --test tests/hot-bootstrap.test.mjs",
     "test:im-rust-group-routing": "node --test tests/im-rust-group-routing.test.mjs",
     "test:image-library-mirror": "node scripts/run-electron-node-test.mjs tests/image-library-mirror.test.mjs",

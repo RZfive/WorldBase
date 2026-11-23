@@ -179,6 +179,9 @@ pub struct TokenUsage {
     pub cache_read_tokens: u64,
     #[serde(default)]
     pub cache_creation_tokens: u64,
+    /// OpenAI input includes cache reads; Anthropic reports them separately.
+    #[serde(default)]
+    pub input_includes_cache_read: bool,
 }
 
 /// 流式输出块。provider 内部累积，`Completed` 携带完整助手消息与用量。

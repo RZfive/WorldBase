@@ -661,6 +661,10 @@ pub struct AgentGroupDefinition {
     pub coordinator_agent_id: String,
     #[serde(default)]
     pub member_agent_ids: Vec<String>,
+    #[serde(default)]
+    pub local_workers: Vec<RoomLocalWorker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_context_id: Option<String>,
     #[serde(default = "default_agent_group_max_rounds")]
     pub max_rounds: u32,
     #[serde(default = "default_agent_group_parallel_workers")]
@@ -673,6 +677,18 @@ pub struct AgentGroupDefinition {
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomLocalWorker {
+    pub id: String,
+    pub kind: String,
+    pub role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
+    #[serde(default)]
+    pub exit_after_task: bool,
 }
 
 fn default_agent_group_max_rounds() -> u32 {
@@ -1369,6 +1385,8 @@ pub struct GroupMember {
     pub denied_tool_names: Vec<String>,
     #[serde(default)]
     pub provider: Option<ProviderConfig>,
+    #[serde(default)]
+    pub local_runtime: bool,
 }
 
 /// 群组会话。
@@ -1378,6 +1396,8 @@ pub struct GroupSessionMeta {
     pub id: String,
     pub topic: String,
     pub mode: GroupMode,
+    #[serde(default)]
+    pub room: bool,
     pub members: Vec<GroupMember>,
     pub created_at: String,
     #[serde(default)]

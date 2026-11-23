@@ -256,6 +256,7 @@ export interface SidebarLongTermGoalItem {
 export interface GroupMentionHint {
   token: string
   label: string
+  agentId?: string
   aliases?: string[]
 }
 
@@ -328,13 +329,7 @@ export interface UploadedAttachmentResult {
   content: string
 }
 
-export interface AuthRequestPayload {
-  requestId: string
-  conversationId?: string
-  sessionId?: string
-  title: string
-  detail: string
-}
+export type { AuthRequestPayload } from '../../../../shared/agent-workspace-types.js'
 
 export interface SudoPasswordRequestPayload {
   requestId: string

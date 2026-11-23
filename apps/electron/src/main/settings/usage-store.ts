@@ -25,6 +25,10 @@ export interface UsageRecord {
   outputTokens: number
   cacheReadTokens: number
   cacheCreationTokens: number
+  /** 原始供应商 input 是否已包含缓存读取；旧记录无此字段时兼容推断。 */
+  inputIncludesCacheRead?: boolean
+  /** 已明确协议口径的记录所对应的未缓存输入，用于跨协议精确汇总。 */
+  knownUncachedInputTokens?: number
   callCount: number
 }
 
@@ -32,6 +36,7 @@ export interface UsageRecordInput {
   providerId: string
   providerName: string
   model: string
+  timestampMs?: number
   /** 原始 usage 对象（OpenAI / Anthropic 风格均可，统一解析）。 */
   usage: Record<string, unknown> | null | undefined
 }
@@ -43,8 +48,9 @@ export interface UsageSummary {
   outputTokens: number
   cacheReadTokens: number
   cacheCreationTokens: number
+  uncachedInputTokens: number
   callCount: number
-  /** 缓存命中占输入 token 的比例 (0..1)。 */
+  /** 缓存命中占总输入 token 的比例 (0..1)，输入列保留供应商原始口径。 */
   cacheHitRate: number
   models: Array<{
     model: string
@@ -52,8 +58,29 @@ export interface UsageSummary {
     outputTokens: number
     cacheReadTokens: number
     cacheCreationTokens: number
+    uncachedInputTokens: number
     callCount: number
+    cacheHitRate: number
   }>
+}
+
+/** 旧记录未保存协议口径时的兼容推断；新记录以 inputIncludesCacheRead 为准。 */
+export function totalInputTokens (inputTokens: number, cacheReadTokens: number, cacheCreationTokens = 0): number {
+  return cacheReadTokens > inputTokens
+    ? inputTokens + cacheReadTokens + cacheCreationTokens
+    : inputTokens
+}
+
+export function cacheHitRate (uncachedInputTokens: number, cacheReadTokens: number, cacheCreationTokens = 0): number {
+  const total = uncachedInputTokens + cacheReadTokens + cacheCreationTokens
+  return total > 0 ? cacheReadTokens / total : 0
+}
+
+function uncachedInputTokens (record: Pick<UsageRecord, 'inputTokens' | 'cacheReadTokens' | 'inputIncludesCacheRead' | 'knownUncachedInputTokens'>): number {
+  if (record.knownUncachedInputTokens !== undefined) return record.knownUncachedInputTokens
+  if (record.inputIncludesCacheRead === true) return Math.max(0, record.inputTokens - record.cacheReadTokens)
+  if (record.inputIncludesCacheRead === false) return record.inputTokens
+  return totalInputTokens(record.inputTokens, record.cacheReadTokens) - record.cacheReadTokens
 }
 
 /** OpenAI 风格 usage 字段。 */
@@ -62,6 +89,7 @@ interface ParsedUsage {
   outputTokens: number
   cacheReadTokens: number
   cacheCreationTokens: number
+  inputIncludesCacheRead?: boolean
 }
 
 /**
@@ -81,18 +109,26 @@ function parseUsage (usage: Record<string, unknown> | null | undefined): ParsedU
   const outputTokens = num(usage.completion_tokens) || num(usage.output_tokens)
 
   // OpenAI: prompt_tokens_details.cached_tokens
-  const promptDetails = usage.prompt_tokens_details as Record<string, unknown> | undefined
+  const promptDetails = (usage.input_tokens_details ?? usage.prompt_tokens_details) as Record<string, unknown> | undefined
   const openaiCacheRead = promptDetails ? num(promptDetails.cached_tokens) : 0
 
   // Anthropic: cache_read_input_tokens / cache_creation_input_tokens
   const anthropicCacheRead = num(usage.cache_read_input_tokens)
   const anthropicCacheCreation = num(usage.cache_creation_input_tokens)
+  const inputIncludesCacheRead = typeof usage.input_includes_cache_read === 'boolean'
+    ? usage.input_includes_cache_read
+    : usage.prompt_tokens_details || usage.input_tokens_details
+      ? true
+      : usage.cache_read_input_tokens !== undefined || usage.cache_creation_input_tokens !== undefined
+        ? false
+        : undefined
 
   return {
     inputTokens,
     outputTokens,
     cacheReadTokens: openaiCacheRead || anthropicCacheRead,
-    cacheCreationTokens: anthropicCacheCreation
+    cacheCreationTokens: anthropicCacheCreation,
+    inputIncludesCacheRead
   }
 }
 
@@ -129,6 +165,8 @@ function normalizeRecord (value: unknown): UsageRecord | null {
     outputTokens: num(record.outputTokens),
     cacheReadTokens: num(record.cacheReadTokens),
     cacheCreationTokens: num(record.cacheCreationTokens),
+    inputIncludesCacheRead: typeof record.inputIncludesCacheRead === 'boolean' ? record.inputIncludesCacheRead : undefined,
+    knownUncachedInputTokens: typeof record.knownUncachedInputTokens === 'number' ? num(record.knownUncachedInputTokens) : undefined,
     callCount: num(record.callCount) || 1
   }
 }
@@ -202,17 +240,29 @@ export class UsageStore {
       return
     }
     const records = this.load()
-    const now = Date.now()
-    const date = dateKeyFromMs(now)
-    const hourBucket = hourBucketFromMs(now)
+    const timestampMs = typeof input.timestampMs === 'number' && Number.isFinite(input.timestampMs)
+      ? input.timestampMs
+      : Date.now()
+    const date = dateKeyFromMs(timestampMs)
+    const hourBucket = hourBucketFromMs(timestampMs)
     const existing = records.find(r =>
       r.date === date && r.hourBucket === hourBucket && r.providerId === input.providerId && r.model === input.model
     )
+    const incomingUncachedInputTokens = parsed.inputIncludesCacheRead === true
+      ? Math.max(0, parsed.inputTokens - parsed.cacheReadTokens)
+      : parsed.inputIncludesCacheRead === false
+        ? parsed.inputTokens
+        : totalInputTokens(parsed.inputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens) - parsed.cacheReadTokens
     if (existing) {
+      const previousUncachedInputTokens = uncachedInputTokens(existing)
       existing.inputTokens += parsed.inputTokens
       existing.outputTokens += parsed.outputTokens
       existing.cacheReadTokens += parsed.cacheReadTokens
       existing.cacheCreationTokens += parsed.cacheCreationTokens
+      if (existing.inputIncludesCacheRead === undefined) {
+        existing.inputIncludesCacheRead = parsed.inputIncludesCacheRead
+      }
+      existing.knownUncachedInputTokens = previousUncachedInputTokens + incomingUncachedInputTokens
       existing.callCount += 1
     } else {
       records.push({
@@ -225,6 +275,8 @@ export class UsageStore {
         outputTokens: parsed.outputTokens,
         cacheReadTokens: parsed.cacheReadTokens,
         cacheCreationTokens: parsed.cacheCreationTokens,
+        inputIncludesCacheRead: parsed.inputIncludesCacheRead,
+        knownUncachedInputTokens: incomingUncachedInputTokens,
         callCount: 1
       })
     }
@@ -253,6 +305,7 @@ export class UsageStore {
           outputTokens: 0,
           cacheReadTokens: 0,
           cacheCreationTokens: 0,
+          uncachedInputTokens: 0,
           callCount: 0,
           cacheHitRate: 0,
           models: []
@@ -263,21 +316,26 @@ export class UsageStore {
       summary.outputTokens += r.outputTokens
       summary.cacheReadTokens += r.cacheReadTokens
       summary.cacheCreationTokens += r.cacheCreationTokens
+      summary.uncachedInputTokens += uncachedInputTokens(r)
       summary.callCount += r.callCount
 
       let model = summary.models.find(m => m.model === r.model)
       if (!model) {
-        model = { model: r.model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, callCount: 0 }
+        model = { model: r.model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, uncachedInputTokens: 0, callCount: 0, cacheHitRate: 0 }
         summary.models.push(model)
       }
       model.inputTokens += r.inputTokens
       model.outputTokens += r.outputTokens
       model.cacheReadTokens += r.cacheReadTokens
       model.cacheCreationTokens += r.cacheCreationTokens
+      model.uncachedInputTokens += uncachedInputTokens(r)
       model.callCount += r.callCount
     }
     for (const summary of byProvider.values()) {
-      summary.cacheHitRate = summary.inputTokens > 0 ? summary.cacheReadTokens / summary.inputTokens : 0
+      summary.cacheHitRate = cacheHitRate(summary.uncachedInputTokens, summary.cacheReadTokens, summary.cacheCreationTokens)
+      for (const model of summary.models) {
+        model.cacheHitRate = cacheHitRate(model.uncachedInputTokens, model.cacheReadTokens, model.cacheCreationTokens)
+      }
     }
     return [...byProvider.values()].sort((a, b) => a.providerName.localeCompare(b.providerName, 'zh-CN'))
   }

@@ -53,6 +53,11 @@ pub const SCHEDULE_RUN: &str = "schedule.run";
 
 pub const GROUP_CREATE: &str = "group.create";
 pub const GROUP_GET: &str = "group.get";
+pub const GROUP_ADD_MEMBER: &str = "group.add_member";
+pub const GROUP_ADD_LOCAL_WORKER: &str = "group.add_local_worker";
+pub const GROUP_REMOVE_LOCAL_WORKER: &str = "group.remove_local_worker";
+pub const GROUP_CLEAR_CONTEXT: &str = "group.clear_context";
+pub const GROUP_RECORD_HANDOFF: &str = "group.record_handoff";
 pub const GROUP_MESSAGE: &str = "group.message";
 pub const GROUP_BLACKBOARD_ADD: &str = "group.blackboard.add";
 
@@ -231,6 +236,7 @@ pub const APPLICATION_HOST_STATE_CHANGED: &str = "application.host.state.changed
 /// 方法所属能力域。
 pub fn method_domain(method: &str) -> &'static str {
     match method {
+        GROUP_ADD_LOCAL_WORKER | GROUP_REMOVE_LOCAL_WORKER | GROUP_CLEAR_CONTEXT => "desktop",
         PROJECT_LIST
         | PROJECT_CREATE
         | PROJECT_DEV_START
@@ -315,6 +321,11 @@ pub const ALL_METHODS: &[&str] = &[
     SCHEDULE_RUN,
     GROUP_CREATE,
     GROUP_GET,
+    GROUP_ADD_MEMBER,
+    GROUP_ADD_LOCAL_WORKER,
+    GROUP_REMOVE_LOCAL_WORKER,
+    GROUP_CLEAR_CONTEXT,
+    GROUP_RECORD_HANDOFF,
     GROUP_MESSAGE,
     GROUP_BLACKBOARD_ADD,
     MCP_LIST,

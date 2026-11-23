@@ -56,6 +56,12 @@ export function collapseWhitespace (text: string): string {
   return text.replace(/\s+/g, ' ').trim()
 }
 
+const RETIRED_GROUP_BLOCKS = new Set(['group_collaboration_plan', 'group_board', 'group_transcript', 'agent_sidechat'])
+
+function isRetiredGroupBlock (block: ChatMessageBlock): boolean {
+  return RETIRED_GROUP_BLOCKS.has(block.kind) || (block.kind === 'auth_request' && Boolean(block.purpose))
+}
+
 export type WorkGroupStatus = 'running' | 'completed' | 'failed'
 
 export interface WorkGroupToolCounts {
@@ -162,7 +168,15 @@ export function buildMessageBlocks (
   isLoading: boolean
 ): ChatMessageBlock[] {
   if (Array.isArray(msg.blocks) && msg.blocks.length > 0) {
-    return msg.role === 'user' ? ensureUserTextBlocks(msg.blocks, msg.content, index) : msg.blocks
+    const visibleBlocks = msg.blocks.some(isRetiredGroupBlock) ? msg.blocks.flatMap((block): ChatMessageBlock[] => {
+      if (block.kind === 'auth_request' && block.purpose === 'room_execution') {
+        return [{ id: block.id, kind: 'content', content: block.detail }]
+      }
+      return isRetiredGroupBlock(block) ? [] : [block]
+    }) : msg.blocks
+    if (visibleBlocks.length > 0) {
+      return msg.role === 'user' ? ensureUserTextBlocks(visibleBlocks, msg.content, index) : visibleBlocks
+    }
   }
 
   const blocks: ChatMessageBlock[] = []

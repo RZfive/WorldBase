@@ -115,6 +115,7 @@ const {
   deleteLongTermGoal,
   filePreview,
   groupMentionHints,
+  roomLocalWorkers,
   groupSidebarItems,
   longTermGoalSidebarItems,
   longTermGoalSnapshot,
@@ -1360,6 +1361,10 @@ function resolveChatRunContext () {
   })
 }
 
+const roomTaskDirectory = computed(() => isGroupConversation.value
+  ? buildCurrentFolderWorkspaceState()?.rootPath ?? (targetProjectId.value ? null : resolveChatRunContext().coding.root)
+  : null)
+
 function handleChatSend (): void {
   if (isLoading.value || isUploadingFiles.value) return
 
@@ -2028,7 +2033,10 @@ watch(
             :selected-group-id="selectedGroupId"
             :active-group-session-id="activeGroupSessionId"
             :group-mention-hints="groupMentionHints"
+            :room-local-workers="roomLocalWorkers"
             :is-group-conversation="isGroupConversation"
+            :room-task-directory="roomTaskDirectory"
+            :target-project-id="targetProjectId"
             @send="handleChatSend"
             @stop="stopCurrentStream"
             @add-attachments="addAttachments"
@@ -2042,6 +2050,7 @@ watch(
             @select-all-skills="selectAllSkills"
             @clear-skills="clearSkills"
             @toggle-skill="toggleSkill"
+            @select-room-folder="folder => openWorkspaceTab('folder', folder)"
           />
           </div>
 

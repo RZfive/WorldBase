@@ -10,6 +10,7 @@ const props = defineProps<{
 
 const { t } = useI18n()
 const msg = computed(() => props.block.peerMessage)
+const isHandoff = computed(() => msg.value.kind === 'handoff')
 const requestHtml = computed(() => renderMarkdown(msg.value.request))
 const responseHtml = computed(() => renderMarkdown(msg.value.response || (msg.value.status === 'pending' ? t('chatUi.groupPeerPending') : t('chatUi.groupPeerNoReply'))))
 const statusLabel = computed(() => {
@@ -17,26 +18,29 @@ const statusLabel = computed(() => {
   if (msg.value.status === 'failed') return t('chatUi.groupStatusFailed')
   if (msg.value.status === 'timeout') return t('chatUi.groupStatusFailed')
   if (msg.value.status === 'rejected') return t('chatUi.groupStatusFailed')
-  return t('chatUi.groupStatusRunning')
+  return t(isHandoff.value ? 'chatUi.groupStatusQueued' : 'chatUi.groupStatusRunning')
 })
 </script>
 
 <template>
   <section class="peer-message-card" :class="msg.status">
     <div class="peer-message-header">
-      <span class="peer-message-badge">{{ $t('chatUi.groupPeerLabel') }}</span>
-      <span class="peer-message-route">{{ msg.fromAgentName }} → {{ msg.toAgentName }}</span>
+      <span class="peer-message-badge">{{ $t(isHandoff ? 'chatUi.groupHandoffLabel' : 'chatUi.groupPeerLabel') }}</span>
+      <span class="peer-message-route">
+        {{ msg.fromAgentName }} → <span v-if="isHandoff" class="peer-message-mention">@{{ msg.toAgentName }}</span><span v-else>{{ msg.toAgentName }}</span>
+      </span>
       <span class="peer-message-status" :data-status="msg.status">{{ statusLabel }}</span>
     </div>
     <div class="peer-message-exchange">
       <div class="peer-message-turn">
-        <div class="peer-message-turn-label">{{ msg.fromAgentName }}</div>
+        <div v-if="!isHandoff" class="peer-message-turn-label">{{ msg.fromAgentName }}</div>
         <div class="markdown-body peer-message-turn-body" v-html="requestHtml" />
       </div>
-      <div v-if="msg.response || msg.status !== 'pending'" class="peer-message-turn response">
+      <div v-if="!isHandoff && (msg.response || msg.status !== 'pending')" class="peer-message-turn response">
         <div class="peer-message-turn-label">{{ msg.toAgentName }}</div>
         <div class="markdown-body peer-message-turn-body" v-html="responseHtml" />
       </div>
+      <p v-if="isHandoff && msg.error" class="peer-message-error">{{ msg.error }}</p>
     </div>
   </section>
 </template>
@@ -74,6 +78,8 @@ const statusLabel = computed(() => {
   font-weight: 700;
   color: var(--app-text-strong);
 }
+.peer-message-mention { color: var(--app-accent-strong); }
+.peer-message-error { color: var(--app-danger); font-size: 0.8em; overflow-wrap: anywhere; }
 .peer-message-status {
   font-size: 0.68em;
   color: var(--app-text-muted);

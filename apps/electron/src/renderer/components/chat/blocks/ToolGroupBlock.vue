@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import type { RoomReplyStatus } from '../../../../shared/agent-workspace-types.js'
 import type { AnnotationAnchor, ChatMessageBlock, MessageAnnotation } from '../types'
 import {
   collapseWhitespace,
@@ -34,6 +35,7 @@ const props = withDefaults(defineProps<{
   entries: WorkBurstEntry[]
   /** Whether the owning message is the currently streaming one. */
   messageStreaming?: boolean
+  roomStatus?: RoomReplyStatus
   role?: string
   messageIndex?: number
   messageText?: string
@@ -67,6 +69,7 @@ const MAX_ACTIVITY_TEXT_LENGTH = 320
 // The parent only marks the trailing group of the streaming message as live,
 // so the whole final work row keeps its live timer until the turn settles.
 const isActive = computed(() => props.messageStreaming && props.entries.length > 0)
+const hasDetails = computed(() => props.entries.some(({ block }) => block.kind !== 'thinking' || block.text.trim()))
 
 // Status counts drive the summary color: one failed call inside a large
 // successful turn must not paint the whole trace red (see
@@ -163,7 +166,7 @@ const activityText = computed(() => {
   }
 
   const lastBlock = props.entries[props.entries.length - 1]?.block
-  if (lastBlock?.kind === 'thinking' && lastBlock.endedAt == null) {
+  if (isActive.value && lastBlock?.kind === 'thinking' && lastBlock.endedAt == null) {
     return t('chatUi.thinkingStreaming')
   }
 
@@ -194,6 +197,8 @@ const activityText = computed(() => {
 
 const statusClass = computed(() => {
   if (isActive.value) return 'running' as const
+  if (props.roomStatus === 'stopped') return 'neutral'
+  if (props.roomStatus === 'failed') return 'failed'
   return deriveWorkGroupStatus(toolCounts.value)
 })
 
@@ -202,7 +207,7 @@ const statusClass = computed(() => {
 // While the message is actively streaming, a fresh failure still pops the
 // group open once so the error is seen as it happens.
 const shouldAutoExpand = computed(() => {
-  return props.messageStreaming &&
+  return !props.roomStatus && props.messageStreaming &&
     props.entries.some(({ block }) => block.kind === 'tool' && block.toolRun.status === 'failed')
 })
 
@@ -238,6 +243,7 @@ function isInnerContentStreaming (block: ContentBlockModel, index: number): bool
     :title="elapsedLabel ? $t('chatUi.workingElapsed', { time: elapsedLabel }) : $t('chatUi.workSummaryShort')"
     :status="statusClass"
     :default-expanded="shouldAutoExpand"
+    :collapse-on-settle="Boolean(props.roomStatus)"
     class="tool-group"
   >
     <template #meta>
@@ -245,60 +251,62 @@ function isInnerContentStreaming (block: ContentBlockModel, index: number): bool
       <WorkActivityTicker class="tool-group-ticker" :text="activityText" :active="isActive" />
     </template>
 
-    <div class="tool-group-body">
-      <template v-for="(entry, index) in props.entries" :key="entry.block.id">
-        <ThinkingBlock
-          v-if="entry.block.kind === 'thinking'"
-          :block="entry.block"
-          :is-streaming="isInnerThinkingStreaming(entry.block, index)"
-          :is-collapsed="isThinkingCollapsed(entry.block)"
-          class="tool-group-item"
-          @toggle="toggleThinking(entry.block.id)"
-        />
-        <WebSearchBlock
-          v-else-if="entry.block.kind === 'web_search'"
-          :block="entry.block"
-          class="tool-group-item"
-        />
-        <WebFetchBlock
-          v-else-if="entry.block.kind === 'web_fetch'"
-          :block="entry.block"
-          class="tool-group-item"
-        />
-        <FilePreviewBlock
-          v-else-if="entry.block.kind === 'file_preview'"
-          :block="entry.block"
-          class="tool-group-item"
-        />
-        <!-- ContentBlock has a fragment root (output + teleport), so it cannot
-             inherit the narration class directly; wrap it to keep the muted
-             trace styling. -->
-        <div
-          v-else-if="entry.block.kind === 'content'"
-          class="tool-group-item tool-group-narration"
-        >
-          <ContentBlock
+    <template v-if="hasDetails" #default>
+      <div class="tool-group-body">
+        <template v-for="(entry, index) in props.entries" :key="entry.block.id">
+          <ThinkingBlock
+            v-if="entry.block.kind === 'thinking' && entry.block.text.trim()"
             :block="entry.block"
-            :role="role"
-            :message-index="messageIndex"
-            :block-index="entry.blockIndex"
-            :is-streaming-block="isInnerContentStreaming(entry.block, index)"
-            :message-text="messageText"
-            :annotations="annotations"
-            @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
-            @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
-            @remove-annotation="(annotationId) => emit('removeAnnotation', annotationId)"
-            @open-annotation-thread="(payload) => emit('openAnnotationThread', payload)"
+            :is-streaming="isInnerThinkingStreaming(entry.block, index)"
+            :is-collapsed="isThinkingCollapsed(entry.block)"
+            class="tool-group-item"
+            @toggle="toggleThinking(entry.block.id)"
           />
-        </div>
-        <ToolRunBlock
-          v-else
-          :block="entry.block"
-          class="tool-group-item"
-          @open-file-path="filePath => emit('openFilePath', filePath)"
-        />
-      </template>
-    </div>
+          <WebSearchBlock
+            v-else-if="entry.block.kind === 'web_search'"
+            :block="entry.block"
+            class="tool-group-item"
+          />
+          <WebFetchBlock
+            v-else-if="entry.block.kind === 'web_fetch'"
+            :block="entry.block"
+            class="tool-group-item"
+          />
+          <FilePreviewBlock
+            v-else-if="entry.block.kind === 'file_preview'"
+            :block="entry.block"
+            class="tool-group-item"
+          />
+          <!-- ContentBlock has a fragment root (output + teleport), so it cannot
+               inherit the narration class directly; wrap it to keep the muted
+               trace styling. -->
+          <div
+            v-else-if="entry.block.kind === 'content'"
+            class="tool-group-item tool-group-narration"
+          >
+            <ContentBlock
+              :block="entry.block"
+              :role="role"
+              :message-index="messageIndex"
+              :block-index="entry.blockIndex"
+              :is-streaming-block="isInnerContentStreaming(entry.block, index)"
+              :message-text="messageText"
+              :annotations="annotations"
+              @open-lightbox="(mi, bi, pi) => emit('openLightbox', mi, bi, pi)"
+              @open-mermaid-preview="(code) => emit('openMermaidPreview', code)"
+              @remove-annotation="(annotationId) => emit('removeAnnotation', annotationId)"
+              @open-annotation-thread="(payload) => emit('openAnnotationThread', payload)"
+            />
+          </div>
+          <ToolRunBlock
+            v-else-if="entry.block.kind === 'tool'"
+            :block="entry.block"
+            class="tool-group-item"
+            @open-file-path="filePath => emit('openFilePath', filePath)"
+          />
+        </template>
+      </div>
+    </template>
   </ExecutionDisclosure>
 </template>
 

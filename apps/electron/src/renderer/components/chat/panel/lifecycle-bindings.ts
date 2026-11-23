@@ -31,6 +31,7 @@ interface ChatLifecycleBindingsOptions {
   handleAuthResolution: (payload: AuthResolutionPayload) => void
   loadSkills: () => Promise<void>
   loadAgentWorkspaceOptions: () => Promise<void>
+  onRoomHistoryRemoved: (groupId: string, deleted: boolean) => Promise<void>
   loadLongTermGoals: () => Promise<void>
   loadLongTermGoalSnapshot: (goalId?: string | null) => Promise<void>
   mergeGoalTitleState: (incomingGoal: LongTermGoalDefinition, existingGoal?: LongTermGoalDefinition) => LongTermGoalDefinition
@@ -55,6 +56,7 @@ export function ensureSharedChatPanelLifecycleBindings (options: ChatLifecycleBi
     handleAuthResolution,
     loadSkills,
     loadAgentWorkspaceOptions,
+    onRoomHistoryRemoved,
     loadLongTermGoals,
     loadLongTermGoalSnapshot,
     mergeGoalTitleState
@@ -94,7 +96,10 @@ export function ensureSharedChatPanelLifecycleBindings (options: ChatLifecycleBi
       })
     }
     if (window.electronAPI?.onAgentWorkspaceChanged) {
-      lifecycle.agentWorkspaceChangeCleanup = window.electronAPI.onAgentWorkspaceChanged(() => {
+      lifecycle.agentWorkspaceChangeCleanup = window.electronAPI.onAgentWorkspaceChanged(event => {
+        if (event.entity === 'group' && event.id && (event.action === 'cleared' || event.action === 'deleted')) {
+          void onRoomHistoryRemoved(event.id, event.action === 'deleted')
+        }
         void loadAgentWorkspaceOptions()
       })
     }

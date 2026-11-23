@@ -16,21 +16,13 @@ const STUBS = {
   './agent-context.js': `
     export function resolveAgentRuntimeContext() { return globalThis.${STATE_KEY}.runtimeContext }
   `,
-  './group-deliberation.js': `
-    export function parseGroupRouting(_group, text) {
-      globalThis.${STATE_KEY}.routingInputs.push(text)
-      return globalThis.${STATE_KEY}.routing
+  './native-rust-room.js': `
+    export function formatRoomReplies(replies) {
+      return replies.map(reply => reply.speakerName + ':\\n' + reply.content).join('\\n\\n')
     }
-    export function resolveDirectGroupReplyRoute() { return null }
-    export function buildDirectGroupReplyPromptSection() { return 'direct group reply' }
-    export async function buildGroupDeliberationSection() {
-      throw new Error('TypeScript GroupSession path must not run in Rust mode')
-    }
-  `,
-  './native-rust-group-deliberation.js': `
-    export async function buildNativeRustGroupDeliberation(input) {
+    export async function runNativeRoom(input) {
       globalThis.${STATE_KEY}.nativeCalls.push(input)
-      return { promptSection: 'native Rust group notes', transcript: null }
+      return [{ speakerName: 'Coordinator', content: 'First reply' }, { speakerName: 'Member', content: 'Second reply' }]
     }
   `,
   './selected-execution-engine.js': `
@@ -73,7 +65,7 @@ async function loadModule () {
   return await modulePromise
 }
 
-test('Rust-selected IM group replies use the native Rust group adapter', async () => {
+test('an IM room returns the member replies without a coordinator synthesis turn', async () => {
   const agents = new Map([
     ['coordinator', { id: 'coordinator', name: 'Coordinator' }],
     ['member', { id: 'member', name: 'Member' }]
@@ -84,22 +76,10 @@ test('Rust-selected IM group replies use the native Rust group adapter', async (
     coordinatorAgentId: 'coordinator',
     memberAgentIds: ['member']
   }
-  const replyCalls = []
-  const memoryCalls = []
   globalThis[STATE_KEY] = {
-    routingInputs: [],
     nativeCalls: [],
-    routing: {
-      mode: 'discussion',
-      selectedMemberIds: ['member'],
-      mentionedMemberIds: [],
-      normalizedRequest: 'Review the deployment plan.'
-    },
     rustHarnessEngine: {
-      async chat (_messages, options) {
-        replyCalls.push(options)
-        return { role: 'assistant', content: 'Rust IM reply' }
-      }
+      async chat () { assert.fail('IM must not pass the room replies through a second model call') }
     },
     runtimeContext: {
       agent: agents.get('coordinator'),
@@ -114,12 +94,9 @@ test('Rust-selected IM group replies use the native Rust group adapter', async (
       memoryScopeTypes: []
     },
     mainState: {
-      aiEngine: {
-        async chat () { throw new Error('TypeScript AI engine must not run in Rust mode') }
-      },
       rustHarness: {
         native: true,
-        async ingestMemory (input) { memoryCalls.push(input) }
+        async ingestMemory () { assert.fail('Room answers must not be attributed to the default member as a group summary') }
       },
       agentStore: { get: id => agents.get(id) }
     }
@@ -139,18 +116,17 @@ test('Rust-selected IM group replies use the native Rust group adapter', async (
     messageId: 'message-1',
     senderId: 'user-1',
     senderName: 'External User',
-    text: 'Review the deployment plan.'
+    text: '@all Review the deployment plan.'
   })
 
-  assert.equal(reply, 'Rust IM reply')
+  assert.equal(reply, 'Coordinator:\nFirst reply\n\nMember:\nSecond reply')
   assert.equal(globalThis[STATE_KEY].nativeCalls.length, 1)
   assert.equal(globalThis[STATE_KEY].nativeCalls[0].client.native, true)
   assert.deepEqual(globalThis[STATE_KEY].nativeCalls[0].agents.map(agent => agent.id), ['coordinator', 'member'])
   assert.equal(globalThis[STATE_KEY].nativeCalls[0].context.targetProjectId, 'project-im')
-  assert.deepEqual(globalThis[STATE_KEY].nativeCalls[0].context.systemPromptSections, ['## Channel context'])
-  assert.match(globalThis[STATE_KEY].nativeCalls[0].sessionId, /^im-rust-group-binding-1-message-1-/)
-  assert.equal(globalThis[STATE_KEY].routingInputs.length, 1)
-  assert.match(replyCalls[0].systemPromptSections.at(-1), /native Rust group notes/)
-  assert.equal(memoryCalls.length, 1)
-  assert.equal(memoryCalls[0].finalAssistantText, 'Rust IM reply')
+  assert.equal(globalThis[STATE_KEY].nativeCalls[0].context.systemPromptSections[0], '## Channel context')
+  assert.equal(globalThis[STATE_KEY].nativeCalls[0].context.authMode, 'strict')
+  assert.equal(globalThis[STATE_KEY].nativeCalls[0].requestWorkspaceApproval, undefined)
+  assert.match(globalThis[STATE_KEY].nativeCalls[0].sessionId, /^im-rust-room-binding-1-message-1-/)
+  assert.match(globalThis[STATE_KEY].nativeCalls[0].messages[0].content, /@all Review the deployment plan\.$/)
 })

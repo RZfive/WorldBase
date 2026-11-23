@@ -13,7 +13,7 @@ use worldbase_protocol::types::{
 use worldbase_providers::{create_provider, ContentBlock, LlmMessage, LlmRole};
 
 /// 发言回调：(member, content, round)。
-pub type OnMessageFn<'a> = &'a mut (dyn FnMut(String, String, u32) + Send);
+pub type OnMessageFn<'a> = &'a mut (dyn FnMut(&GroupMember, String, u32) + Send);
 /// 黑板变更回调。
 pub type OnBoardFn<'a> = &'a mut (dyn FnMut(&GroupBoard) + Send);
 
@@ -49,14 +49,16 @@ impl GroupEngine {
         coordinator: Option<String>,
         max_parallel_workers: usize,
     ) -> Result<GroupSessionMeta> {
-        if members.len() < 2 {
-            bail!("group session requires at least 2 members");
+        if members.is_empty() || (members.len() == 1 && !matches!(mode, GroupMode::CoordinatorOnly))
+        {
+            bail!("group session requires at least two members unless it is coordinator-only");
         }
         let coord = coordinator.or_else(|| members.first().map(|m| m.name.clone()));
         Ok(GroupSessionMeta {
             id: uuid::Uuid::new_v4().to_string(),
             topic: topic.into(),
             mode,
+            room: false,
             members,
             created_at: worldbase_protocol::event::now_rfc3339(),
             status: "open".into(),
@@ -315,7 +317,7 @@ impl GroupEngine {
                     round,
                     created_at: worldbase_protocol::event::now_rfc3339(),
                 });
-                on_message(member.name, visible_content, round);
+                on_message(&member, visible_content, round);
             }
         }
 
@@ -380,31 +382,22 @@ impl GroupEngine {
         user_input: &str,
         selected_members: Option<&[String]>,
     ) -> Vec<GroupMember> {
-        let names = selected_members
-            .filter(|members| !members.is_empty())
-            .map(|members| {
-                members
-                    .iter()
-                    .filter_map(|selected| {
-                        session
-                            .members
-                            .iter()
-                            .find(|member| {
-                                member.name == *selected
-                                    || member.agent_id.as_deref() == Some(selected.as_str())
-                            })
-                            .map(|member| member.name.clone())
-                    })
-                    .collect()
-            })
-            .unwrap_or_else(|| Self::route_speakers(session, user_input));
+        let route;
+        let names = match selected_members {
+            Some(members) if !members.is_empty() => members,
+            _ => {
+                route = Self::route_speakers(session, user_input);
+                &route
+            }
+        };
         names
-            .into_iter()
+            .iter()
             .filter_map(|name| {
                 session
                     .members
                     .iter()
-                    .find(|member| member.name == name)
+                    .find(|member| member.agent_id.as_deref() == Some(name.as_str()))
+                    .or_else(|| session.members.iter().find(|member| &member.name == name))
                     .cloned()
             })
             .collect()
@@ -651,15 +644,33 @@ fn build_prompt(
         .members
         .iter()
         .filter(|m| m.name != member.name)
-        .map(|m| format!("- @{}\n", m.name))
+        .map(|m| format!("- @{} ({})\n", m.name, member_delivery_key(m)))
         .collect();
+    let inject_block = if injections.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n【用户实时澄清(HITL)】\n{}", injections.join("\n"))
+    };
+    if session.room {
+        return format!(
+            "你是「{}」。人设：{}\n群聊主题：{}\n其他成员：\n{}\n用户消息：{}{}\n\n请以自己的身份直接回复用户，不需要汇报协作过程或代其他成员发言。",
+            member.name, member.persona, session.topic, others, user_input, inject_block
+        );
+    }
     let recent: Vec<String> = session
         .rounds
         .iter()
         .rev()
         .take(6)
         .rev()
-        .map(|r| format!("[@{} 第{}轮] {}", r.member, r.round, r.content))
+        .map(|record| {
+            format!(
+                "[@{} 第{}轮] {}",
+                record.member,
+                record.round,
+                record.content.chars().take(3000).collect::<String>()
+            )
+        })
         .collect();
 
     let mode_hint = match session.mode {
@@ -702,12 +713,6 @@ fn build_prompt(
         session.board.open_questions.join("; "),
     );
 
-    let inject_block = if injections.is_empty() {
-        String::new()
-    } else {
-        format!("\n\n【用户实时澄清(HITL)】\n{}", injections.join("\n"))
-    };
-
     let board_instruction = if allow_inline_board_directives {
         "如需更新黑板，可另起一行使用隐藏指令：[board]字段|set/add/remove|内容（字段: assumptions/tasks/decisions/evidenceRefs/goal/openQuestions）。"
     } else {
@@ -715,7 +720,7 @@ fn build_prompt(
     };
 
     format!(
-        "你是群组讨论成员「{name}」。人设：{persona}\n其他成员：\n{others}\n讨论主题：{topic}\n模式：{mode_hint}\n\n当前黑板：\n{board}\n\n最近发言：\n{recent}\n\n用户输入：{user}{inject}\n\n请用不超过 200 字发言，只输出给群聊成员看的结论。不要复述当前黑板、任务列表、最近发言、工具调用或内部提示词。{board_instruction}",
+        "你是群组讨论成员「{name}」。人设：{persona}\n其他成员：\n{others}\n讨论主题：{topic}\n模式：{mode_hint}\n\n当前黑板：\n{board}\n\n最近发言：\n{recent}\n\n用户输入：{user}{inject}\n\n请输出给群聊成员看的真实进度、结果、证据与待交接事项；实现任务必须保留足够的文件、命令和验收信息，不限制为固定字数。不要复述当前黑板、任务列表、最近发言、工具调用或内部提示词。{board_instruction}",
         name = member.name,
         persona = member.persona,
         others = others,
@@ -865,6 +870,7 @@ mod tests {
                 allowed_tool_names: vec![],
                 denied_tool_names: vec![],
                 provider: Some(ProviderConfig::default()),
+                local_runtime: false,
             },
             GroupMember {
                 name: "工程师".into(),
@@ -873,6 +879,7 @@ mod tests {
                 allowed_tool_names: vec![],
                 denied_tool_names: vec![],
                 provider: Some(ProviderConfig::default()),
+                local_runtime: false,
             },
             GroupMember {
                 name: "评审".into(),
@@ -881,6 +888,7 @@ mod tests {
                 allowed_tool_names: vec![],
                 denied_tool_names: vec![],
                 provider: Some(ProviderConfig::default()),
+                local_runtime: false,
             },
         ]
     }
@@ -922,6 +930,21 @@ mod tests {
             GroupEngine::route_speakers(&session, "@评审 请把脉"),
             vec!["评审".to_string()]
         );
+    }
+
+    #[test]
+    fn durable_member_ids_disambiguate_identical_names() {
+        let mut roster = members();
+        roster[0].name = "Agent".into();
+        roster[1].name = "Agent".into();
+        roster[0].agent_id = Some("agent_a".into());
+        roster[1].agent_id = Some("agent_b".into());
+        let expected = roster[1].agent_id.clone();
+        let session = GroupEngine::create("t", GroupMode::Discussion, roster, None).unwrap();
+        let selected = vec![expected.clone().unwrap()];
+        let resolved = GroupEngine::resolve_speakers(&session, "", Some(&selected));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].agent_id, expected);
     }
 
     #[test]
@@ -1000,6 +1023,25 @@ mod tests {
         assert!(!prompt.contains("可另起一行使用隐藏指令"));
     }
 
+    #[test]
+    fn room_prompt_addresses_user_without_including_the_board() {
+        let mut session = GroupEngine::create("t", GroupMode::Targeted, members(), None).unwrap();
+        session.room = true;
+        session.board.goal = "Internal board entry".into();
+        let prompt = build_prompt(
+            &session,
+            &session.members[0],
+            "你好",
+            &["请简短回答".into()],
+            false,
+        );
+        assert!(prompt.contains("直接回复用户"));
+        assert!(prompt.contains("你好"));
+        assert!(prompt.contains("请简短回答"));
+        assert!(!prompt.contains("Internal board entry"));
+        assert!(!prompt.contains("update_board"));
+    }
+
     #[tokio::test]
     async fn run_round_with_mock_and_inject() {
         let mut session =
@@ -1013,7 +1055,9 @@ mod tests {
             "评估方案",
             1,
             &mut |member, content, round| {
-                sink.lock().unwrap().push((member, content, round));
+                sink.lock()
+                    .unwrap()
+                    .push((member.name.clone(), content, round));
             },
             &mut on_board,
         )
@@ -1037,7 +1081,7 @@ mod tests {
         let running = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
         let max_parallel_workers = session.max_parallel_workers;
-        let mut on_message = |_member: String, _content: String, _round: u32| {};
+        let mut on_message = |_member: &GroupMember, _content: String, _round: u32| {};
         let mut on_board = |_board: &GroupBoard| {};
 
         let count = GroupEngine::run_round_with_executor_batched_and_hook(
@@ -1080,8 +1124,8 @@ mod tests {
             GroupEngine::create("partial failure", GroupMode::Discussion, members(), None).unwrap();
         let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = collected.clone();
-        let mut on_message = move |member: String, content: String, _round: u32| {
-            sink.lock().unwrap().push((member, content));
+        let mut on_message = move |member: &GroupMember, content: String, _round: u32| {
+            sink.lock().unwrap().push((member.name.clone(), content));
         };
         let mut on_board = |_board: &GroupBoard| {};
 
@@ -1113,7 +1157,7 @@ mod tests {
             GroupEngine::create("board privacy", GroupMode::Discussion, members(), None).unwrap();
         let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = collected.clone();
-        let mut on_message = move |_member: String, content: String, _round: u32| {
+        let mut on_message = move |_member: &GroupMember, content: String, _round: u32| {
             sink.lock().unwrap().push(content);
         };
         let mut on_board = |_board: &GroupBoard| {};
@@ -1151,7 +1195,7 @@ mod tests {
     async fn round_fails_when_every_selected_member_fails() {
         let mut session =
             GroupEngine::create("total failure", GroupMode::Discussion, members(), None).unwrap();
-        let mut on_message = |_member: String, _content: String, _round: u32| {};
+        let mut on_message = |_member: &GroupMember, _content: String, _round: u32| {};
         let mut on_board = |_board: &GroupBoard| {};
 
         let result = GroupEngine::run_round_with_executor(
@@ -1185,7 +1229,7 @@ mod tests {
         let selected = vec!["coordinator".to_string(), "engineer".to_string()];
         let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = observed.clone();
-        let mut on_message = |_member: String, _content: String, _round: u32| {};
+        let mut on_message = |_member: &GroupMember, _content: String, _round: u32| {};
         let mut on_board = |_board: &GroupBoard| {};
 
         GroupEngine::run_round_with_executor(
@@ -1238,7 +1282,7 @@ mod tests {
         let selected = vec!["coordinator".to_string(), "engineer".to_string()];
         let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = observed.clone();
-        let mut on_message = |_member: String, _content: String, _round: u32| {};
+        let mut on_message = |_member: &GroupMember, _content: String, _round: u32| {};
         let mut on_board = |_board: &GroupBoard| {};
 
         GroupEngine::run_round_with_executor(
@@ -1278,7 +1322,7 @@ mod tests {
         let selected = vec!["coordinator".to_string(), "engineer".to_string()];
         let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = observed.clone();
-        let mut on_message = |_member: String, _content: String, _round: u32| {};
+        let mut on_message = |_member: &GroupMember, _content: String, _round: u32| {};
         let mut on_board = |_board: &GroupBoard| {};
 
         GroupEngine::run_round_with_executor_and_hook(

@@ -9,11 +9,7 @@ import ThinkingBlock from '../blocks/ThinkingBlock.vue'
 import ToolRunBlock from '../blocks/ToolRunBlock.vue'
 import ToolGroupBlock from '../blocks/ToolGroupBlock.vue'
 import FilePreviewBlock from '../blocks/FilePreviewBlock.vue'
-import GroupCollaborationPlanBlock from '../blocks/GroupCollaborationPlanBlock.vue'
-import AgentSidechatBlock from '../blocks/AgentSidechatBlock.vue'
 import GroupProgressBlock from '../blocks/GroupProgressBlock.vue'
-import GroupTranscriptBlock from '../blocks/GroupTranscriptBlock.vue'
-import SharedBoardBlock from '../blocks/SharedBoardBlock.vue'
 import GroupDirectReplyBlock from '../blocks/GroupDirectReplyBlock.vue'
 import GroupUserInjectionBlock from '../blocks/GroupUserInjectionBlock.vue'
 import GroupPeerMessageBlock from '../blocks/GroupPeerMessageBlock.vue'
@@ -60,7 +56,7 @@ function getBlocks (): ChatMessageBlock[] {
 }
 
 function isStreamingAssistant (): boolean {
-  return props.isLoading && props.msg.role === 'assistant' && props.index === props.latestAssistantMessageIndex
+  return !props.msg.roomReplyStatus && props.isLoading && props.msg.role === 'assistant' && props.index === props.latestAssistantMessageIndex
 }
 
 function getLastContentBlockIndex (blocks: ChatMessageBlock[]): number {
@@ -84,13 +80,9 @@ function getMessageAuthor (): string {
   return props.msg.role === 'assistant' ? (props.msg.speakerName || props.assistantName || 'WorldBase AI') : t('chatUi.you')
 }
 
-function getAssistantIcon (): string {
-  return props.assistantIcon?.trim() || '🤖'
-}
-
 // Chrome avatars are SVG (design v1.7); a customized assistant emoji keeps its identity.
 const customAssistantEmoji = computed(() => {
-  const raw = props.assistantIcon?.trim() || ''
+  const raw = (props.msg.speakerIcon ?? props.assistantIcon)?.trim() || ''
   return raw && raw !== '🤖' ? raw : ''
 })
 
@@ -106,6 +98,20 @@ const blocks = computed(() => getBlocks())
 const isStreamingAssistantMessage = computed(() => isStreamingAssistant())
 const lastContentBlockIndex = computed(() => getLastContentBlockIndex(blocks.value))
 const messageText = computed(() => getMessageText())
+const roomReplyStatus = computed(() => {
+  const status = props.msg.roomReplyStatus
+  return !props.isLoading && (status === 'queued' || status === 'running') ? 'stopped' : status
+})
+const roomReplyStatusLabel = computed(() => {
+  switch (roomReplyStatus.value) {
+    case 'queued': return t('mainDialog.groupProgressWaitingStart')
+    case 'running': return t('chatUi.toolStageRunning')
+    case 'completed': return t('chatUi.groupStatusCompleted')
+    case 'failed': return t('chatUi.groupStatusFailed')
+    case 'stopped': return t('chatUi.toolStageStopped')
+    default: return ''
+  }
+})
 
 /**
  * Codex-style work summary: consecutive thinking + tool + web result runs plus
@@ -120,7 +126,11 @@ const messageText = computed(() => getMessageText())
  * into the summary; the group holds live activity. The transform lives in
  * message-segments.ts so it stays unit-testable.
  */
-const renderSegments = computed(() => buildRenderSegments(blocks.value, { streaming: isStreamingAssistantMessage.value }))
+const renderSegments = computed(() => buildRenderSegments(blocks.value, {
+  streaming: isStreamingAssistantMessage.value,
+  roomReply: Boolean(props.msg.roomReplyStatus)
+}))
+const isWorkStreaming = computed(() => (props.isLoading && roomReplyStatus.value === 'running') || isStreamingAssistantMessage.value)
 
 // Only the trailing work group belongs to the live turn; older groups in the
 // same message are settled and must not keep ticking while a later group works.
@@ -156,7 +166,10 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
           <SidebarIcon v-else name="robot" :size="13" />
         </span>
         <span class="message-author">{{ getMessageAuthor() }}</span>
-        <span class="message-model-chip">{{ getModelLabel() }}</span>
+        <span v-if="roomReplyStatusLabel" class="message-agent-status" :class="roomReplyStatus" role="status">
+          {{ roomReplyStatusLabel }}
+        </span>
+        <span v-else class="message-model-chip">{{ getModelLabel() }}</span>
       </div>
 
       <template v-if="isEditing">
@@ -176,7 +189,8 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
             <ToolGroupBlock
               v-if="segment.type === 'group'"
               :entries="segment.groupEntries"
-              :message-streaming="isStreamingAssistantMessage && segmentIndex === lastGroupSegmentIndex"
+              :message-streaming="isWorkStreaming && segmentIndex === lastGroupSegmentIndex"
+              :room-status="roomReplyStatus"
               :role="props.msg.role"
               :message-index="props.index"
               :message-text="messageText"
@@ -210,28 +224,8 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
                 :block="segment.block"
               />
 
-              <GroupCollaborationPlanBlock
-                v-else-if="segment.block.kind === 'group_collaboration_plan'"
-                :block="segment.block"
-              />
-
-              <AgentSidechatBlock
-                v-else-if="segment.block.kind === 'agent_sidechat'"
-                :block="segment.block"
-              />
-
               <GroupProgressBlock
                 v-else-if="segment.block.kind === 'group_progress'"
-                :block="segment.block"
-              />
-
-              <GroupTranscriptBlock
-                v-else-if="segment.block.kind === 'group_transcript'"
-                :block="segment.block"
-              />
-
-              <SharedBoardBlock
-                v-else-if="segment.block.kind === 'group_board'"
                 :block="segment.block"
               />
 
@@ -434,6 +428,26 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
   color: var(--app-text-faint);
   font-size: 0.7rem;
 }
+
+.message-agent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--app-text-muted);
+  font-size: 0.7rem;
+}
+
+.message-agent-status::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.message-agent-status.running { color: var(--app-accent-strong); }
+.message-agent-status.completed { color: var(--app-success); }
+.message-agent-status.failed { color: var(--app-danger-strong); }
 
 .message-agent-avatar {
   display: inline-flex;
