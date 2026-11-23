@@ -1242,7 +1242,7 @@ fn real_symbol_engine_methods() {
     for method in [
         "collectCustomTools",
         "handleNativeToolResult",
-        "recordUsage",
+        "setBudgetLimit",
         "nativeToolNames",
     ] {
         let entry = required(
