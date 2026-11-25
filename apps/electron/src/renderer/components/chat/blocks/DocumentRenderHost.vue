@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import DocumentHtmlPreview from './DocumentHtmlPreview.vue'
 import DocumentMarkdownPreview from './DocumentMarkdownPreview.vue'
@@ -17,7 +17,7 @@ interface DocumentNode {
 }
 
 interface DocumentRenderPreview {
-  kind: 'pdf' | 'html' | 'markdown' | 'structured'
+  kind: 'pdf' | 'html' | 'markdown' | 'image' | 'structured'
   source: 'original' | 'generated' | 'fallback'
   status: 'ready' | 'unavailable'
   mimeType?: string
@@ -65,15 +65,31 @@ const emit = defineEmits<{
 const renderAsset = ref<RenderAssetPayload | null>(null)
 const htmlContent = ref('')
 const markdownSource = ref('')
+const imageObjectUrl = ref('')
 const renderLoading = ref(false)
 const renderError = ref('')
+let renderLoadToken = 0
 const { t } = useI18n()
 
+function clearImageObjectUrl (): void {
+  if (!imageObjectUrl.value) return
+  URL.revokeObjectURL(imageObjectUrl.value)
+  imageObjectUrl.value = ''
+}
+
+onBeforeUnmount(() => {
+  renderLoadToken += 1
+  clearImageObjectUrl()
+})
+
 async function loadRenderAsset () {
+  const token = ++renderLoadToken
   const render = props.artifact.render
   renderAsset.value = null
   htmlContent.value = ''
   markdownSource.value = ''
+  renderLoading.value = false
+  clearImageObjectUrl()
 
   if (!render || render.kind === 'structured' || render.status !== 'ready' || !window.electronAPI?.getDocumentRenderData) {
     renderError.value = render?.status === 'unavailable' ? (render.error || '') : ''
@@ -84,14 +100,21 @@ async function loadRenderAsset () {
   renderError.value = ''
 
   try {
-    renderAsset.value = await window.electronAPI.getDocumentRenderData(props.artifact.id) as RenderAssetPayload | null
-    if (!renderAsset.value) {
+    const asset = await window.electronAPI.getDocumentRenderData(props.artifact.id) as RenderAssetPayload | null
+    if (token !== renderLoadToken) return
+    renderAsset.value = asset
+    if (!asset) {
       renderError.value = render.error || t('chatUi.documentRenderUnavailableFallback')
       return
     }
 
-    if (render.kind === 'html' || render.kind === 'markdown') {
-      const decoded = new TextDecoder().decode(renderAsset.value.bytes)
+    if (render.kind === 'image') {
+      const imageBytes = new Uint8Array(asset.bytes)
+      imageObjectUrl.value = URL.createObjectURL(new Blob([imageBytes], {
+        type: asset.mimeType || render.mimeType || 'application/octet-stream'
+      }))
+    } else if (render.kind === 'html' || render.kind === 'markdown') {
+      const decoded = new TextDecoder().decode(asset.bytes)
       if (render.kind === 'html') {
         htmlContent.value = decoded
       } else {
@@ -99,12 +122,14 @@ async function loadRenderAsset () {
       }
     }
   } catch (error) {
+    if (token !== renderLoadToken) return
     renderAsset.value = null
     htmlContent.value = ''
     markdownSource.value = ''
+    clearImageObjectUrl()
     renderError.value = (error as Error).message
   } finally {
-    renderLoading.value = false
+    if (token === renderLoadToken) renderLoading.value = false
   }
 }
 
@@ -116,6 +141,9 @@ watch(() => `${props.artifact.id}:${props.artifact.render?.generatedAt || ''}`, 
 <template>
   <div class="document-render-host">
     <div v-if="renderLoading" class="render-state">{{ $t('chatUi.preparingRealFilePreview') }}</div>
+    <div v-else-if="imageObjectUrl && props.artifact.render?.kind === 'image'" class="render-surface image-render-surface">
+      <img :src="imageObjectUrl" :alt="props.artifact.fileName" draggable="false">
+    </div>
     <div v-else-if="renderAsset && props.artifact.render?.kind === 'pdf'" class="render-surface">
       <DocumentPdfPreview
         :key="`${props.artifact.id}:${props.artifact.render?.generatedAt || ''}:pdf`"
@@ -188,5 +216,30 @@ watch(() => `${props.artifact.id}:${props.artifact.render?.generatedAt || ''}`, 
   background: color-mix(in srgb, #f59e0b 14%, var(--app-panel-subtle));
   border: 1px solid color-mix(in srgb, #f59e0b 28%, transparent);
   font-size: 0.82em;
+}
+
+.image-render-surface {
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 18px;
+  background-color: var(--app-panel-subtle);
+  background-image:
+    linear-gradient(45deg, color-mix(in srgb, var(--app-text-muted) 8%, transparent) 25%, transparent 25%),
+    linear-gradient(-45deg, color-mix(in srgb, var(--app-text-muted) 8%, transparent) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, color-mix(in srgb, var(--app-text-muted) 8%, transparent) 75%),
+    linear-gradient(-45deg, transparent 75%, color-mix(in srgb, var(--app-text-muted) 8%, transparent) 75%);
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
+}
+
+.image-render-surface img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
+  user-select: none;
 }
 </style>

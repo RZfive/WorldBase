@@ -11,6 +11,7 @@ import type {
   CreateSelectionPayload
 } from './document-types.js'
 import { buildDocfileContextPrompt } from '../../shared/document-context-tag.js'
+import { parseMarkdownToNodes } from './document-parser-markdown.js'
 
 interface DocumentChunkEntry {
   nodeId: string
@@ -42,6 +43,40 @@ export class DocumentStore {
   addArtifact (artifact: DocumentArtifact): string {
     this.artifacts.set(artifact.id, artifact)
     return artifact.id
+  }
+
+  /**
+   * Add an AI-authored Markdown document that lives only in this store.
+   * Nothing is written to disk and the artifact is never mirrored.
+   */
+  addInMemoryMarkdown (title: string, markdown: string): DocumentArtifact {
+    if (!markdown.trim()) throw new Error('markdown document is empty')
+    const normalizedTitle = title.trim() || '方案'
+    const fileName = normalizedTitle.toLowerCase().endsWith('.md')
+      ? normalizedTitle
+      : `${normalizedTitle}.md`
+    const now = new Date().toISOString()
+    const artifact: DocumentArtifact = {
+      id: generateId(),
+      filePath: '',
+      fileName,
+      fileSize: Buffer.byteLength(markdown, 'utf8'),
+      fileType: 'md',
+      plainText: markdown,
+      nodes: parseMarkdownToNodes(markdown),
+      render: {
+        kind: 'markdown',
+        source: 'original',
+        status: 'ready',
+        mimeType: 'text/markdown; charset=utf-8',
+        inlineContent: markdown,
+        generatedAt: now
+      },
+      importedAt: now,
+      ephemeral: true
+    }
+    this.addArtifact(artifact)
+    return artifact
   }
 
   /** Get a single artifact by id. */

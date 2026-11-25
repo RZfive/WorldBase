@@ -1,4 +1,4 @@
-export type FolderWorkspaceFileKind = 'text' | 'code' | 'markdown' | 'binary' | 'large' | 'unknown'
+export type FolderWorkspaceFileKind = 'text' | 'code' | 'markdown' | 'image' | 'svg' | 'binary' | 'large' | 'unknown'
 
 export interface ConversationFolderWorkspaceState {
   rootPath: string
@@ -36,12 +36,17 @@ export interface FolderWorkspaceReadResult {
   filePath: string
   fileName: string
   size: number
+  /** Text content for text-like files; empty for images. */
   content: string
   kind: FolderWorkspaceFileKind
   language?: string
   isMarkdown: boolean
   lineCount: number
   truncated: boolean
+  /** Image MIME type when `kind === 'image'` or `kind === 'svg'`. */
+  mimeType?: string
+  /** Self-contained image source (`data:image/...;base64,...`) for preview. */
+  imageDataUrl?: string
 }
 
 export interface FolderWorkspaceChangeEvent {

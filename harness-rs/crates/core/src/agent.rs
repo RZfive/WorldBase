@@ -421,6 +421,32 @@ fn observe_ledger_anchors(ledger: &mut RunStateLedger, history: &[ChatMessage]) 
     crate::context::engine::observe_history_anchors(ledger, history);
 }
 
+/// The live ledger is only useful once context has actually been compressed.
+/// Before that the full transcript is already in the request, so injecting the
+/// ledger every turn only changes the cache prefix.
+fn should_inject_run_ledger(
+    checkpoint_present: bool,
+    history_microcompacted: bool,
+    history_truncated: bool,
+) -> bool {
+    checkpoint_present || history_microcompacted || history_truncated
+}
+
+/// Append one ledger snapshot to the in-memory history. It is deliberately not
+/// persisted: subsequent turns carry it as ordinary append-only context, and a
+/// new compaction rebuilds `llm_messages` and takes a fresh snapshot.
+fn inject_run_ledger_once(
+    messages: &mut Vec<LlmMessage>,
+    ledger: &RunStateLedger,
+    injected: &mut bool,
+) {
+    if *injected {
+        return;
+    }
+    messages.push(LlmMessage::text(LlmRole::User, ledger.render_markdown()));
+    *injected = true;
+}
+
 fn compaction_source_history(
     store: &worldbase_memory::Store,
     conversation_id: &str,
@@ -1190,7 +1216,7 @@ fn project_editing_prompt(tools: &PromptToolContext<'_>) -> Option<String> {
         lines.push("- Use `open_project_app` to present a ready project inside the managed shell instead of launching an unmanaged preview.".into());
     }
     if tools.has("open_workspace_tab") {
-        lines.push("- Use `open_workspace_tab` to open a folder, document, or browser tab beside the chat when the user wants to follow along with code, a document, or a web page; the browser tab can then be operated with the current-page tools.".into());
+        lines.push("- Use `open_workspace_tab` to open a folder, document, or browser tab beside the chat when the user wants to follow along with code, a document, or a web page; the browser tab can then be operated with the current-page tools. For a long PRD or plan, pass kind \"document\" with `title` and full `markdown` to open it as an in-memory review tab instead of flooding the chat.".into());
     }
     if tools.has("read_current_page") {
         lines.push("- For a running web project, verify the UI visually with `read_current_page` mode \"screenshot\" and check runtime health with mode \"diagnostics\" (console/errors/network) in the built-in workspace browser before declaring success. Do not launch chrome/playwright MCP for screenshots, console, navigation, DOM inspection, or emulation.".into());
@@ -1530,11 +1556,28 @@ fn new_project_prompt(tools: &PromptToolContext<'_>, context: &ChatRunContext) -
         "edit_project_file",
         "patch_project_file",
     ]);
-    let mut lines = vec![
-        "## New managed project workflow".to_string(),
-        "- Before implementation, present a concise PRD-style plan covering the goal, modules, pages, interactions, layout, stack, data model, and primary flow, with a ```mermaid block for the primary user flow and any architecture or data-model relationships; wait for explicit approval.".into(),
+    let mut lines = vec!["## New managed project workflow".to_string()];
+    if tools.has("open_workspace_tab") {
+        lines.push(
+            "- Before implementation, write a concise PRD-style plan covering the goal, modules, pages, interactions, layout, stack, data model, and primary flow, with a ```mermaid block for the primary user flow and any architecture or data-model relationships. Put the complete PRD in an in-memory Markdown document and open it in the workspace panel: call `open_workspace_tab` with kind \"document\", a short `title`, and the full `markdown` body. Do not paste the full PRD into the chat message; the document tab is the long-form review surface.".into(),
+        );
+        lines.push(
+            "- After the document tab is open, call `ask_user` once with a single approval question that points the user to that tab (for example \"请查看右侧方案文档，确认是否开始实现\") and options `开始实现`, `修改方案`, `取消`. Wait for the answer; do not call `create_project` or any other mutating tool until the user chooses `开始实现`.".into(),
+        );
+        lines.push(
+            "- If the user asks for changes, open an updated in-memory Markdown document with the revised plan, then call `ask_user` again. The user can use the document tab's `引用到对话` action to add the Markdown to context; do not ask them to paste it manually.".into(),
+        );
+    } else {
+        lines.push(
+            "- Before implementation, present a concise PRD-style plan covering the goal, modules, pages, interactions, layout, stack, data model, and primary flow, with a ```mermaid block for the primary user flow and any architecture or data-model relationships.".into(),
+        );
+        lines.push(
+            "- Then call `ask_user` once with a single approval question and options `开始实现`, `修改方案`, `取消`. Wait for the answer; do not call `create_project` until the user chooses `开始实现`.".into(),
+        );
+    }
+    lines.push(
         "- After approval, call `create_project` exactly once with `template`, `entities`, and `features`. The scaffold generates the manifest, RPC routes, data layer, and capabilities; do not hand-write those files.".into(),
-    ];
+    );
     if !followups.is_empty() {
         lines.push(format!(
             "- Continue the same project over multiple calls with {}; after each write or patch, rebuild and verify the app before the next change.",
@@ -2434,6 +2477,73 @@ mod tests {
         .await
         .expect("protocol test run did not clean up");
         events
+    }
+
+    #[test]
+    fn run_ledger_injection_is_limited_to_context_loss() {
+        assert!(!should_inject_run_ledger(false, false, false));
+        assert!(should_inject_run_ledger(true, false, false));
+        assert!(should_inject_run_ledger(false, true, false));
+        assert!(should_inject_run_ledger(false, false, true));
+    }
+
+    #[test]
+    fn run_ledger_snapshot_is_injected_at_most_once() {
+        let ledger = RunStateLedger::from_real_user_request("goal", 1, "goal");
+        let mut messages = vec![LlmMessage::text(LlmRole::User, "task")];
+        let mut injected = false;
+        inject_run_ledger_once(&mut messages, &ledger, &mut injected);
+        inject_run_ledger_once(&mut messages, &ledger, &mut injected);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[1].text_view().contains("Run State Ledger"));
+    }
+
+    #[tokio::test]
+    async fn short_chat_does_not_inject_run_state_ledger() {
+        let (hub, provider, _workspace, conversation_id) =
+            protocol_test_hub(vec![protocol_assistant("done", vec![])]);
+        run_protocol_chat(hub, &conversation_id).await;
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.text_view().contains("Run State Ledger")));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_run_injects_one_ledger_snapshot() {
+        let (hub, provider, _workspace, conversation_id) =
+            protocol_test_hub(vec![protocol_assistant("done", vec![])]);
+        let ledger = RunStateLedger::from_real_user_request("goal", 1, "goal");
+        let fallback = crate::context::engine::checkpoint_fallback_from_ledger(&ledger);
+        let checkpoint =
+            CompactionCheckpoint::from_fallback("checkpoint-1", &conversation_id, &fallback);
+        crate::context::persist_compaction(
+            hub.store.as_ref(),
+            &checkpoint,
+            &ledger,
+            "test",
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+
+        run_protocol_chat(hub, &conversation_id).await;
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .messages
+                .iter()
+                .filter(|message| message.text_view().contains("Run State Ledger"))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -3882,6 +3992,7 @@ mod tests {
         let tools = [
             "create_project",
             "upgrade_project",
+            "open_workspace_tab",
             "search_tools",
             "list_project_files",
             "read_project_file",
@@ -3946,6 +4057,9 @@ mod tests {
         assert!(prompt.contains("`query_project_database` is read-only"));
         assert!(prompt.contains("Poll `get_project_command_status`"));
         assert!(prompt.contains("`upgrade_project`"));
+        assert!(prompt.contains("open it in the workspace panel"));
+        assert!(prompt.contains("call `ask_user` once with a single approval question"));
+        assert!(prompt.contains("`开始实现`"));
         assert!(prompt.contains("Do not inspect or unpack `app.asar`"));
         assert!(prompt.contains("`aiApplication.status`"));
         assert!(prompt.contains("source: \"app\""));
@@ -7986,6 +8100,9 @@ async fn run_chat_inner(
         full_history.clone()
     };
     let mut llm_messages = to_llm_messages(&history);
+    let mut microcompacted_history = false;
+    let mut history_truncated = full_history.len() >= 400;
+    let mut ledger_injected = false;
     let context_ledger = std::sync::Arc::new(std::sync::Mutex::new(ledger));
     let initial_version = current_compaction_version(
         &full_history,
@@ -8103,6 +8220,7 @@ async fn run_chat_inner(
             .store
             .list_messages(&conversation_id, 400)
             .unwrap_or_default();
+        history_truncated |= stored_history.len() >= 400;
         {
             let Ok(mut ledger) = context_ledger.lock() else {
                 let message = "context ledger lock poisoned".to_string();
@@ -8203,6 +8321,7 @@ async fn run_chat_inner(
                     compaction_note.arm(&compacted.checkpoint);
                     checkpoint = Some(compacted.checkpoint);
                     llm_messages = compacted.recent_messages;
+                    ledger_injected = false;
                     compacted_this_iteration = true;
                     last_compaction_turn = Some(completed_turns);
                     compact_notice = Some(format!(
@@ -8306,6 +8425,7 @@ async fn run_chat_inner(
                 &token_estimator,
             );
             if microcompaction.estimated_tokens_saved > 0 {
+                microcompacted_history = true;
                 tracing::debug!(
                     saved = microcompaction.estimated_tokens_saved,
                     compacted = microcompaction.results_compacted,
@@ -8387,6 +8507,7 @@ async fn run_chat_inner(
                     compaction_note.arm(&compacted.checkpoint);
                     checkpoint = Some(compacted.checkpoint);
                     llm_messages = compacted.recent_messages;
+                    ledger_injected = false;
                     compacted_this_iteration = true;
                     last_compaction_turn = Some(completed_turns);
                     compact_notice = Some(format!(
@@ -8475,27 +8596,67 @@ async fn run_chat_inner(
             .lock()
             .map(|ledger| ledger.clone())
             .unwrap_or_default();
+        if should_inject_run_ledger(
+            checkpoint.is_some(),
+            microcompacted_history,
+            history_truncated,
+        ) {
+            inject_run_ledger_once(&mut llm_messages, &ledger_snapshot, &mut ledger_injected);
+        }
         let note = compaction_note.drain_for_provider_request();
-        let request_messages = if provider.name() == "openai-responses" {
-            crate::context::engine::assemble_request_with_evidence_tail(
-                &conversation_id,
-                checkpoint.as_ref(),
-                &ledger_snapshot,
-                &llm_messages,
-                note,
-            )
-        } else {
-            let mut messages = crate::context::assemble_request(
-                &conversation_id,
-                checkpoint.as_ref(),
-                &ledger_snapshot,
-                &llm_messages,
-            );
-            if let Some(note) = note {
-                let insert_at = messages.len().saturating_sub(llm_messages.len());
-                messages.insert(insert_at, note);
+        let (request_messages, cache_prefix_messages) = match provider.name() {
+            "openai-responses" => {
+                let messages = if note.is_some() {
+                    crate::context::engine::assemble_request_without_ledger_tail_counted(
+                        &conversation_id,
+                        checkpoint.as_ref(),
+                        &llm_messages,
+                        note,
+                    )
+                    .0
+                } else {
+                    crate::context::engine::assemble_request_without_ledger(
+                        &conversation_id,
+                        checkpoint.as_ref(),
+                        &llm_messages,
+                    )
+                };
+                (messages, None)
             }
-            messages
+            "anthropic" => {
+                // The ledger snapshot is part of the stable history. Only a
+                // one-turn compaction note is dynamic; keep the breakpoint on
+                // the last stable assistant before that note.
+                if note.is_some() {
+                    let (messages, prefix) =
+                        crate::context::engine::assemble_request_without_ledger_tail_counted(
+                            &conversation_id,
+                            checkpoint.as_ref(),
+                            &llm_messages,
+                            note,
+                        );
+                    (messages, Some(prefix))
+                } else {
+                    let messages = crate::context::engine::assemble_request_without_ledger(
+                        &conversation_id,
+                        checkpoint.as_ref(),
+                        &llm_messages,
+                    );
+                    (messages, None)
+                }
+            }
+            _ => {
+                let mut messages = crate::context::engine::assemble_request_without_ledger(
+                    &conversation_id,
+                    checkpoint.as_ref(),
+                    &llm_messages,
+                );
+                if let Some(note) = note {
+                    let insert_at = messages.len().saturating_sub(llm_messages.len());
+                    messages.insert(insert_at, note);
+                }
+                (messages, None)
+            }
         };
         let request_estimate =
             token_estimator.estimate_request(&system, &request_messages, &tools_meta);
@@ -8552,6 +8713,7 @@ async fn run_chat_inner(
                         }),
                         reasoning_effort: context.reasoning_effort.clone(),
                         dynamic_system_suffix: dynamic_system_suffix.clone(),
+                        cache_prefix_messages,
                     },
                 ) => Some(result),
             };
@@ -8759,6 +8921,7 @@ async fn run_chat_inner(
                                 compaction_note.arm(&compacted.checkpoint);
                                 checkpoint = Some(compacted.checkpoint);
                                 llm_messages = compacted.recent_messages;
+                                ledger_injected = false;
                                 last_compaction_turn = Some(completed_turns);
                                 let rebuilt = system_prompt(
                                     &hub,

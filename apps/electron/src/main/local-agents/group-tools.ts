@@ -33,7 +33,7 @@ const roomToolDefinitions: RustCustomToolDefinition[] = [
   {
     definition: {
       name: 'handoff_room_task',
-      description: 'Mention another room member and queue a specific follow-up task or review. Use only when the current user request needs a handoff. The recipient replies as themselves in the room.',
+      description: 'Proactively mention another room member and queue the next piece of work, review, verification, or decision. Use this instead of asking the user to relay a request or @ the member. The recipient replies as themselves in the room.',
       parameters: {
         type: 'object',
         properties: {

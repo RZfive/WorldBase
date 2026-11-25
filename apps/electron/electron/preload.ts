@@ -853,6 +853,7 @@ export interface ElectronAPI {
   pickDocumentFiles: () => Promise<{ canceled: boolean; filePaths: string[] }>
   pickOfficeFiles: () => Promise<{ canceled: boolean; filePaths: string[] }>
   importDocument: (filePath: string) => Promise<{ artifact: unknown }>
+  createInMemoryDocument: (payload: { title?: string; markdown: string }) => Promise<{ artifactId: string; fileName: string; fileType: string; ephemeral: boolean }>
   listDocuments: () => Promise<unknown[]>
   getDocument: (artifactId: string) => Promise<unknown | null>
   ensureDocumentRenderPreview: (artifactId: string) => Promise<unknown | null>
@@ -1329,6 +1330,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pickDocumentFiles: () => ipcRenderer.invoke('document:pickFiles'),
   pickOfficeFiles: () => ipcRenderer.invoke('office:pickFiles'),
   importDocument: (filePath: string) => ipcRenderer.invoke('document:import', filePath),
+  createInMemoryDocument: (payload: { title?: string; markdown: string }) => ipcRenderer.invoke('document:createInMemory', payload),
   listDocuments: () => ipcRenderer.invoke('document:list'),
   applyDocumentDraft: (payload: { artifactId: string; sourceSha256?: string }) => ipcRenderer.invoke('document:applyDraft', payload),
   saveDocumentDraftAs: (payload: { artifactId: string; defaultName?: string }) => ipcRenderer.invoke('document:saveDraftAs', payload),

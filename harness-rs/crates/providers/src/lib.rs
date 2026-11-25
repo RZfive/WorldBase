@@ -168,6 +168,10 @@ pub struct ChatOptions {
     /// text including this tail; providers that support prompt caching keep
     /// the tail outside the cached prefix so the stable head stays cacheable.
     pub dynamic_system_suffix: Option<String>,
+    /// Number of leading request messages that stay stable across turns.
+    /// Providers with explicit cache breakpoints can keep volatile evidence
+    /// appended after this boundary without invalidating the cached prefix.
+    pub cache_prefix_messages: Option<usize>,
 }
 
 /// token 用量（对齐供应商回传）。

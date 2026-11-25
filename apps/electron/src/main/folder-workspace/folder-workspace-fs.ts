@@ -6,12 +6,16 @@ import type {
   FolderWorkspaceListResult,
   FolderWorkspaceReadResult
 } from '../../shared/folder-workspace-types.js'
+import { IMAGE_MIME_BY_EXTENSION, getImageMimeType } from '../../shared/image-file-types.js'
 
 const MAX_TREE_ENTRIES = 5000
 const MAX_TREE_DEPTH = 12
 // 预览读取上限：配合前端虚拟滚动，尽量把整个文件给到查看器（超大日志类
 // 文件仍截断，避免 IPC 与渲染内存爆炸）。
 const MAX_PREVIEW_BYTES = 8 * 1024 * 1024
+// 图片通过 data URL 走 IPC；保留一个更宽松但仍有上限的预算，避免误开
+// 超大设计稿时把渲染进程内存打满。
+const MAX_IMAGE_PREVIEW_BYTES = 16 * 1024 * 1024
 
 const IGNORED_DIRS = new Set([
   '.git',
@@ -31,9 +35,9 @@ const IGNORED_DIRS = new Set([
 ])
 
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown', '.mdx'])
+const SVG_EXTENSIONS = new Set(['.svg'])
 
 const BINARY_EXTENSIONS = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.avif',
   '.woff', '.woff2', '.ttf', '.eot', '.otf',
   '.zip', '.tar', '.gz', '.bz2', '.rar', '.7z',
   '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
@@ -189,6 +193,14 @@ export function classifyWorkspaceFile (filePath: string, size = 0): { kind: Fold
     return { kind: 'markdown', language: 'markdown', isMarkdown: true }
   }
 
+  if (SVG_EXTENSIONS.has(ext)) {
+    return { kind: 'svg', language: 'xml', isMarkdown: false }
+  }
+
+  if (IMAGE_MIME_BY_EXTENSION[ext]) {
+    return { kind: 'image', isMarkdown: false }
+  }
+
   if (BINARY_EXTENSIONS.has(ext)) {
     return { kind: 'binary', isMarkdown: false }
   }
@@ -341,6 +353,57 @@ export async function readFolderWorkspaceFile (rootPath: string, relativePath: s
   }
 
   const classification = classifyWorkspaceFile(normalizedRelativePath, stat.size)
+  if (classification.kind === 'svg') {
+    const { buffer, truncated } = await readFileHead(fullPath, stat.size)
+    if (bufferLooksBinary(buffer)) {
+      throw new Error(`Cannot preview binary file: ${normalizedRelativePath}`)
+    }
+    const content = buffer.toString('utf-8')
+    const lineCount = content === '' ? 0 : content.split('\n').length
+    return {
+      rootPath: resolvedRoot,
+      filePath: normalizedRelativePath,
+      fileName: path.basename(normalizedRelativePath),
+      size: stat.size,
+      content,
+      kind: 'svg',
+      language: 'xml',
+      isMarkdown: false,
+      lineCount,
+      truncated,
+      mimeType: 'image/svg+xml',
+      ...(truncated || buffer.length === 0
+        ? {}
+        : { imageDataUrl: `data:image/svg+xml;base64,${buffer.toString('base64')}` })
+    }
+  }
+  if (classification.kind === 'image') {
+    const mimeType = getImageMimeType(normalizedRelativePath)
+    if (!mimeType) {
+      throw new Error(`Unsupported image type: ${normalizedRelativePath}`)
+    }
+    if (stat.size > MAX_IMAGE_PREVIEW_BYTES) {
+      throw new Error(
+        `Image is too large to preview (${Math.ceil(stat.size / 1024 / 1024)} MB; max ${MAX_IMAGE_PREVIEW_BYTES / 1024 / 1024} MB)`
+      )
+    }
+
+    const buffer = await fs.readFile(fullPath)
+    return {
+      rootPath: resolvedRoot,
+      filePath: normalizedRelativePath,
+      fileName: path.basename(normalizedRelativePath),
+      size: stat.size,
+      content: '',
+      kind: 'image',
+      language: undefined,
+      isMarkdown: false,
+      lineCount: 0,
+      truncated: false,
+      mimeType,
+      imageDataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`
+    }
+  }
   if (classification.kind === 'binary') {
     throw new Error(`Cannot preview binary file: ${normalizedRelativePath}`)
   }

@@ -107,13 +107,26 @@ export function ensureBuiltinWorkspaceTabsRegistered (): void {
     maxWidth: 1280,
     defaultWidth: 900,
     component: DocumentFileTab,
-    matches: (tab, payload) => normalizeDocumentFileKey(tab.state?.filePath as string | undefined)
-      === normalizeDocumentFileKey(payload?.filePath as string | undefined),
-    getActions: () => [
-      { id: 'insertDocumentContextTag', labelKey: 'chatUi.workspaceActionQuoteToChat' },
-      { id: 'openOriginalFile', labelKey: 'chatUi.openOriginalFile' },
-      { id: 'copyFilePath', labelKey: 'chatUi.workspaceActionCopyPath' }
-    ]
+    matches: (tab, payload) => {
+      const payloadDocumentId = typeof payload?.documentId === 'string' ? payload.documentId.trim() : ''
+      if (payloadDocumentId) {
+        return typeof tab.state?.documentId === 'string' && tab.state.documentId === payloadDocumentId
+      }
+      return normalizeDocumentFileKey(tab.state?.filePath as string | undefined)
+        === normalizeDocumentFileKey(payload?.filePath as string | undefined)
+    },
+    getActions: (tab) => {
+      const actions = [
+        { id: 'insertDocumentContextTag', labelKey: 'chatUi.workspaceActionQuoteToChat' }
+      ]
+      if (tab.state?.ephemeral !== true) {
+        actions.push(
+          { id: 'openOriginalFile', labelKey: 'chatUi.openOriginalFile' },
+          { id: 'copyFilePath', labelKey: 'chatUi.workspaceActionCopyPath' }
+        )
+      }
+      return actions
+    }
   })
 
   registerWorkspaceTab({

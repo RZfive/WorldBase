@@ -4916,7 +4916,7 @@ impl Tool for OpenWorkspaceTabTool {
         "open_workspace_tab"
     }
     fn description(&self) -> &str {
-        "Open a tab in the user's right-side workspace panel (folder / document / browser / terminal / project app)."
+        "Open a tab in the user's right-side workspace panel (folder / document / browser / terminal / project app). For a long PRD or proposal, pass kind=document with title and markdown to open an in-memory document tab instead of pasting the whole text into chat."
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -4934,6 +4934,14 @@ impl Tool for OpenWorkspaceTabTool {
                 "file_path": {
                     "type": "string",
                     "description": "document only: absolute path of the document file to open as its own tab. Reopening a bound path just focuses its tab."
+                },
+                "title": {
+                    "type": "string",
+                    "description": "document only: title for an in-memory AI-authored Markdown document."
+                },
+                "markdown": {
+                    "type": "string",
+                    "description": "document only: full Markdown body for an in-memory document tab. Use this for PRDs, plans, and long proposals; it is never written to disk."
                 },
                 "url": {
                     "type": "string",
@@ -4964,6 +4972,11 @@ impl Tool for OpenWorkspaceTabTool {
         };
         let root_path = optional_path("root_path");
         let file_path = optional_path("file_path");
+        let title = optional_path("title");
+        let markdown = input
+            .get("markdown")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty());
         let url = optional_path("url");
         let active_file_path = optional_path("active_file_path");
         let project_id = optional_path("project_id");
@@ -4974,6 +4987,12 @@ impl Tool for OpenWorkspaceTabTool {
         }
         if let Some(file) = file_path {
             payload["filePath"] = Value::String(file.to_string());
+        }
+        if let Some(title) = title {
+            payload["title"] = Value::String(title.to_string());
+        }
+        if let Some(markdown) = markdown {
+            payload["markdown"] = Value::String(markdown.to_string());
         }
         if let Some(target) = url {
             payload["url"] = Value::String(target.to_string());

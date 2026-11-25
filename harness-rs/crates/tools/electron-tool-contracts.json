@@ -4,7 +4,7 @@
   "tools": [
     {
       "name": "ask_user",
-      "description": "Ask the user one or more clarification questions when you are blocked on a decision the user must make (the request is genuinely ambiguous, you cannot pick a sensible default, or proceeding without their answer would force a costly rewrite). BUNDLE every pending question into a single ask_user call — never ask one at a time when more are coming. For each question, propose 2-4 mutually exclusive option strings; the renderer adds an \"其他 (自定义)\" free-text fallback automatically. Do NOT use this tool when a sensible default exists, or when the answer is obvious from context, or merely to confirm something — pick the obvious choice and proceed instead. Returns `{ answers: [{ question, answer }] }` where `answer` is either the option string the user chose or the free text they typed.",
+      "description": "Ask the user one or more clarification questions when you are blocked on a decision the user must make (the request is genuinely ambiguous, you cannot pick a sensible default, or proceeding without their answer would force a costly rewrite). BUNDLE every pending question into a single ask_user call — never ask one at a time when more are coming. For each question, propose 2-4 mutually exclusive option strings; the renderer adds an \"其他 (自定义)\" free-text fallback automatically. Do NOT use this tool when a sensible default exists, or when the answer is obvious from context, or merely to confirm something — pick the obvious choice and proceed instead. For plan or PRD approval, first open the full plan as an in-memory document workspace tab when `open_workspace_tab` is available (title + markdown), then ask one approval question here; otherwise present the plan in chat first. Never ask for approval while the plan is not visible. Returns `{ answers: [{ question, answer }] }` where `answer` is either the option string the user chose or the free text they typed.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -397,7 +397,7 @@
     },
     {
       "name": "open_workspace_tab",
-      "description": "Open a tab in the user's right-side workspace panel next to the chat. Use kind \"folder\" with root_path to bind a code directory; kind \"document\" with file_path to open one document (PDF/Excel/Word/...); kind \"browser\" with url to open a web page the user can watch and you can operate with the page tools (read_current_page / interact_current_page, including screenshots, diagnostics, navigation and viewport resize); kind \"terminal\" to open a shell terminal you can operate with read_active_terminal / write_active_terminal; kind \"project\" with project_id to open one of the user's developed apps (you can operate its UI with the page tools). The panel stays visible after the reply finishes.",
+      "description": "Open a tab in the user's right-side workspace panel next to the chat. Use kind \"folder\" with root_path to bind a code directory; kind \"document\" with file_path to open one document (PDF/Excel/Word/...), or with title and markdown to open an in-memory Markdown document (use this for long PRDs and plans; it is never written to disk); kind \"browser\" with url to open a web page the user can watch and you can operate with the page tools (read_current_page / interact_current_page, including screenshots, diagnostics, navigation and viewport resize); kind \"terminal\" to open a shell terminal you can operate with read_active_terminal / write_active_terminal; kind \"project\" with project_id to open one of the user's developed apps (you can operate its UI with the page tools). The panel stays visible after the reply finishes.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -419,6 +419,14 @@
           "file_path": {
             "type": "string",
             "description": "document only: absolute path of the document file to open as its own tab. Reopening a bound path just focuses its tab."
+          },
+          "title": {
+            "type": "string",
+            "description": "document only: title for an in-memory AI-authored Markdown document."
+          },
+          "markdown": {
+            "type": "string",
+            "description": "document only: full Markdown body for an in-memory document tab. Use this for PRDs, plans, and long proposals; it is never written to disk."
           },
           "url": {
             "type": "string",

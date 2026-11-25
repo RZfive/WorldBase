@@ -4,12 +4,12 @@
  */
 
 /** Supported document file types. */
-export type DocumentFileType = 'pdf' | 'xlsx' | 'docx' | 'pptx' | 'md' | 'unknown'
+export type DocumentFileType = 'pdf' | 'xlsx' | 'docx' | 'pptx' | 'md' | 'image' | 'unknown'
 
 /** Real preview strategy attached to an imported document. */
 export interface DocumentRenderPreview {
   /** Whether the renderer should use a PDF preview, generated HTML, the chat Markdown pipeline, or structured DOM. */
-  kind: 'pdf' | 'html' | 'markdown' | 'structured'
+  kind: 'pdf' | 'html' | 'markdown' | 'image' | 'structured'
   /** How the preview asset was produced. */
   source: 'original' | 'generated' | 'fallback'
   /** Whether the preferred preview path is currently available. */
@@ -18,6 +18,8 @@ export interface DocumentRenderPreview {
   mimeType?: string
   /** Internal on-disk asset location (main process use). */
   assetPath?: string
+  /** In-memory markdown source for AI-authored documents (never a file). */
+  inlineContent?: string
   /** Human-readable failure reason when preview generation failed. */
   error?: string
   /** Timestamp for render asset generation. */
@@ -62,6 +64,8 @@ export interface DocumentArtifact {
   render?: DocumentRenderPreview
   /** Import timestamp. */
   importedAt: string
+  /** AI-authored document kept only in main-process memory. */
+  ephemeral?: boolean
 }
 
 /** A user-created selection / annotation region on a document preview. */

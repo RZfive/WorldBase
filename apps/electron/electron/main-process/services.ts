@@ -494,6 +494,18 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
     }
     if (typeof request.payload.rootPath === 'string' && request.payload.rootPath.trim()) payload.rootPath = request.payload.rootPath
     if (typeof request.payload.filePath === 'string' && request.payload.filePath.trim()) payload.filePath = request.payload.filePath
+    const markdown = kind === 'document' && typeof request.payload.markdown === 'string'
+      ? request.payload.markdown
+      : ''
+    if (markdown.trim()) {
+      if (!mainState.documentStore) throw new Error('Document store is unavailable')
+      const title = typeof request.payload.title === 'string' ? request.payload.title : ''
+      const artifact = mainState.documentStore.addInMemoryMarkdown(title, markdown)
+      payload.documentId = artifact.id
+      payload.fileName = artifact.fileName
+      payload.title = title.trim() || artifact.fileName
+      payload.ephemeral = true
+    }
     if (!rawBrowserUrl && typeof request.payload.url === 'string' && request.payload.url.trim()) payload.url = request.payload.url
     if (typeof request.payload.activeFilePath === 'string' && request.payload.activeFilePath.trim()) payload.activeFilePath = request.payload.activeFilePath
     if (typeof request.payload.projectId === 'string' && request.payload.projectId.trim()) payload.projectId = request.payload.projectId
@@ -506,7 +518,11 @@ async function handleRustHostRequest (request: RustHostRequest): Promise<JsonRpc
         ? { conversationId: request.conversationId.trim() }
         : {})
     })
-    return { success: true, kind }
+    return {
+      success: true,
+      kind,
+      ...(typeof payload.documentId === 'string' ? { documentId: payload.documentId } : {})
+    }
   }
 
   if (request.requestKind === 'manage_workspace_tabs') {

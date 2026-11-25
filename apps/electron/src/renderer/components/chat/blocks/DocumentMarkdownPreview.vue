@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { renderMarkdown } from '../markdown'
 import { splitMarkdownWithMermaid, type MarkdownSegment } from '../mermaid'
 import MermaidDiagram from '../media/MermaidDiagram.vue'
+import MermaidPreviewDialog from '../media/MermaidPreviewDialog.vue'
 
 interface SelectionRegion {
   id: string
@@ -24,6 +25,19 @@ const emit = defineEmits<{
 }>()
 
 const previewRoot = ref<HTMLElement | null>(null)
+const activeMermaidPreview = ref<string | null>(null)
+
+const mermaidPreview = computed(() => (
+  activeMermaidPreview.value ? { code: activeMermaidPreview.value } : null
+))
+
+function openMermaidPreview (code: string): void {
+  activeMermaidPreview.value = code
+}
+
+function closeMermaidPreview (): void {
+  activeMermaidPreview.value = null
+}
 
 /**
  * Renders the file through the exact chat Markdown pipeline: the mermaid
@@ -76,9 +90,19 @@ function preventNavigation (event: MouseEvent): void {
     <div class="markdown-page-surface">
       <template v-for="(segment, index) in segments" :key="index">
         <div v-if="segment.type === 'markdown'" class="markdown-body" v-html="segment.html"></div>
-        <MermaidDiagram v-else class="document-mermaid-card" :code="segment.text" previewable />
+        <MermaidDiagram
+          v-else
+          class="document-mermaid-card"
+          :code="segment.text"
+          previewable
+          @open-preview="openMermaidPreview(segment.text)"
+        />
       </template>
     </div>
+
+    <Teleport to="body">
+      <MermaidPreviewDialog :diagram="mermaidPreview" @close="closeMermaidPreview" />
+    </Teleport>
   </div>
 </template>
 

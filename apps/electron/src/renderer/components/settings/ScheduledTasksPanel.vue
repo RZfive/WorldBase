@@ -53,6 +53,8 @@ const statusMessage = ref('')
 const aiDraftPrompt = ref('')
 const activeReportId = ref<string | null>(null)
 const activeDetailTab = ref<'details' | 'logs'>('details')
+const searchQuery = ref('')
+const statusFilter = ref<'all' | 'enabled' | 'disabled'>('all')
 const { t, locale } = useI18n()
 
 const scheduleModeOptions: Array<{ id: ScheduleKind; labelKey: string; detailKey: string }> = [
@@ -73,6 +75,14 @@ const intervalPresetOptions = [
   { value: '1440', labelKey: 'settings.scheduledTasks.interval1440' },
   { value: 'custom', labelKey: 'settings.scheduledTasks.intervalCustom' }
 ]
+
+const scheduleModeIcons: Record<ScheduleKind, string> = {
+  daily: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="8" r="2.7"/><path d="M8 1.4v1.3M8 13.3v1.3M1.4 8h1.3M13.3 8h1.3M3.3 3.3l.9.9M11.8 11.8l.9.9M12.7 3.3l-.9.9M4.2 11.8l-.9.9"/></svg>',
+  weekly: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="3.2" width="11.6" height="10.6" rx="2"/><path d="M2.2 6.5h11.6M5.2 1.8v2.6M10.8 1.8v2.6"/><path d="M5.2 9.3h1.1M8 9.3h1.1M10.7 9.3h.1M5.2 11.6h1.1M8 11.6h1.1"/></svg>',
+  interval: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M13.1 6.2A5.4 5.4 0 0 0 3.3 4.1L2.2 5.6"/><path d="M2.9 9.8a5.4 5.4 0 0 0 9.8 2.1l1.1-1.5"/><path d="M2.2 2.5v3.1h3.1M13.8 13.5v-3.1h-3.1"/></svg>',
+  once: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8.2" r="5.5"/><path d="M8 5.1v3.3l2.1 1.3"/><path d="M5.5 1.4h5"/></svg>',
+  dates: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M4 3.2h8M4 6.5h8M4 9.8h5.5M4 13.1h4"/><circle cx="11.9" cy="10.4" r="1.2" fill="currentColor" stroke="none"/><circle cx="11.9" cy="13.2" r="1.2" fill="currentColor" stroke="none"/></svg>'
+}
 
 const weekdayOptions = [
   { value: 1, labelKey: 'settings.scheduledTasks.weekdayMon' },
@@ -99,6 +109,48 @@ const selectedTask = computed(() => {
 const selectedTaskReports = computed(() => {
   if (!selectedTask.value) return []
   return reports.value.filter(report => report.taskId === selectedTask.value?.id)
+})
+
+const statusFilterOptions = computed(() => [
+  { id: 'all' as const, labelKey: 'settings.scheduledTasks.filterAll', count: tasks.value.length },
+  { id: 'enabled' as const, labelKey: 'settings.scheduledTasks.filterEnabled', count: tasks.value.filter(task => task.enabled).length },
+  { id: 'disabled' as const, labelKey: 'settings.scheduledTasks.filterDisabled', count: tasks.value.filter(task => !task.enabled).length }
+])
+
+const filteredTasks = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  return tasks.value.filter(task => {
+    if (statusFilter.value === 'enabled' && !task.enabled) return false
+    if (statusFilter.value === 'disabled' && task.enabled) return false
+    if (!query) return true
+    return `${task.title}\n${task.prompt}`.toLowerCase().includes(query)
+  })
+})
+
+const enabledTaskCount = computed(() => tasks.value.filter(task => task.enabled).length)
+
+const runningTaskCount = computed(() => {
+  return tasks.value.filter(task => task.lastStatus === 'running' || task.lastStatus === 'retrying').length
+})
+
+const todayRunCount = computed(() => {
+  const now = new Date()
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  return reports.value.filter(report => {
+    const startedAt = new Date(report.startedAt).getTime()
+    return Number.isFinite(startedAt) && startedAt >= todayStart
+  }).length
+})
+
+const successRate = computed<number | null>(() => {
+  const finishedReports = reports.value.filter(report => report.status === 'completed' || report.status === 'failed')
+  if (finishedReports.length === 0) return null
+  const completed = finishedReports.filter(report => report.status === 'completed').length
+  return Math.round((completed / finishedReports.length) * 100)
+})
+
+const editingExistingTask = computed(() => {
+  return Boolean(draft.value && tasks.value.some(task => task.id === draft.value?.id))
 })
 
 const activeReport = computed(() => {
@@ -264,6 +316,38 @@ function scheduleSummary (task: ScheduledTaskDefinition): string {
     return t('settings.scheduledTasks.summaryDates', { count: task.schedule.dates.length })
   }
   return t('settings.scheduledTasks.summaryInterval', { minutes: task.schedule.everyMinutes })
+}
+
+function taskNextRunAt (task: ScheduledTaskDefinition): string | null {
+  return task.retryScheduledAt || task.nextRunAt || null
+}
+
+function formatRelativeRun (value?: string | null): string {
+  if (!value) return t('settings.scheduledTasks.notScheduled')
+  const timestamp = new Date(value).getTime()
+  if (!Number.isFinite(timestamp)) return value
+
+  const diff = timestamp - Date.now()
+  if (diff <= 0) {
+    return diff > -60_000 ? t('settings.scheduledTasks.relativeDueNow') : t('settings.scheduledTasks.relativeOverdue')
+  }
+
+  const minutes = Math.ceil(diff / 60_000)
+  if (minutes < 60) return t('settings.scheduledTasks.relativeInMinutes', { count: minutes })
+
+  const hours = Math.ceil(diff / 3_600_000)
+  if (hours < 24) return t('settings.scheduledTasks.relativeInHours', { count: hours })
+
+  return t('settings.scheduledTasks.relativeInDays', { count: Math.ceil(diff / 86_400_000) })
+}
+
+function reportStatusClass (status: ScheduledTaskRunReport['status']): string {
+  switch (status) {
+    case 'completed': return 'is-completed'
+    case 'failed': return 'is-failed'
+    case 'retrying': return 'is-retrying'
+    default: return 'is-running'
+  }
 }
 
 function intervalPresetFor (everyMinutes: number): string {
@@ -823,72 +907,140 @@ onUnmounted(() => {
 
 <template>
   <div class="st-root">
-    <aside class="st-sidebar">
-      <div class="st-sidebar-header">
-        <div>
-          <h3>{{ $t('settings.scheduledTasks.title') }}</h3>
-          <p>{{ $t('settings.scheduledTasks.description') }}</p>
+    <header class="st-hero">
+      <div class="st-hero-copy">
+        <h2>{{ $t('settings.scheduledTasks.heroTitle') }}</h2>
+        <p class="st-hero-summary">
+          {{ $t('settings.scheduledTasks.activeTasks') }} {{ enabledTaskCount }}/{{ tasks.length }}
+          <span aria-hidden="true">·</span>
+          {{ $t('settings.scheduledTasks.runningTasks') }} {{ runningTaskCount }}
+          <span aria-hidden="true">·</span>
+          {{ $t('settings.scheduledTasks.todayRuns') }} {{ todayRunCount }}
+          <template v-if="successRate !== null">
+            <span aria-hidden="true">·</span>
+            {{ $t('settings.scheduledTasks.successRate') }} {{ successRate }}%
+          </template>
+        </p>
+        <div class="st-hero-meta">
+          <div class="st-hero-model">
+            <span class="st-hero-model-label">{{ $t('settings.scheduledTasks.executionModel') }}</span>
+            <ProviderModelDropdown
+              class="st-model-picker"
+              :providers="schedulerProviderOptions"
+              :active-provider-id="globalModel.providerId || ''"
+              :selected-model="globalModel.modelId || ''"
+              :title="$t('settings.scheduledTasks.followDefault')"
+              @select="onExecutionModelSelect"
+            />
+          </div>
         </div>
       </div>
+      <div class="st-hero-actions">
+        <button v-if="!editing" class="st-primary-btn st-hero-create" type="button" @click="startAdd">
+          <span class="st-hero-create-plus">＋</span>{{ $t('settings.scheduledTasks.createTask') }}
+        </button>
+      </div>
+    </header>
 
-      <div class="st-model-bar">
-        <ProviderModelDropdown
-          class="st-model-picker"
-          :providers="schedulerProviderOptions"
-          :active-provider-id="globalModel.providerId || ''"
-          :selected-model="globalModel.modelId || ''"
-          :title="$t('settings.scheduledTasks.followDefault')"
-          @select="onExecutionModelSelect"
-        />
-        <button class="st-primary-btn st-add-btn" type="button" @click="startAdd">＋ {{ $t('settings.scheduledTasks.addTaskShort') }}</button>
+    <div class="st-body" :class="{ 'is-editing': editing }">
+    <aside class="st-sidebar">
+      <div class="st-sidebar-header">
+        <div class="st-list-heading">
+          <span class="st-list-kicker">QUEUE</span>
+          <h3>{{ $t('settings.scheduledTasks.taskListTitle') }}</h3>
+          <p>{{ $t('settings.scheduledTasks.taskListDescription') }}</p>
+        </div>
+        <span class="st-list-count">{{ filteredTasks.length }}</span>
       </div>
 
-      <div v-if="tasks.length === 0" class="st-empty-list">
-        {{ $t('settings.scheduledTasks.emptyList') }}
+      <div class="st-search">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+          <circle cx="7" cy="7" r="4.4" />
+          <path d="m10.4 10.4 3 3" stroke-linecap="round" />
+        </svg>
+        <input v-model="searchQuery" type="search" :placeholder="$t('settings.scheduledTasks.searchPlaceholder')" />
+        <button v-if="searchQuery" class="st-search-clear" type="button" @click="searchQuery = ''">×</button>
       </div>
 
+      <div class="st-filter-row">
+        <button
+          v-for="option in statusFilterOptions"
+          :key="option.id"
+          type="button"
+          class="st-filter-chip"
+          :class="{ active: statusFilter === option.id }"
+          @click="statusFilter = option.id"
+        >
+          {{ $t(option.labelKey) }}<span>{{ option.count }}</span>
+        </button>
+      </div>
+
+      <div class="st-task-list">
       <button
-        v-for="task in tasks"
+        v-for="task in filteredTasks"
         :key="task.id"
         type="button"
         class="st-task-card"
         :class="{ active: selectedTaskId === task.id }"
         @click="selectTask(task.id)"
       >
+        <span class="st-task-rail" :class="statusClass(task.lastStatus)" aria-hidden="true"></span>
         <div class="st-task-card-top">
           <strong>{{ task.title }}</strong>
-          <span class="st-status-pill" :class="statusClass(task.lastStatus)">{{ statusLabel(task.lastStatus) }}</span>
+          <span class="st-task-status" :class="statusClass(task.lastStatus)">{{ statusLabel(task.lastStatus) }}</span>
         </div>
-        <p>{{ scheduleSummary(task) }}</p>
-        <div class="st-task-card-meta">
-          <span>{{ task.enabled ? $t('settings.scheduledTasks.enabled') : $t('settings.scheduledTasks.disabled') }}</span>
-          <span>{{ task.createdBy === 'ai' ? $t('settings.scheduledTasks.createdByAi') : $t('settings.scheduledTasks.createdByManual') }}</span>
-        </div>
-        <div class="st-task-card-meta muted">
-          <span>{{ $t('settings.scheduledTasks.nextRun', { time: formatTimestamp(task.retryScheduledAt || task.nextRunAt) }) }}</span>
-        </div>
-        <div v-if="task.providerId || task.modelId" class="st-task-card-meta muted">
-          <span>{{ taskModelLabel(task) }}</span>
+        <p class="st-task-schedule">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" aria-hidden="true">
+            <circle cx="8" cy="8" r="5.4" />
+            <path d="M8 4.9V8l2 1.2" />
+          </svg>
+          {{ scheduleSummary(task) }}
+        </p>
+        <div class="st-task-card-footer">
+          <span class="st-task-next" :class="{ 'is-off': !task.enabled }">
+            {{ task.enabled ? formatRelativeRun(taskNextRunAt(task)) : $t('settings.scheduledTasks.disabled') }}
+          </span>
+          <span class="st-task-origin">{{ task.createdBy === 'ai' ? 'AI' : 'MANUAL' }}</span>
         </div>
       </button>
+      </div>
+
+      <div v-if="filteredTasks.length === 0" class="st-list-empty">
+        <span class="st-list-empty-mark">{{ tasks.length === 0 ? '✦' : '⌕' }}</span>
+        <strong>{{ tasks.length === 0 ? $t('settings.scheduledTasks.emptyPageTitle') : $t('settings.scheduledTasks.filteredEmptyTitle') }}</strong>
+        <p>{{ tasks.length === 0 ? $t('settings.scheduledTasks.emptyPageHint') : $t('settings.scheduledTasks.filteredEmptyDescription') }}</p>
+        <button v-if="tasks.length === 0" class="st-primary-btn" type="button" @click="startAdd">{{ $t('settings.scheduledTasks.createTask') }}</button>
+      </div>
     </aside>
 
     <section class="st-main">
       <div class="st-main-header">
-        <div>
-          <h3>{{ editing ? $t('settings.scheduledTasks.editTask') : (selectedTask?.title || $t('settings.scheduledTasks.manageTitle')) }}</h3>
+        <div class="st-main-heading">
+          <span class="st-main-kicker">{{ editing ? 'TASK BUILDER' : 'TASK DETAIL' }}</span>
+          <h3>
+            {{ editing
+              ? (editingExistingTask ? $t('settings.scheduledTasks.editTaskHeading') : $t('settings.scheduledTasks.newTaskHeading'))
+              : (selectedTask?.title || $t('settings.scheduledTasks.manageTitle')) }}
+          </h3>
           <p>
             {{ editing
               ? $t('settings.scheduledTasks.editDescription')
-              : $t('settings.scheduledTasks.detailDescription') }}
+              : (selectedTask ? scheduleSummary(selectedTask) : $t('settings.scheduledTasks.detailDescription')) }}
           </p>
         </div>
 
-        <div v-if="!editing && selectedTask" class="st-main-actions">
+        <div v-if="editing" class="st-main-actions">
+          <button class="st-ghost-btn" type="button" @click="cancelEdit">{{ $t('common.cancel') }}</button>
+          <button class="st-primary-btn" type="button" @click="saveDraft" :disabled="saving">
+            {{ saving ? $t('common.saving') : $t('settings.scheduledTasks.saveTask') }}
+          </button>
+        </div>
+
+        <div v-else-if="selectedTask" class="st-main-actions">
           <button class="st-ghost-btn" type="button" @click="toggleSelectedTaskEnabled">
             {{ selectedTask.enabled ? $t('settings.scheduledTasks.disable') : $t('settings.scheduledTasks.enable') }}
           </button>
-          <button class="st-ghost-btn" type="button" @click="runSelectedTaskNow">{{ $t('settings.scheduledTasks.runNow') }}</button>
+          <button class="st-primary-btn" type="button" @click="runSelectedTaskNow">▶ {{ $t('settings.scheduledTasks.runNow') }}</button>
           <button class="st-ghost-btn" type="button" @click="startEdit">{{ $t('settings.scheduledTasks.edit') }}</button>
           <button class="st-danger-btn" type="button" @click="deleteSelectedTask">{{ $t('common.delete') }}</button>
         </div>
@@ -899,13 +1051,14 @@ onUnmounted(() => {
       <div v-if="editing && draft" class="st-editor-layout">
         <section class="st-editor-card ai-card">
           <div class="st-section-head">
-            <h4>{{ $t('settings.scheduledTasks.aiDraftTitle') }}</h4>
-            <span>{{ $t('settings.scheduledTasks.aiDraftSubtitle') }}</span>
+            <h4>{{ $t('settings.scheduledTasks.aiDraftSection') }}</h4>
+            <span>{{ $t('settings.scheduledTasks.aiDraftSectionHint') }}</span>
           </div>
           <textarea
             v-model="aiDraftPrompt"
             rows="5"
             class="st-textarea"
+            :aria-label="$t('settings.scheduledTasks.aiDraftPromptLabel')"
             :placeholder="$t('settings.scheduledTasks.aiDraftPlaceholder')"
           />
           <div class="st-editor-actions">
@@ -936,6 +1089,7 @@ onUnmounted(() => {
             <label class="st-field full-span">
               <span>{{ $t('settings.scheduledTasks.prompt') }}</span>
               <textarea v-model="draft.prompt" rows="7" class="st-textarea" :placeholder="$t('settings.scheduledTasks.promptPlaceholder')" />
+              <small class="st-field-hint">{{ $t('settings.scheduledTasks.contentSectionHint') }}</small>
             </label>
 
             <div class="st-schedule-block full-span">
@@ -949,6 +1103,7 @@ onUnmounted(() => {
                   :class="{ active: draft.scheduleKind === mode.id }"
                   @click="draft.scheduleKind = mode.id"
                 >
+                  <span class="st-mode-icon" v-html="scheduleModeIcons[mode.id]"></span>
                   <strong>{{ $t(mode.labelKey) }}</strong>
                   <span>{{ $t(mode.detailKey) }}</span>
                 </button>
@@ -1153,19 +1308,19 @@ onUnmounted(() => {
         </div>
 
         <section v-show="activeDetailTab === 'details'" class="st-summary-card">
+          <div class="st-detail-runway" :class="statusClass(selectedTask.lastStatus)">
+            <div class="st-detail-runway-copy">
+              <span>{{ $t('settings.scheduledTasks.nextRunTitle') }}</span>
+              <strong>{{ formatRelativeRun(selectedTask.retryScheduledAt || selectedTask.nextRunAt) }}</strong>
+              <small>{{ formatTimestamp(selectedTask.retryScheduledAt || selectedTask.nextRunAt) }}</small>
+            </div>
+            <span class="st-status-pill" :class="statusClass(selectedTask.lastStatus)">{{ statusLabel(selectedTask.lastStatus) }}</span>
+          </div>
           <div class="st-section-head">
             <h4>{{ $t('settings.scheduledTasks.overview') }}</h4>
             <span>{{ selectedTask.createdBy === 'ai' ? $t('settings.scheduledTasks.createdByAi') : $t('settings.scheduledTasks.createdByManual') }}</span>
           </div>
           <div class="st-metrics-grid">
-            <div class="st-metric">
-              <span>{{ $t('settings.scheduledTasks.currentStatus') }}</span>
-              <strong>{{ statusLabel(selectedTask.lastStatus) }}</strong>
-            </div>
-            <div class="st-metric">
-              <span>{{ $t('settings.scheduledTasks.nextRunLabel') }}</span>
-              <strong>{{ formatTimestamp(selectedTask.retryScheduledAt || selectedTask.nextRunAt) }}</strong>
-            </div>
             <div class="st-metric">
               <span>{{ $t('settings.scheduledTasks.lastRunLabel') }}</span>
               <strong>{{ formatTimestamp(selectedTask.lastRunAt) }}</strong>
@@ -1174,14 +1329,18 @@ onUnmounted(() => {
               <span>{{ $t('settings.scheduledTasks.retryPolicy') }}</span>
               <strong>{{ $t('settings.scheduledTasks.retryPolicyValue', { retries: selectedTask.retryPolicy.maxRetries, minutes: selectedTask.retryPolicy.retryDelayMinutes }) }}</strong>
             </div>
+            <div class="st-metric">
+              <span>{{ $t('settings.scheduledTasks.taskModelTitle') }}</span>
+              <strong>{{ taskModelLabel(selectedTask) }}</strong>
+            </div>
           </div>
           <div class="st-summary-block">
-            <strong>{{ $t('settings.scheduledTasks.scheduleMode') }}</strong>
-            <p>{{ scheduleSummary(selectedTask) }}</p>
-          </div>
-          <div class="st-summary-block">
-            <strong>{{ $t('settings.scheduledTasks.executionPrompt') }}</strong>
+            <strong>{{ $t('settings.scheduledTasks.taskPromptTitle') }}</strong>
             <div class="st-prompt-md markdown-body" v-html="renderMarkdown(selectedTask.prompt)"></div>
+          </div>
+          <div class="st-section-head st-resources-head">
+            <h4>{{ $t('settings.scheduledTasks.resourcesTitle') }}</h4>
+            <span>{{ selectedTask.selectedSkillIds.length }} Skill · {{ selectedTask.selectedMcpServerIds.length }} MCP</span>
           </div>
           <div class="st-scope-summary-grid">
             <div class="st-summary-block">
@@ -1210,12 +1369,17 @@ onUnmounted(() => {
             <h4>{{ $t('settings.scheduledTasks.logsTab') }}</h4>
             <span>{{ $t('settings.scheduledTasks.recordCount', { count: selectedTaskReports.length }) }}</span>
           </div>
-          <div v-if="selectedTaskReports.length === 0" class="st-empty-inline">{{ $t('settings.scheduledTasks.noReports') }}</div>
+          <div v-if="selectedTaskReports.length === 0" class="st-report-empty">
+            <span>◷</span>
+            <strong>{{ $t('settings.scheduledTasks.noReports') }}</strong>
+            <p>{{ $t('settings.scheduledTasks.runHistoryEmpty') }}</p>
+          </div>
           <button
             v-for="report in selectedTaskReports"
             :key="report.id"
             type="button"
             class="st-report-item"
+            :class="reportStatusClass(report.status)"
             @click="openReport(report.id)"
           >
             <div class="st-report-item-top">
@@ -1226,15 +1390,39 @@ onUnmounted(() => {
             <div class="st-report-item-meta">
               <span>{{ report.trigger === 'manual' ? $t('settings.scheduledTasks.manualTrigger') : $t('settings.scheduledTasks.scheduledTrigger') }}</span>
               <span>{{ $t('settings.scheduledTasks.attemptCount', { count: report.attempt }) }}</span>
+              <span class="st-report-open">{{ $t('settings.scheduledTasks.viewReport') }} →</span>
             </div>
           </button>
         </section>
       </div>
 
-      <div v-else class="st-empty-main">
-        {{ $t('settings.scheduledTasks.emptyMain') }}
+      <div v-else class="st-onboarding">
+        <div class="st-onboarding-art" aria-hidden="true">
+          <span class="st-onboarding-ring ring-one"></span>
+          <span class="st-onboarding-ring ring-two"></span>
+          <span class="st-onboarding-core">
+            <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="15" cy="16" r="8.5" />
+              <path d="M15 10.5V16l3.6 2.2" />
+              <path d="m25.2 4.2.8 2.3 2.3.8-2.3.8-.8 2.3-.8-2.3-2.3-.8 2.3-.8.8-2.3Z" fill="currentColor" stroke="none" />
+            </svg>
+          </span>
+        </div>
+        <span class="st-onboarding-kicker">{{ $t('settings.scheduledTasks.heroEyebrow') }}</span>
+        <h3>{{ tasks.length === 0 ? $t('settings.scheduledTasks.emptyPageTitle') : $t('settings.scheduledTasks.emptySelectionTitle') }}</h3>
+        <p>{{ tasks.length === 0 ? $t('settings.scheduledTasks.emptyPageDescription') : $t('settings.scheduledTasks.emptySelectionDescription') }}</p>
+        <div class="st-onboarding-points">
+          <span>{{ $t('settings.scheduledTasks.modeDaily') }}</span>
+          <span>{{ $t('settings.scheduledTasks.retryTitle') }}</span>
+          <span>{{ $t('settings.scheduledTasks.logsTab') }}</span>
+        </div>
+        <button v-if="tasks.length === 0" class="st-primary-btn st-onboarding-cta" type="button" @click="startAdd">
+          ＋ {{ $t('settings.scheduledTasks.createTask') }}
+        </button>
+        <small v-if="tasks.length === 0">{{ $t('settings.scheduledTasks.emptyPageHint') }}</small>
       </div>
     </section>
+    </div>
 
     <ScheduledTaskReportDialog :report="activeReport" @close="closeReportDialog" />
   </div>
@@ -1927,6 +2115,3116 @@ onUnmounted(() => {
   .st-scope-summary-grid,
   .st-interval-row {
     grid-template-columns: 1fr;
+  }
+}
+</style>
+
+<style scoped>
+/* Final cascade: keep the compact workspace authoritative. */
+.st-root .st-hero {
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+  background: var(--app-panel);
+}
+
+.st-root .st-hero-copy {
+  flex: 1;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  max-width: none;
+}
+
+.st-root .st-hero h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.st-root .st-hero-copy > p {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: none;
+  margin: 0;
+  color: var(--app-text-faint);
+  font-size: 0.66rem;
+  line-height: 1.3;
+}
+
+.st-root .st-hero-meta {
+  gap: 7px;
+  margin: 0 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.st-root .st-hero-model {
+  height: 31px;
+  padding: 2px 3px 2px 9px;
+}
+
+.st-root .st-hero-actions {
+  padding: 0;
+}
+
+.st-root .st-hero-create {
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 0.73rem;
+}
+
+.st-root .st-body {
+  grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
+  gap: 0;
+  padding: 0;
+}
+
+.st-root .st-sidebar {
+  gap: 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-right: 1px solid var(--app-border);
+  border-radius: 0;
+  background: var(--app-panel);
+  box-shadow: none;
+}
+
+.st-root .st-sidebar-header {
+  align-items: center;
+  padding: 2px 2px 4px;
+}
+
+.st-root .st-sidebar-header h3 {
+  margin: 0;
+  font-size: 0.87rem;
+}
+
+.st-root .st-sidebar-header p {
+  display: none;
+}
+
+.st-root .st-search {
+  height: 31px;
+}
+
+.st-root .st-filter-row {
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.st-root .st-filter-chip {
+  min-height: 24px;
+  padding: 2px 5px;
+  font-size: 0.63rem;
+}
+
+.st-root .st-task-list {
+  gap: 1px;
+  margin: 0 -4px;
+  padding: 0 4px 4px;
+}
+
+.st-root .st-task-card {
+  padding: 9px 9px 8px 13px;
+  border-radius: 9px;
+}
+
+.st-root .st-task-card strong {
+  font-size: 0.81rem;
+}
+
+.st-root .st-task-schedule {
+  margin-top: 4px;
+  font-size: 0.69rem;
+}
+
+.st-root .st-main {
+  padding: 13px 18px;
+  border: 0;
+  border-radius: 0;
+  background: var(--app-main-surface);
+}
+
+.st-root .st-main-header {
+  gap: 12px;
+  padding-bottom: 9px;
+}
+
+.st-root .st-main-header h3 {
+  margin-top: 0;
+  font-size: 1.04rem;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.st-root .st-main-header p {
+  margin-top: 2px;
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.st-root .st-main-actions {
+  gap: 5px;
+}
+
+.st-root .st-main-actions .st-primary-btn,
+.st-root .st-main-actions .st-ghost-btn,
+.st-root .st-main-actions .st-danger-btn {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 0.69rem;
+}
+
+.st-root .st-detail {
+  gap: 8px;
+}
+
+.st-root .st-detail-tabs {
+  padding: 2px;
+  border-radius: 8px;
+}
+
+.st-root .st-detail-tab {
+  min-height: 24px;
+  padding: 3px 10px;
+  font-size: 0.66rem;
+}
+
+.st-root .st-summary-card,
+.st-root .st-report-card {
+  gap: 9px;
+  padding: 12px;
+  border-radius: 11px;
+}
+
+.st-root .st-detail-runway {
+  padding: 9px 12px;
+  border-radius: 9px;
+}
+
+.st-root .st-detail-runway-copy {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.st-root .st-detail-runway-copy span {
+  font-size: 0.62rem;
+}
+
+.st-root .st-detail-runway-copy strong {
+  font-size: 0.93rem;
+  letter-spacing: -0.01em;
+}
+
+.st-root .st-detail-runway-copy small {
+  font-size: 0.6rem;
+}
+
+.st-root .st-status-pill {
+  padding: 3px 8px;
+  font-size: 0.6rem;
+}
+
+.st-root .st-metrics-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: 9px;
+}
+
+.st-root .st-metric {
+  gap: 2px;
+  padding: 7px 9px;
+  border: 0;
+  border-right: 1px solid var(--app-border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.st-root .st-metric:last-child {
+  border-right: 0;
+}
+
+.st-root .st-section-head h4 {
+  font-size: 0.78rem;
+}
+
+.st-root .st-section-head > span {
+  font-size: 0.61rem;
+}
+
+.st-root .st-summary-block {
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
+.st-root .st-summary-block > strong {
+  margin-bottom: 3px;
+  font-size: 0.64rem;
+}
+
+.st-root .st-prompt-md {
+  padding: 8px 10px;
+  font-size: 0.71rem;
+  line-height: 1.55;
+}
+
+.st-root .st-scope-summary-grid {
+  gap: 6px;
+}
+
+.st-root .st-editor-layout {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.st-root .st-editor-card {
+  gap: 11px;
+  padding: 13px;
+  border-radius: 11px;
+}
+
+.st-root .st-form-grid {
+  gap: 10px;
+}
+
+.st-root .st-mode-option {
+  min-height: 62px;
+  padding: 8px;
+}
+
+.st-root .st-schedule-panel,
+.st-root .st-retry-block {
+  padding: 9px;
+}
+
+.st-root .st-scope-card {
+  max-height: 196px;
+  padding: 9px;
+}
+
+.st-root .st-editor-card.ai-card .st-textarea {
+  min-height: 72px;
+}
+
+.st-root .st-body.is-editing {
+  display: block;
+}
+
+.st-root .st-body.is-editing .st-sidebar {
+  display: none;
+}
+
+.st-root .st-body.is-editing .st-main {
+  height: 100%;
+}
+
+.st-root .st-body.is-editing .st-editor-layout {
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+}
+
+.st-root .st-body.is-editing .st-editor-layout > .st-editor-card.ai-card {
+  position: static;
+  order: -1;
+}
+
+@media (max-width: 1080px) {
+  .st-root .st-hero-meta {
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+
+  .st-root .st-hero-copy {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .st-root .st-hero {
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 980px) {
+  .st-root .st-body {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .st-root .st-sidebar {
+    max-height: 250px;
+    border-right: 0;
+    border-bottom: 1px solid var(--app-border);
+  }
+
+  .st-root .st-main {
+    min-height: 420px;
+  }
+
+  .st-root .st-metrics-grid {
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .st-root .st-hero {
+    padding: 9px 12px;
+  }
+
+  .st-root .st-main {
+    padding: 11px 12px;
+  }
+
+  .st-root .st-form-grid,
+  .st-root .st-scope-grid,
+  .st-root .st-interval-fields,
+  .st-root .st-retry-fields,
+  .st-root .st-mode-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+
+<style scoped>
+/* ── Compact workspace pass (ZCode-like density) ────────────────────── */
+.st-root .st-hero {
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+  background: var(--app-panel);
+}
+
+.st-root .st-hero::after,
+.st-root .st-hero-orb,
+.st-root .st-hero-kicker {
+  display: none;
+}
+
+.st-root .st-hero-copy {
+  flex: 1;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  max-width: none;
+}
+
+.st-root .st-hero h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.st-root .st-hero-copy > p {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: none;
+  margin: 0;
+  color: var(--app-text-faint);
+  font-size: 0.66rem;
+  line-height: 1.3;
+}
+
+.st-hero-copy > p span {
+  opacity: 0.5;
+}
+
+.st-root .st-hero-meta {
+  gap: 7px;
+  margin: 0 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.st-root .st-hero-model {
+  height: 31px;
+  padding: 2px 3px 2px 9px;
+}
+
+.st-root .st-hero-model-label {
+  font-size: 0.61rem;
+}
+
+.st-root .st-hero-model :deep(.provider-model-trigger) {
+  height: 23px;
+  font-size: 0.67rem;
+}
+
+.st-root .st-hero-next {
+  min-height: 27px;
+  padding: 0 10px;
+  font-size: 0.65rem;
+  white-space: nowrap;
+}
+
+.st-root .st-hero-actions {
+  padding: 0;
+}
+
+.st-root .st-hero-create {
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 0.73rem;
+}
+
+.st-root .st-stats {
+  display: none;
+}
+
+.st-root .st-body {
+  grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
+  gap: 0;
+  padding: 0;
+}
+
+.st-root .st-sidebar {
+  gap: 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-right: 1px solid var(--app-border);
+  border-radius: 0;
+  background: var(--app-panel);
+  box-shadow: none;
+}
+
+.st-root .st-sidebar-header {
+  align-items: center;
+  padding: 2px 2px 4px;
+}
+
+.st-root .st-list-kicker {
+  display: none;
+}
+
+.st-root .st-sidebar-header h3 {
+  margin: 0;
+  font-size: 0.87rem;
+}
+
+.st-root .st-sidebar-header p {
+  display: none;
+}
+
+.st-root .st-search {
+  height: 31px;
+}
+
+.st-root .st-filter-row {
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.st-root .st-filter-chip {
+  min-height: 24px;
+  padding: 2px 5px;
+  font-size: 0.63rem;
+}
+
+.st-root .st-filter-chip span {
+  background: transparent;
+}
+
+.st-root .st-task-list {
+  gap: 1px;
+  margin: 0 -4px;
+  padding: 0 4px 4px;
+}
+
+.st-root .st-task-card {
+  padding: 9px 9px 8px 13px;
+  border-radius: 9px;
+}
+
+.st-root .st-task-card strong {
+  font-size: 0.81rem;
+}
+
+.st-root .st-task-schedule {
+  margin-top: 4px;
+  font-size: 0.69rem;
+}
+
+.st-task-card-footer {
+  margin-top: 5px;
+}
+
+.st-root .st-main {
+  padding: 13px 18px;
+  border: 0;
+  border-radius: 0;
+  background: var(--app-main-surface);
+}
+
+.st-root .st-main-header {
+  gap: 12px;
+  padding-bottom: 9px;
+}
+
+.st-root .st-main-kicker {
+  display: none;
+}
+
+.st-root .st-main-header h3 {
+  margin-top: 0;
+  font-size: 1.04rem;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.st-root .st-main-header p {
+  margin-top: 2px;
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.st-root .st-main-actions {
+  gap: 5px;
+}
+
+.st-root .st-main-actions .st-primary-btn,
+.st-root .st-main-actions .st-ghost-btn,
+.st-root .st-main-actions .st-danger-btn {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 0.69rem;
+}
+
+.st-root .st-detail {
+  gap: 8px;
+}
+
+.st-root .st-detail-tabs {
+  padding: 2px;
+  border-radius: 8px;
+}
+
+.st-root .st-detail-tab {
+  min-height: 24px;
+  padding: 3px 10px;
+  font-size: 0.66rem;
+}
+
+.st-root .st-summary-card,
+.st-root .st-report-card {
+  gap: 9px;
+  padding: 12px;
+  border-radius: 11px;
+}
+
+.st-root .st-detail-runway {
+  padding: 9px 12px;
+  border-radius: 9px;
+}
+
+.st-detail-runway-copy {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.st-detail-runway-copy span {
+  font-size: 0.62rem;
+}
+
+.st-detail-runway-copy strong {
+  font-size: 0.93rem;
+  letter-spacing: -0.01em;
+}
+
+.st-detail-runway-copy small {
+  font-size: 0.6rem;
+}
+
+.st-root .st-status-pill {
+  padding: 3px 8px;
+  font-size: 0.6rem;
+}
+
+.st-root .st-metrics-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: 9px;
+}
+
+.st-root .st-metric {
+  gap: 2px;
+  padding: 7px 9px;
+  border: 0;
+  border-right: 1px solid var(--app-border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.st-root .st-metric:last-child {
+  border-right: 0;
+}
+
+.st-root .st-metric span {
+  font-size: 0.57rem;
+}
+
+.st-root .st-metric strong {
+  font-size: 0.67rem;
+}
+
+.st-root .st-section-head h4 {
+  font-size: 0.78rem;
+}
+
+.st-root .st-section-head > span {
+  font-size: 0.61rem;
+}
+
+.st-root .st-summary-block {
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
+.st-root .st-summary-block > strong {
+  margin-bottom: 3px;
+  font-size: 0.64rem;
+}
+
+.st-root .st-prompt-md {
+  padding: 8px 10px;
+  font-size: 0.71rem;
+  line-height: 1.55;
+}
+
+.st-root .st-scope-summary-grid {
+  gap: 6px;
+}
+
+.st-root .st-resources-head {
+  margin-top: 0;
+}
+
+.st-root .st-resources-head h4 {
+  font-size: 0.7rem;
+}
+
+.st-root .st-editor-layout {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.st-body.is-editing {
+  display: block;
+}
+
+.st-root .st-body.is-editing .st-sidebar {
+  display: none;
+}
+
+.st-root .st-body.is-editing .st-main {
+  height: 100%;
+}
+
+.st-root .st-body.is-editing .st-main-header {
+  width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+}
+
+.st-root .st-body.is-editing .st-editor-layout {
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+}
+
+.st-root .st-body.is-editing .st-editor-layout > .st-editor-card.ai-card {
+  position: static;
+  order: -1;
+}
+
+.st-root .st-editor-card {
+  gap: 11px;
+  padding: 13px;
+  border-radius: 11px;
+}
+
+.st-root .st-editor-card.ai-card .st-textarea {
+  min-height: 72px;
+}
+
+.st-root .st-form-grid {
+  gap: 10px;
+}
+
+.st-root .st-mode-option {
+  min-height: 62px;
+  padding: 8px;
+}
+
+.st-root .st-schedule-panel,
+.st-root .st-retry-block {
+  padding: 9px;
+}
+
+.st-root .st-scope-card {
+  max-height: 196px;
+  padding: 9px;
+}
+
+@media (max-width: 1080px) {
+  .st-root .st-hero-meta {
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+
+  .st-root .st-hero-copy {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .st-root .st-hero {
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 980px) {
+  .st-root .st-body {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .st-root .st-sidebar {
+    max-height: 250px;
+    border-right: 0;
+    border-bottom: 1px solid var(--app-border);
+  }
+
+  .st-root .st-main {
+    min-height: 420px;
+  }
+
+  .st-root .st-metrics-grid {
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .st-root .st-hero {
+    padding: 9px 12px;
+  }
+
+  .st-root .st-hero-actions {
+    width: auto;
+  }
+
+  .st-root .st-hero-create {
+    width: auto;
+  }
+
+  .st-root .st-main {
+    padding: 11px 12px;
+  }
+
+  .st-root .st-form-grid,
+  .st-root .st-scope-grid,
+  .st-root .st-interval-fields,
+  .st-root .st-retry-fields,
+  .st-root .st-mode-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+
+<style scoped>
+/* ── Automation workbench ───────────────────────────────────────────── */
+.st-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--app-text);
+  background:
+    radial-gradient(95% 62% at 100% 0%, color-mix(in srgb, var(--app-accent) 10%, transparent), transparent 62%),
+    var(--app-main-surface);
+}
+
+.st-root button,
+.st-root input,
+.st-root textarea,
+.st-root select {
+  font-family: inherit;
+}
+
+.st-root :focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.st-root .st-hero {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 22px 26px 34px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--app-border);
+  background:
+    linear-gradient(118deg, color-mix(in srgb, var(--app-accent) 11%, transparent), transparent 42%),
+    linear-gradient(180deg, var(--app-panel-strong), var(--app-panel));
+}
+
+.st-hero::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--app-border) 66%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--app-border) 66%, transparent) 1px, transparent 1px);
+  background-size: 30px 30px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent 86%);
+}
+
+.st-hero-orb {
+  position: absolute;
+  top: -170px;
+  right: 4%;
+  width: 390px;
+  height: 390px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, var(--app-accent-glow), transparent 66%);
+  filter: blur(8px);
+}
+
+.st-hero-copy {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 760px;
+}
+
+.st-hero-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--app-accent-strong);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.17em;
+}
+
+.st-hero-spark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  color: var(--app-text-strong);
+  background: var(--app-sig);
+  box-shadow: 0 0 18px var(--app-accent-glow);
+  font-size: 0.66rem;
+}
+
+.st-hero h2 {
+  margin: 9px 0 0;
+  color: var(--app-text-strong);
+  font-size: clamp(1.55rem, 2.4vw, 2rem);
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+}
+
+.st-hero-copy > p {
+  max-width: 640px;
+  margin: 8px 0 0;
+  color: var(--app-text-muted);
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+
+.st-hero-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.st-hero-model {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 5px 4px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-panel-strong) 72%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.st-hero-model-label {
+  color: var(--app-text-faint);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.st-hero-model :deep(.provider-model-trigger) {
+  height: 26px;
+  max-width: 250px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--app-text-soft);
+  background: var(--app-panel-muted);
+  font-size: 0.72rem;
+}
+
+.st-hero-next {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--app-success) 24%, var(--app-border));
+  border-radius: 999px;
+  color: var(--app-text-soft);
+  background: color-mix(in srgb, var(--app-success-soft) 58%, transparent);
+  font-size: 0.72rem;
+}
+
+.st-hero-next.is-muted {
+  color: var(--app-text-faint);
+  border-color: var(--app-border);
+  background: var(--app-panel-muted);
+}
+
+.st-hero-next-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--app-success);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--app-success) 12%, transparent);
+}
+
+.st-hero-actions {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  padding-top: 4px;
+}
+
+.st-root .st-primary-btn,
+.st-root .st-ghost-btn,
+.st-root .st-danger-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.st-root .st-primary-btn {
+  color: #fff;
+  border: 1px solid color-mix(in srgb, var(--app-accent-strong) 55%, transparent);
+  background: linear-gradient(135deg, var(--app-accent), var(--app-accent-strong));
+  box-shadow: 0 8px 22px var(--app-accent-glow);
+}
+
+.st-root .st-primary-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 11px 26px var(--app-accent-glow);
+}
+
+.st-root .st-primary-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+  box-shadow: none;
+}
+
+.st-root .st-ghost-btn {
+  color: var(--app-text-soft);
+  border: 1px solid var(--app-border);
+  background: var(--app-panel-muted);
+}
+
+.st-root .st-ghost-btn:hover {
+  color: var(--app-text-strong);
+  border-color: var(--app-border-strong);
+  background: var(--app-panel-subtle);
+}
+
+.st-root .st-danger-btn {
+  color: var(--app-danger);
+  border: 1px solid color-mix(in srgb, var(--app-danger) 24%, var(--app-border));
+  background: var(--app-danger-soft);
+}
+
+.st-root .st-danger-btn:hover {
+  color: var(--app-text-strong);
+  border-color: var(--app-danger);
+  background: color-mix(in srgb, var(--app-danger) 22%, transparent);
+}
+
+.st-root .st-hero-create {
+  min-height: 40px;
+  padding: 10px 17px;
+  border-radius: 11px;
+  font-size: 0.82rem;
+}
+
+.st-hero-create-plus {
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.st-root .st-stats {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: -17px 24px 0;
+}
+
+.st-root .st-stat-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  min-height: 86px;
+  padding: 14px 15px;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--app-panel-strong) 82%, transparent);
+  box-shadow: var(--shadow-1);
+  backdrop-filter: blur(18px);
+}
+
+.st-stat-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 33px;
+  height: 33px;
+  border-radius: 10px;
+  color: var(--app-accent-strong);
+  background: var(--app-accent-soft);
+}
+
+.st-stat-icon :deep(svg) {
+  width: 18px;
+  height: 18px;
+}
+
+.st-stat-icon.is-running {
+  color: #2dd4bf;
+  background: rgba(45, 212, 191, 0.12);
+}
+
+.st-stat-icon.is-today {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+}
+
+.st-stat-icon.is-success {
+  color: var(--app-success);
+  background: var(--app-success-soft);
+}
+
+.st-stat-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.st-stat-label {
+  color: var(--app-text-muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+}
+
+.st-stat-value {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  margin-top: 3px;
+  color: var(--app-text-strong);
+  font-size: 1.32rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.st-stat-value small {
+  color: var(--app-text-faint);
+  font-size: 0.66rem;
+  font-weight: 500;
+}
+
+.st-stat-note {
+  margin-top: 3px;
+  color: var(--app-text-faint);
+  font-size: 0.64rem;
+}
+
+.st-stat-track {
+  display: block;
+  width: 100%;
+  height: 3px;
+  margin-top: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--app-border);
+}
+
+.st-stat-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--app-sig);
+  transition: width 0.35s ease;
+}
+
+.st-root .st-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(286px, 330px) minmax(0, 1fr);
+  gap: 14px;
+  padding: 14px 24px 22px;
+  overflow: hidden;
+}
+
+.st-root .st-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-height: 0;
+  padding: 14px;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: 16px;
+  background: var(--app-panel);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.st-root .st-sidebar-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 1px 2px 4px;
+}
+
+.st-list-heading {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.st-list-kicker {
+  color: var(--app-text-faint);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+.st-root .st-sidebar-header h3 {
+  margin-top: 4px;
+  color: var(--app-text-strong);
+  font-size: 0.98rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.st-root .st-sidebar-header p {
+  display: -webkit-box;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--app-text-faint);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.st-list-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 23px;
+  height: 23px;
+  padding: 0 7px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  color: var(--app-text-muted);
+  background: var(--app-panel-muted);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.62rem;
+}
+
+.st-root .st-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-panel-muted);
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+
+.st-root .st-search:focus-within {
+  border-color: color-mix(in srgb, var(--app-accent) 52%, var(--app-border));
+  background: var(--app-panel-subtle);
+}
+
+.st-search > svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--app-text-faint);
+}
+
+.st-root .st-search input {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  color: var(--app-text);
+  background: transparent;
+  font-size: 0.76rem;
+}
+
+.st-search input::placeholder {
+  color: var(--app-text-faint);
+}
+
+.st-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.st-search-clear {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--app-text-faint);
+  background: transparent;
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.st-search-clear:hover {
+  color: var(--app-text);
+  background: var(--app-panel-muted);
+}
+
+.st-root .st-filter-row {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-panel-subtle);
+}
+
+.st-filter-chip {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--app-text-muted);
+  background: transparent;
+  font-size: 0.66rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.13s ease, color 0.13s ease, border-color 0.13s ease;
+}
+
+.st-filter-chip span {
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  color: var(--app-text-faint);
+  background: var(--app-panel-muted);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.57rem;
+  line-height: 15px;
+  text-align: center;
+}
+
+.st-filter-chip:hover {
+  color: var(--app-text);
+  background: var(--app-panel-muted);
+}
+
+.st-filter-chip.active {
+  color: var(--app-accent-strong);
+  border-color: color-mix(in srgb, var(--app-accent) 26%, transparent);
+  background: var(--app-accent-soft);
+}
+
+.st-filter-chip.active span {
+  color: var(--app-accent-strong);
+  background: color-mix(in srgb, var(--app-accent) 14%, transparent);
+}
+
+.st-root .st-task-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0 -5px;
+  padding: 3px 5px 6px;
+  overflow-y: auto;
+}
+
+.st-root .st-task-card {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 10px 10px 9px 14px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  color: var(--app-text);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
+}
+
+.st-root .st-task-card:hover {
+  border-color: var(--app-border);
+  background: var(--app-panel-muted);
+}
+
+.st-root .st-task-card.active {
+  border-color: color-mix(in srgb, var(--app-accent) 25%, var(--app-border));
+  background:
+    linear-gradient(110deg, color-mix(in srgb, var(--app-accent) 11%, transparent), transparent 72%),
+    var(--app-panel-subtle);
+}
+
+.st-task-rail {
+  position: absolute;
+  top: 11px;
+  bottom: 11px;
+  left: 3px;
+  width: 2px;
+  border-radius: 3px;
+  background: transparent;
+}
+
+.st-task-rail.is-running,
+.st-task-rail.is-retrying {
+  background: #2dd4bf;
+  box-shadow: 0 0 8px rgba(45, 212, 191, 0.4);
+}
+
+.st-task-rail.is-completed {
+  background: var(--app-success);
+}
+
+.st-task-rail.is-failed {
+  background: var(--app-danger);
+}
+
+.st-root .st-task-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.st-root .st-task-card strong {
+  overflow: hidden;
+  color: var(--app-text-strong);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-task-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  color: var(--app-text-faint);
+  font-size: 0.59rem;
+  font-weight: 600;
+}
+
+.st-task-status::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.st-task-status.is-running,
+.st-task-status.is-retrying {
+  color: #2dd4bf;
+}
+
+.st-task-status.is-completed {
+  color: var(--app-success);
+}
+
+.st-task-status.is-failed {
+  color: var(--app-danger);
+}
+
+.st-root .st-task-schedule {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--app-text-muted);
+  font-size: 0.68rem;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-task-schedule svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  color: var(--app-text-faint);
+}
+
+.st-task-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 7px;
+}
+
+.st-task-next {
+  color: var(--app-text-faint);
+  font-size: 0.63rem;
+}
+
+.st-task-next.is-off {
+  opacity: 0.65;
+}
+
+.st-task-origin {
+  padding: 1px 4px;
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  color: var(--app-text-faint);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.5rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.st-list-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 20px 12px;
+  border: 1px dashed var(--app-border-strong);
+  border-radius: 12px;
+  text-align: center;
+}
+
+.st-list-empty-mark {
+  color: var(--app-accent-strong);
+  font-size: 1.15rem;
+}
+
+.st-list-empty strong {
+  color: var(--app-text);
+  font-size: 0.76rem;
+}
+
+.st-list-empty p {
+  margin: 0;
+  color: var(--app-text-faint);
+  font-size: 0.67rem;
+  line-height: 1.5;
+}
+
+.st-list-empty .st-primary-btn {
+  margin-top: 6px;
+  min-height: 30px;
+  padding: 6px 10px;
+  font-size: 0.7rem;
+}
+
+.st-root .st-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 18px 20px;
+  overflow-y: auto;
+  border: 1px solid var(--app-border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, var(--app-panel), var(--app-panel-strong));
+  container-type: inline-size;
+}
+
+.st-root .st-main-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 13px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.st-main-heading {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.st-main-kicker {
+  color: var(--app-text-faint);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+.st-root .st-main-header h3 {
+  margin-top: 4px;
+  color: var(--app-text-strong);
+  font-size: 1.22rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+.st-root .st-main-header p {
+  max-width: 620px;
+  margin-top: 4px;
+  color: var(--app-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.55;
+}
+
+.st-root .st-main-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.st-root .st-main-actions .st-primary-btn,
+.st-root .st-main-actions .st-ghost-btn,
+.st-root .st-main-actions .st-danger-btn {
+  min-height: 33px;
+  padding: 6px 11px;
+  font-size: 0.73rem;
+}
+
+.st-root .st-feedback {
+  align-self: flex-start;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 24%, var(--app-border));
+  border-radius: 9px;
+  color: var(--app-text-soft);
+  background: var(--app-accent-soft);
+  font-size: 0.73rem;
+  line-height: 1.45;
+}
+
+.st-root .st-editor-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 322px;
+  gap: 12px;
+  align-items: start;
+}
+
+.st-root .st-editor-layout > .st-editor-card {
+  order: 1;
+}
+
+.st-root .st-editor-layout > .st-editor-card.ai-card {
+  order: 2;
+  position: sticky;
+  top: 0;
+}
+
+.st-root .st-editor-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 17px;
+  border: 1px solid var(--app-border);
+  border-radius: 15px;
+  background: var(--app-panel-subtle);
+  backdrop-filter: blur(10px);
+}
+
+.st-root .st-editor-card.ai-card {
+  border-color: color-mix(in srgb, var(--app-accent) 24%, var(--app-border));
+  background:
+    radial-gradient(100% 100% at 100% 0%, color-mix(in srgb, var(--app-accent) 15%, transparent), transparent 66%),
+    var(--app-panel-subtle);
+}
+
+.st-root .st-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.st-root .st-section-head h4 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--app-text-strong);
+  font-size: 0.84rem;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.st-root .st-section-head h4::before {
+  width: 2px;
+  height: 12px;
+  background: var(--app-sig);
+}
+
+.st-root .st-section-head > span {
+  max-width: 56%;
+  color: var(--app-text-faint);
+  font-size: 0.66rem;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.st-root .st-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.st-root .st-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--app-text-soft);
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.st-root .st-field-full,
+.st-root .full-span {
+  grid-column: 1 / -1;
+}
+
+.st-root .st-field input,
+.st-root .st-field select,
+.st-root .st-field textarea,
+.st-root .st-textarea {
+  width: 100%;
+  min-height: 35px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 9px;
+  outline: 0;
+  color: var(--app-text);
+  background: var(--app-input-bg);
+  font: inherit;
+  font-size: 0.76rem;
+  transition: border-color 0.14s ease, box-shadow 0.14s ease, background 0.14s ease;
+}
+
+.st-root .st-field input:focus,
+.st-root .st-field select:focus,
+.st-root .st-field textarea:focus,
+.st-root .st-textarea:focus {
+  border-color: color-mix(in srgb, var(--app-accent) 52%, var(--app-border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 10%, transparent);
+}
+
+.st-root .st-field textarea,
+.st-root .st-textarea {
+  min-height: 88px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.st-field-hint {
+  color: var(--app-text-faint);
+  font-size: 0.62rem;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.st-root .st-editor-card.ai-card .st-textarea {
+  min-height: 148px;
+  border-color: color-mix(in srgb, var(--app-accent) 18%, var(--app-border));
+  background: color-mix(in srgb, var(--app-panel-strong) 58%, transparent);
+}
+
+.st-root .st-field.checkbox-field {
+  flex-direction: row;
+  align-items: center;
+  align-self: stretch;
+  gap: 8px;
+  min-height: 35px;
+  margin-top: 19px;
+  padding: 7px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 9px;
+  color: var(--app-text-soft);
+  background: var(--app-panel-subtle);
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.st-root .st-field.checkbox-field input,
+.st-root .st-check-item input {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--app-accent);
+}
+
+.st-root .st-field-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 8px;
+  color: var(--app-text-soft);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.st-root .st-field-label::before {
+  width: 2px;
+  height: 11px;
+  background: var(--app-sig);
+}
+
+.st-root .st-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.st-root .st-mode-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 74px;
+  padding: 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  color: var(--app-text-soft);
+  background: var(--app-panel-subtle);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+
+.st-root .st-mode-option:hover {
+  border-color: var(--app-border-strong);
+  background: var(--app-panel-muted);
+}
+
+.st-root .st-mode-option.active {
+  border-color: color-mix(in srgb, var(--app-accent) 54%, var(--app-border));
+  color: var(--app-accent-strong);
+  background: var(--app-accent-soft);
+}
+
+.st-root .st-mode-option .st-mode-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  margin-bottom: 3px;
+  color: var(--app-text-muted);
+}
+
+.st-root .st-mode-option.active .st-mode-icon {
+  color: var(--app-accent-strong);
+}
+
+.st-mode-icon :deep(svg) {
+  width: 100%;
+  height: 100%;
+}
+
+.st-root .st-mode-option strong {
+  display: block;
+  margin: 0;
+  color: inherit;
+  font-size: 0.73rem;
+  font-weight: 600;
+}
+
+.st-root .st-mode-option > span:not(.st-mode-icon) {
+  display: block;
+  overflow: hidden;
+  color: var(--app-text-faint);
+  font-size: 0.59rem;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-root .st-schedule-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  align-items: end;
+  gap: 10px;
+  margin-top: 9px;
+  padding: 11px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-panel-strong) 42%, transparent);
+}
+
+.st-root .st-schedule-panel.is-interval {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.st-root .st-weekday-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.st-root .st-weekday-chip {
+  min-height: 31px;
+  padding: 5px 4px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  color: var(--app-text-muted);
+  background: var(--app-panel-subtle);
+  font: inherit;
+  font-size: 0.67rem;
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+
+.st-root .st-weekday-chip.active {
+  border-color: color-mix(in srgb, var(--app-accent) 48%, var(--app-border));
+  color: var(--app-accent-strong);
+  background: var(--app-accent-soft);
+}
+
+.st-root .st-interval-fields,
+.st-root .st-retry-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.st-root .st-interval-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 9px;
+  align-items: end;
+}
+
+.st-root .st-interval-row.has-custom {
+  grid-template-columns: minmax(0, 1fr) minmax(90px, 120px);
+}
+
+.st-root .st-retry-block {
+  padding: 11px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-panel-subtle);
+}
+
+.st-root .st-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.st-root .st-scope-card {
+  max-height: 238px;
+  padding: 12px;
+  overflow-y: auto;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-panel-subtle);
+}
+
+.st-root .st-check-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--app-border);
+  cursor: pointer;
+}
+
+.st-root .st-check-item span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.st-root .st-check-item strong {
+  color: var(--app-text-soft);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.st-root .st-check-item small {
+  color: var(--app-text-faint);
+  font-size: 0.62rem;
+  line-height: 1.45;
+}
+
+.st-root .st-tool-policy-options {
+  display: grid;
+  gap: 7px;
+}
+
+.st-root .st-tool-policy-options .st-check-item {
+  padding: 9px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 9px;
+  background: var(--app-panel-subtle);
+}
+
+.st-root .st-tool-policy-options .st-check-item.active {
+  border-color: color-mix(in srgb, var(--app-accent) 48%, var(--app-border));
+  background: var(--app-accent-soft);
+}
+
+.st-root .st-model-hint {
+  color: var(--app-text-faint);
+  font-size: 0.62rem;
+  line-height: 1.5;
+}
+
+.st-root .st-date-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.st-root .st-date-row input {
+  flex: 1;
+}
+
+.st-root .st-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.st-root .st-editor-card.ai-card .st-editor-actions {
+  justify-content: space-between;
+}
+
+.st-root .st-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.st-root .st-tag {
+  padding: 3px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  color: var(--app-text-soft);
+  background: var(--app-panel-muted);
+  font-size: 0.63rem;
+}
+
+.st-root .st-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  min-height: 0;
+}
+
+.st-root .st-detail-tabs {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-panel-muted);
+}
+
+.st-root .st-detail-tab {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--app-text-muted);
+  background: transparent;
+  font-size: 0.71rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+
+.st-root .st-detail-tab:hover {
+  color: var(--app-text);
+  background: var(--app-panel-subtle);
+}
+
+.st-root .st-detail-tab.active {
+  color: var(--app-text-strong);
+  border-color: var(--app-border);
+  background: var(--app-panel-strong);
+  box-shadow: var(--shadow-1);
+}
+
+.st-root .st-detail-tab-count {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  color: var(--app-accent-strong);
+  background: var(--app-accent-soft);
+  font-size: 0.57rem;
+  line-height: 16px;
+}
+
+.st-root .st-summary-card,
+.st-root .st-report-card {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 16px;
+  border: 1px solid var(--app-border);
+  border-radius: 15px;
+  background: var(--app-panel-subtle);
+  backdrop-filter: blur(10px);
+}
+
+.st-root .st-detail-runway {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  overflow: hidden;
+  padding: 17px 18px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 25%, var(--app-border));
+  border-radius: 13px;
+  background:
+    radial-gradient(110% 160% at 100% 0%, var(--app-accent-soft), transparent 58%),
+    linear-gradient(120deg, color-mix(in srgb, var(--app-accent) 9%, transparent), transparent 52%),
+    var(--app-panel-strong);
+}
+
+.st-detail-runway::after {
+  content: '';
+  position: absolute;
+  right: -40px;
+  bottom: -75px;
+  width: 200px;
+  height: 200px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, var(--app-accent-glow), transparent 66%);
+}
+
+.st-detail-runway-copy {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.st-detail-runway-copy span {
+  color: var(--app-text-muted);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.st-detail-runway-copy strong {
+  color: var(--app-text-strong);
+  font-size: 1.33rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.st-detail-runway-copy small {
+  color: var(--app-text-faint);
+  font-size: 0.66rem;
+}
+
+.st-root .st-status-pill {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  color: var(--app-text-muted);
+  background: var(--app-panel-muted);
+  font-size: 0.64rem;
+  font-weight: 600;
+}
+
+.st-root .st-status-pill::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.st-root .st-status-pill.is-completed {
+  color: var(--app-success);
+  border-color: color-mix(in srgb, var(--app-success) 24%, var(--app-border));
+  background: var(--app-success-soft);
+}
+
+.st-root .st-status-pill.is-failed {
+  color: var(--app-danger);
+  border-color: color-mix(in srgb, var(--app-danger) 24%, var(--app-border));
+  background: var(--app-danger-soft);
+}
+
+.st-root .st-status-pill.is-retrying {
+  color: var(--app-warning);
+  border-color: color-mix(in srgb, var(--app-warning) 24%, var(--app-border));
+  background: var(--app-warning-soft);
+}
+
+.st-root .st-status-pill.is-running {
+  color: #2dd4bf;
+  border-color: rgba(45, 212, 191, 0.26);
+  background: rgba(45, 212, 191, 0.12);
+}
+
+.st-root .st-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  gap: 8px;
+}
+
+.st-root .st-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 11px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-panel-strong);
+}
+
+.st-root .st-metric span {
+  color: var(--app-text-faint);
+  font-size: 0.62rem;
+  line-height: 1.35;
+}
+
+.st-root .st-metric strong {
+  overflow: hidden;
+  color: var(--app-text-strong);
+  font-size: 0.73rem;
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+}
+
+.st-root .st-summary-block {
+  padding: 11px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-panel-strong);
+}
+
+.st-root .st-summary-block > strong {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--app-text-soft);
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.st-root .st-summary-block p {
+  margin: 0;
+  color: var(--app-text-muted);
+  font-size: 0.71rem;
+  line-height: 1.55;
+}
+
+.st-root .st-prompt-md {
+  margin-top: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 9px;
+  color: var(--app-text);
+  background: var(--app-panel-subtle);
+  font-size: 0.75rem;
+  line-height: 1.65;
+  overflow-x: auto;
+}
+
+.st-root .st-prompt-md :deep(> :first-child) {
+  margin-top: 0;
+}
+
+.st-root .st-prompt-md :deep(> :last-child) {
+  margin-bottom: 0;
+}
+
+.st-root .st-scope-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.st-root .st-resources-head {
+  margin-top: 2px;
+}
+
+.st-root .st-resources-head h4 {
+  font-size: 0.74rem;
+}
+
+.st-root .st-report-card {
+  gap: 9px;
+}
+
+.st-root .st-report-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  color: var(--app-text);
+  background: var(--app-panel-strong);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease, transform 0.14s ease;
+}
+
+.st-root .st-report-item:hover {
+  border-color: var(--app-border-strong);
+  background: var(--app-panel-muted);
+  transform: translateY(-1px);
+}
+
+.st-root .st-report-item.is-completed {
+  border-left-color: color-mix(in srgb, var(--app-success) 58%, var(--app-border));
+}
+
+.st-root .st-report-item.is-failed {
+  border-left-color: color-mix(in srgb, var(--app-danger) 58%, var(--app-border));
+}
+
+.st-root .st-report-item.is-running,
+.st-root .st-report-item.is-retrying {
+  border-left-color: rgba(45, 212, 191, 0.58);
+}
+
+.st-root .st-report-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.st-root .st-report-item-top strong {
+  color: var(--app-text-strong);
+  font-size: 0.73rem;
+  font-weight: 600;
+}
+
+.st-root .st-report-item-top span {
+  color: var(--app-text-faint);
+  font-size: 0.64rem;
+}
+
+.st-root .st-report-item p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--app-text-muted);
+  font-size: 0.7rem;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.st-root .st-report-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--app-text-faint);
+  font-size: 0.62rem;
+}
+
+.st-report-open {
+  margin-left: auto;
+  color: var(--app-accent-strong);
+}
+
+.st-report-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 22px 16px;
+  border: 1px dashed var(--app-border-strong);
+  border-radius: 12px;
+  text-align: center;
+}
+
+.st-report-empty span {
+  color: var(--app-accent-strong);
+  font-size: 1.25rem;
+}
+
+.st-report-empty strong {
+  color: var(--app-text);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.st-report-empty p {
+  margin: 0;
+  color: var(--app-text-faint);
+  font-size: 0.66rem;
+}
+
+.st-root .st-onboarding {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 380px;
+  padding: 34px 24px;
+  overflow: hidden;
+  border: 1px dashed var(--app-border-strong);
+  border-radius: 15px;
+  background:
+    radial-gradient(60% 70% at 50% 30%, color-mix(in srgb, var(--app-accent) 8%, transparent), transparent 72%),
+    var(--app-panel-subtle);
+  text-align: center;
+}
+
+.st-onboarding-art {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 118px;
+  height: 118px;
+  margin-bottom: 5px;
+}
+
+.st-onboarding-ring {
+  position: absolute;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 22%, transparent);
+  border-radius: 50%;
+}
+
+.ring-one {
+  inset: 4px;
+  animation: st-orbit 9s linear infinite;
+}
+
+.ring-two {
+  inset: 20px;
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--app-accent) 32%, transparent);
+  animation: st-orbit-reverse 14s linear infinite;
+}
+
+@keyframes st-orbit {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes st-orbit-reverse {
+  to { transform: rotate(-360deg); }
+}
+
+.st-onboarding-core {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  height: 58px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 30%, var(--app-border));
+  border-radius: 18px;
+  color: var(--app-accent-strong);
+  background: color-mix(in srgb, var(--app-panel-strong) 74%, transparent);
+  box-shadow: 0 14px 32px var(--app-accent-glow);
+  backdrop-filter: blur(12px);
+}
+
+.st-onboarding-core svg {
+  width: 30px;
+  height: 30px;
+}
+
+.st-onboarding-kicker {
+  color: var(--app-text-faint);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+.st-root .st-onboarding h3 {
+  margin: 4px 0 0;
+  color: var(--app-text-strong);
+  font-size: 1.18rem;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.st-root .st-onboarding p {
+  max-width: 460px;
+  margin: 2px 0 0;
+  color: var(--app-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+.st-onboarding-points {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.st-onboarding-points span {
+  padding: 3px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  color: var(--app-text-muted);
+  background: var(--app-panel-muted);
+  font-size: 0.62rem;
+}
+
+.st-root .st-onboarding-cta {
+  min-height: 36px;
+  margin-top: 9px;
+  padding: 8px 14px;
+}
+
+.st-onboarding small {
+  margin-top: 1px;
+  color: var(--app-text-faint);
+  font-size: 0.64rem;
+}
+
+.st-root .st-task-list::-webkit-scrollbar,
+.st-root .st-main::-webkit-scrollbar,
+.st-root .st-scope-card::-webkit-scrollbar {
+  width: 7px;
+}
+
+.st-root .st-task-list::-webkit-scrollbar-thumb,
+.st-root .st-main::-webkit-scrollbar-thumb,
+.st-root .st-scope-card::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--app-scrollbar);
+}
+
+@media (max-width: 1220px) {
+  .st-root .st-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .st-root .st-editor-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .st-root .st-editor-layout > .st-editor-card.ai-card {
+    position: static;
+    order: -1;
+  }
+
+  .st-root .st-mode-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 980px) {
+  .st-root .st-hero {
+    padding: 18px 20px 30px;
+  }
+
+  .st-root .st-stats {
+    margin-right: 20px;
+    margin-left: 20px;
+  }
+
+  .st-root .st-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+    align-content: start;
+    padding: 12px 20px 18px;
+    overflow-y: auto;
+  }
+
+  .st-root .st-sidebar {
+    max-height: 290px;
+    border-bottom: 1px solid var(--app-border);
+  }
+
+  .st-root .st-main {
+    min-height: 440px;
+  }
+
+  .st-root .st-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .st-root .st-scope-summary-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .st-root .st-hero {
+    flex-direction: column;
+    gap: 14px;
+    padding: 18px 18px 28px;
+  }
+
+  .st-root .st-hero-actions {
+    width: 100%;
+  }
+
+  .st-root .st-hero-create {
+    width: 100%;
+  }
+
+  .st-root .st-stats,
+  .st-root .st-body {
+    margin-right: 14px;
+    margin-left: 14px;
+  }
+
+  .st-root .st-body {
+    padding: 12px 0 14px;
+  }
+
+  .st-root .st-main {
+    padding: 14px;
+  }
+
+  .st-root .st-main-header {
+    flex-direction: column;
+  }
+
+  .st-root .st-main-actions {
+    justify-content: flex-start;
+  }
+
+  .st-root .st-form-grid,
+  .st-root .st-scope-grid,
+  .st-root .st-interval-fields,
+  .st-root .st-retry-fields,
+  .st-root .st-mode-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .st-root .st-field.checkbox-field {
+    margin-top: 0;
+  }
+
+  .st-root .st-weekday-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .st-root .st-metrics-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-height: 760px) {
+  .st-root .st-hero {
+    padding-top: 16px;
+    padding-bottom: 27px;
+  }
+
+  .st-root .st-stat-card {
+    min-height: 76px;
+    padding: 11px 13px;
+  }
+
+  .st-root .st-body {
+    padding-top: 11px;
+  }
+}
+</style>
+
+<style scoped>
+/* Authoritative compact layout. Keep this block last. */
+.st-root .st-detail-runway-copy {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.st-root .st-detail-runway-copy span {
+  font-size: 0.62rem;
+}
+
+.st-root .st-detail-runway-copy strong {
+  font-size: 0.93rem;
+  letter-spacing: -0.01em;
+}
+
+.st-root .st-detail-runway-copy small {
+  font-size: 0.6rem;
+}
+
+.st-root .st-status-pill {
+  padding: 3px 8px;
+  font-size: 0.6rem;
+}
+
+.st-root .st-section-head h4 {
+  font-size: 0.78rem;
+}
+
+.st-root .st-section-head > span {
+  font-size: 0.61rem;
+}
+
+.st-root .st-summary-block {
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
+.st-root .st-summary-block > strong {
+  margin-bottom: 3px;
+  font-size: 0.64rem;
+}
+
+.st-root .st-prompt-md {
+  padding: 8px 10px;
+  font-size: 0.71rem;
+  line-height: 1.55;
+}
+
+.st-root .st-scope-summary-grid {
+  gap: 6px;
+}
+
+.st-root .st-form-grid {
+  gap: 10px;
+}
+
+.st-root .st-mode-option {
+  min-height: 62px;
+  padding: 8px;
+}
+
+.st-root .st-schedule-panel,
+.st-root .st-retry-block {
+  padding: 9px;
+}
+
+.st-root .st-scope-card {
+  max-height: 196px;
+  padding: 9px;
+}
+
+.st-root .st-hero {
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+  background: var(--app-panel);
+}
+
+.st-root .st-hero-copy {
+  flex: 1;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  max-width: none;
+}
+
+.st-root .st-hero h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.st-root .st-hero-copy > p {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: none;
+  margin: 0;
+  color: var(--app-text-faint);
+  font-size: 0.66rem;
+  line-height: 1.3;
+}
+
+.st-root .st-hero-meta {
+  gap: 7px;
+  margin: 0 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.st-root .st-hero-model {
+  height: 31px;
+  padding: 2px 3px 2px 9px;
+}
+
+.st-root .st-hero-actions {
+  padding: 0;
+}
+
+.st-root .st-hero-create {
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 0.73rem;
+}
+
+.st-root .st-body {
+  display: grid;
+  grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
+  gap: 0;
+  padding: 0;
+}
+
+.st-root .st-sidebar {
+  gap: 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-right: 1px solid var(--app-border);
+  border-radius: 0;
+  background: var(--app-panel);
+  box-shadow: none;
+}
+
+.st-root .st-sidebar-header {
+  align-items: center;
+  padding: 2px 2px 4px;
+}
+
+.st-root .st-sidebar-header h3 {
+  margin: 0;
+  font-size: 0.87rem;
+}
+
+.st-root .st-sidebar-header p {
+  display: none;
+}
+
+.st-root .st-search {
+  height: 31px;
+}
+
+.st-root .st-filter-row {
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.st-root .st-filter-chip {
+  min-height: 24px;
+  padding: 2px 5px;
+  font-size: 0.63rem;
+}
+
+.st-root .st-task-list {
+  gap: 1px;
+  margin: 0 -4px;
+  padding: 0 4px 4px;
+}
+
+.st-root .st-task-card {
+  padding: 9px 9px 8px 13px;
+  border-radius: 9px;
+}
+
+.st-root .st-task-card strong {
+  font-size: 0.81rem;
+}
+
+.st-root .st-task-schedule {
+  margin-top: 4px;
+  font-size: 0.69rem;
+}
+
+.st-root .st-main {
+  padding: 13px 18px;
+  border: 0;
+  border-radius: 0;
+  background: var(--app-main-surface);
+}
+
+.st-root .st-main-header {
+  gap: 12px;
+  padding-bottom: 9px;
+}
+
+.st-root .st-main-header h3 {
+  margin-top: 0;
+  font-size: 1.04rem;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.st-root .st-main-header p {
+  margin-top: 2px;
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.st-root .st-main-actions {
+  gap: 5px;
+}
+
+.st-root .st-main-actions .st-primary-btn,
+.st-root .st-main-actions .st-ghost-btn,
+.st-root .st-main-actions .st-danger-btn {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 0.69rem;
+}
+
+.st-root .st-detail {
+  gap: 8px;
+}
+
+.st-root .st-detail-tabs {
+  padding: 2px;
+  border-radius: 8px;
+}
+
+.st-root .st-detail-tab {
+  min-height: 24px;
+  padding: 3px 10px;
+  font-size: 0.66rem;
+}
+
+.st-root .st-summary-card,
+.st-root .st-report-card {
+  gap: 9px;
+  padding: 12px;
+  border-radius: 11px;
+}
+
+.st-root .st-detail-runway {
+  padding: 9px 12px;
+  border-radius: 9px;
+}
+
+.st-root .st-metrics-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: 9px;
+}
+
+.st-root .st-metric {
+  gap: 2px;
+  padding: 7px 9px;
+  border: 0;
+  border-right: 1px solid var(--app-border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.st-root .st-metric:last-child {
+  border-right: 0;
+}
+
+.st-root .st-editor-layout {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.st-root .st-editor-card {
+  gap: 11px;
+  padding: 13px;
+  border-radius: 11px;
+}
+
+.st-root .st-editor-card.ai-card .st-textarea {
+  min-height: 72px;
+}
+
+.st-root .st-body.is-editing {
+  display: block;
+}
+
+.st-root .st-body.is-editing .st-sidebar {
+  display: none;
+}
+
+.st-root .st-body.is-editing .st-main {
+  height: 100%;
+}
+
+.st-root .st-body.is-editing .st-editor-layout {
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+}
+
+.st-root .st-body.is-editing .st-editor-layout > .st-editor-card.ai-card {
+  position: static;
+  order: -1;
+}
+
+@media (max-width: 1080px) {
+  .st-root .st-hero-meta {
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+
+  .st-root .st-hero-copy {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .st-root .st-hero {
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 980px) {
+  .st-root .st-body {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+    padding: 0;
+  }
+
+  .st-root .st-sidebar {
+    max-height: 250px;
+    border-right: 0;
+    border-bottom: 1px solid var(--app-border);
+  }
+
+  .st-root .st-main {
+    min-height: 420px;
+  }
+
+  .st-root .st-metrics-grid {
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .st-root .st-hero {
+    padding: 9px 12px;
+  }
+
+  .st-root .st-main {
+    padding: 11px 12px;
+  }
+
+  .st-root .st-form-grid,
+  .st-root .st-scope-grid,
+  .st-root .st-interval-fields,
+  .st-root .st-retry-fields,
+  .st-root .st-mode-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-height: 760px) {
+  .st-root .st-hero {
+    padding: 10px 18px;
+  }
+
+  .st-root .st-body {
+    padding: 0;
   }
 }
 </style>

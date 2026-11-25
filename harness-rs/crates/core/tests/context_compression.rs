@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use worldbase_core::context::candidate::CandidateManager;
-use worldbase_core::context::engine::assemble_request_with_evidence_tail;
+use worldbase_core::context::engine::{
+    assemble_request_with_evidence_tail, assemble_request_with_evidence_tail_counted,
+    assemble_request_without_ledger_tail_counted,
+};
 use worldbase_core::context::{
     apply_tool_result_capability_snapshot, assemble_request, microcompact, AttemptOutcome,
     CompactionCandidate, CompactionCheckpoint, CompactionNoteState, CompactionVersion,
@@ -233,6 +236,102 @@ fn changing_run_evidence_keeps_the_checkpoint_and_history_prefix() {
     assert!(after
         .iter()
         .all(|message| !message.text_view().contains("COMPACTION_NOTE")));
+}
+
+#[test]
+fn tail_evidence_reports_the_stable_cache_prefix() {
+    let ledger = RunStateLedger::from_real_user_request("objective", 7, "full objective");
+    let checkpoint = checkpoint_for(&ledger);
+    let history = vec![
+        LlmMessage::text(LlmRole::User, "Review the project"),
+        LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "read-1".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({ "path": "src/main.rs" }),
+                raw_input: None,
+                input_error: None,
+            }],
+        },
+        LlmMessage {
+            role: LlmRole::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "read-1".into(),
+                content: "file content".into(),
+                is_error: false,
+            }],
+        },
+    ];
+    let (request, prefix) = assemble_request_with_evidence_tail_counted(
+        "conversation-1",
+        Some(&checkpoint),
+        &ledger,
+        &history,
+        None,
+    );
+
+    assert_eq!(prefix, 2 + history.len());
+    assert_eq!(request[prefix - 1].role, LlmRole::User);
+    assert_eq!(request[prefix].role, LlmRole::User);
+    assert!(request[prefix].text_view().contains("Run State Ledger"));
+    assert_eq!(
+        serde_json::to_value(&request[..prefix]).unwrap(),
+        serde_json::to_value(
+            [
+                checkpoint.user_message(),
+                worldbase_core::context::engine::transcript_reference_message(
+                    "conversation-1",
+                    &checkpoint,
+                ),
+            ]
+            .into_iter()
+            .chain(history.clone())
+            .collect::<Vec<_>>()
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn tail_note_without_ledger_keeps_the_prefix_free_of_ledger_text() {
+    let ledger = RunStateLedger::from_real_user_request("objective", 7, "full objective");
+    let checkpoint = checkpoint_for(&ledger);
+    let history = vec![
+        LlmMessage::text(LlmRole::User, "Review the project"),
+        LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "read-1".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({ "path": "src/main.rs" }),
+                raw_input: None,
+                input_error: None,
+            }],
+        },
+        LlmMessage {
+            role: LlmRole::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "read-1".into(),
+                content: "file content".into(),
+                is_error: false,
+            }],
+        },
+    ];
+    let note = LlmMessage::text(LlmRole::User, "COMPACTION_NOTE");
+    let (request, prefix) = assemble_request_without_ledger_tail_counted(
+        "conversation-1",
+        Some(&checkpoint),
+        &history,
+        Some(note),
+    );
+
+    assert_eq!(prefix, 2 + history.len());
+    assert_eq!(request.len(), prefix + 1);
+    assert!(request[..prefix]
+        .iter()
+        .all(|message| !message.text_view().contains("Run State Ledger")));
+    assert!(request[prefix].text_view().contains("COMPACTION_NOTE"));
 }
 
 #[test]

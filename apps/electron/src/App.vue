@@ -7,6 +7,7 @@ import ChatPanel from './renderer/components/chat/ChatPanel.vue'
 import Launchpad from './renderer/components/launchpad/Launchpad.vue'
 import AISettings from './renderer/components/settings/AISettings.vue'
 import ImageStudio from './renderer/components/studio/ImageStudio.vue'
+import AutomationTasks from './renderer/components/settings/ScheduledTasksPanel.vue'
 import SourceViewer from './renderer/components/viewer/SourceViewer.vue'
 import TitleBar from './renderer/components/app/TitleBar.vue'
 import DockBar from './renderer/components/app/DockBar.vue'
@@ -81,7 +82,7 @@ const standaloneProjectId = new URLSearchParams(window.location.search).get('pro
 const isStandaloneProjectWindow = Boolean(standaloneProjectId)
 const { t } = useI18n()
 
-type MainView = 'chat' | 'app' | 'source' | 'settings' | 'studio'
+type MainView = 'chat' | 'app' | 'source' | 'settings' | 'studio' | 'automation'
 type AppChatPresentation = 'full' | 'bubble' | 'overlay'
 type ChatShellMode = 'full' | 'overlay' | 'hidden'
 
@@ -1657,6 +1658,13 @@ function openStudio () {
   hideDockCtx()
 }
 
+function openAutomation () {
+  appChatPresentation.value = 'full'
+  currentView.value = 'automation'
+  showLaunchpad.value = false
+  hideDockCtx()
+}
+
 function optimizeProjectInChat (project: Record<string, unknown>) {
   chatProjectContext.value = project
   appChatPresentation.value = 'full'
@@ -1692,6 +1700,7 @@ const titleViewLabel = computed(() => {
   switch (currentView.value) {
     case 'chat': return t('appShell.chat')
     case 'studio': return t('appShell.studio')
+    case 'automation': return t('appShell.automationTitle')
     case 'settings': return t('appShell.settings')
     case 'app': return t('appShell.titleViewApp')
     case 'source': return t('appShell.titleViewSource')
@@ -2527,6 +2536,7 @@ onUnmounted(() => {
           :embedded-project-id="activeEmbeddedProjectId"
           @open-chat="openChat"
           @open-studio="openStudio"
+          @open-automation="openAutomation"
           @toggle-launchpad="toggleLaunchpad"
           @open-settings="openSettings"
           @switch-to-app="switchToApp"
@@ -2628,6 +2638,10 @@ onUnmounted(() => {
                the view (e.g. switching to a conversation); discarded only on app close. -->
           <KeepAlive>
             <ImageStudio v-if="currentView === 'studio'" />
+          </KeepAlive>
+
+          <KeepAlive>
+            <AutomationTasks v-if="currentView === 'automation'" />
           </KeepAlive>
 
           <Launchpad

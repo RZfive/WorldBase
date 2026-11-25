@@ -39,6 +39,7 @@ import { addLocalAgentToGroup, discoverLocalAgents, discoverLocalAgentSessions, 
 import type { RoomLocalWorkerOptions } from '../../src/shared/local-agent-types.js'
 import { resolveRoomLocalWorkspace } from '../../src/main/local-agents/room-workspace.js'
 import type { ActiveCodeViewContext, FolderWorkspacePickResult } from '../../src/shared/folder-workspace-types.js'
+import { IMAGE_MIME_BY_EXTENSION } from '../../src/shared/image-file-types.js'
 import type { DocumentEditExportRequest } from '../../src/shared/document-edit-types.js'
 import { assertFolderWorkspaceRoot, getFolderWorkspaceRootName, listFolderWorkspaceFiles, readFolderWorkspaceFile } from '../../src/main/folder-workspace/folder-workspace-fs.js'
 import { calculateDocumentSha256, exportDocumentCopy, readDocumentEditImage } from '../../src/main/document-edit/document-edit-service.js'
@@ -3220,12 +3221,31 @@ export function setupIPC (): void {
     return { artifact }
   })
 
+  ipcMain.handle('document:createInMemory', async (_event: IpcMainInvokeEvent, payload: { title?: unknown; markdown?: unknown }) => {
+    const markdown = typeof payload?.markdown === 'string' ? payload.markdown : ''
+    if (!markdown.trim()) throw new Error('markdown is required')
+    const title = typeof payload?.title === 'string' ? payload.title : ''
+    const artifact = documentStore!.addInMemoryMarkdown(title, markdown)
+    return {
+      artifactId: artifact.id,
+      fileName: artifact.fileName,
+      fileType: artifact.fileType,
+      ephemeral: true
+    }
+  })
+
   ipcMain.handle('document:pickFiles', async (event: IpcMainInvokeEvent) => {
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const dialogOptions = {
       title: t('mainDialog.importDocumentTitle'),
       filters: [
-        { name: t('mainDialog.documentFilterName'), extensions: ['pdf', 'xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt', 'md', 'markdown'] }
+        {
+          name: t('mainDialog.documentFilterName'),
+          extensions: [
+            'pdf', 'xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt', 'md', 'markdown',
+            ...Object.keys(IMAGE_MIME_BY_EXTENSION).map(extension => extension.slice(1))
+          ]
+        }
       ],
       properties: ['openFile' as const, 'multiSelections' as const]
     }
@@ -3257,7 +3277,14 @@ export function setupIPC (): void {
   })
 
   ipcMain.handle('document:get', async (_event: IpcMainInvokeEvent, artifactId: string) => {
-    return documentStore!.getArtifact(artifactId)
+    const artifact = documentStore!.getArtifact(artifactId)
+    if (!artifact?.ephemeral || !artifact.render) return artifact
+    // The renderer only needs metadata; markdown bytes are fetched on demand
+    // through document:getRenderData so the content is not duplicated in IPC.
+    return {
+      ...artifact,
+      render: { ...artifact.render, inlineContent: undefined }
+    }
   })
 
   // ─── 文件监听：覆盖草稿流之外的磁盘变化（外部编辑器/其他程序写盘） ───

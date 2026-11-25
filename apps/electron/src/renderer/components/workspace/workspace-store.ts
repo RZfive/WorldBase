@@ -224,13 +224,16 @@ export function buildActiveCodeViewContext (): ActiveCodeViewContext | null {
   const filePath = workspaceStore.folderActiveFilePath.value
   if (!rootPath || !filePath) return null
   const meta = workspaceStore.folderActiveFileMeta.value
+  // Images and still-loading files have no code-view meta. Do not report them
+  // as a zero-line code file to the AI.
+  if (!meta) return null
   const selection = workspaceStore.folderActiveSelection.value
   return {
     rootPath,
     rootName: workspaceStore.folderRootName.value || getFolderWorkspaceName(rootPath),
     filePath,
-    lineCount: meta?.lineCount ?? 0,
-    truncated: meta?.truncated ?? false,
+    lineCount: meta.lineCount,
+    truncated: meta.truncated,
     ...(selection ? { selection: { ...selection } } : {})
   }
 }
@@ -531,7 +534,9 @@ export function openWorkspaceTabInSnapshot (
   }
   if (kind === 'document') {
     const filePath = typeof payload?.filePath === 'string' ? payload.filePath : ''
-    entry.title = (typeof payload?.fileName === 'string' && payload.fileName.trim()) || getDocumentFileName(filePath)
+    const documentId = typeof payload?.documentId === 'string' ? payload.documentId.trim() : ''
+    entry.title = (typeof payload?.fileName === 'string' && payload.fileName.trim())
+      || (documentId ? 'Markdown' : getDocumentFileName(filePath))
   } else if (kind === 'project' && typeof payload?.name === 'string' && payload.name.trim()) {
     entry.title = payload.name.trim()
   }
@@ -619,14 +624,31 @@ export function buildCurrentWorkspaceState (): ConversationWorkspaceState | unde
   const folderState = buildCurrentFolderWorkspaceState()
   if (folderState) tabs.push({ kind: 'folder', state: { ...folderState } })
 
-  for (const tab of getDocumentTabs()) {
+  for (const tab of workspaceStore.tabs.value) {
+    if (tab.kind !== 'document') continue
+    const documentId = typeof tab.state?.documentId === 'string' ? tab.state.documentId.trim() : ''
+    if (documentId) {
+      tabs.push({
+        id: tab.id,
+        kind: 'document',
+        title: typeof tab.title === 'string' ? tab.title : undefined,
+        state: {
+          documentId,
+          fileName: typeof tab.state?.fileName === 'string' ? tab.state.fileName : 'Markdown',
+          ephemeral: true
+        }
+      })
+      continue
+    }
+    const filePath = getDocumentTabFilePath(tab)
+    if (!filePath) continue
     tabs.push({
       id: tab.id,
       kind: 'document',
       title: typeof tab.title === 'string' ? tab.title : undefined,
       state: {
-        filePath: getDocumentTabFilePath(tab),
-        fileName: typeof tab.state?.fileName === 'string' ? tab.state.fileName : getDocumentFileName(getDocumentTabFilePath(tab) || '')
+        filePath,
+        fileName: typeof tab.state?.fileName === 'string' ? tab.state.fileName : getDocumentFileName(filePath)
       }
     })
   }
@@ -669,6 +691,24 @@ export function applyWorkspaceState (
       applyFolderWorkspaceState((entry.state || null) as ConversationFolderWorkspaceState | null)
       folderApplied = true
     } else if (entry.kind === 'document') {
+      const rawState = entry.state as { documentId?: unknown; fileName?: unknown; ephemeral?: unknown } | undefined
+      const documentId = typeof rawState?.documentId === 'string' ? rawState.documentId.trim() : ''
+      if (documentId) {
+        const ephemeralFileName = typeof rawState?.fileName === 'string' && rawState.fileName.trim()
+          ? rawState.fileName.trim()
+          : 'Markdown'
+        tabs.push({
+          id: typeof entry.id === 'string' && entry.id ? entry.id : createWorkspaceTabId('document'),
+          kind: 'document',
+          title: entry.title || ephemeralFileName,
+          state: {
+            documentId,
+            fileName: ephemeralFileName,
+            ephemeral: true
+          }
+        })
+        continue
+      }
       const [documentRef] = sanitizeDocumentReferences([entry.state])
       if (!documentRef) continue
       tabs.push({

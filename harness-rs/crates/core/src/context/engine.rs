@@ -201,6 +201,38 @@ pub fn assemble_request(
     messages
 }
 
+/// Assemble checkpoint evidence plus recent history without re-injecting the
+/// live ledger. Callers that need ledger evidence append a snapshot to
+/// `recent` only when compaction or trimming actually dropped context.
+pub fn assemble_request_without_ledger(
+    conversation_id: &str,
+    checkpoint: Option<&CompactionCheckpoint>,
+    recent: &[LlmMessage],
+) -> Vec<LlmMessage> {
+    let mut messages = checkpoint_evidence_messages(conversation_id, checkpoint);
+    messages.extend_from_slice(recent);
+    messages
+}
+
+/// Variant used for one-turn trailing notes. The returned prefix length ends
+/// before the note so providers can keep their cache breakpoint on the stable
+/// history.
+pub fn assemble_request_without_ledger_tail_counted(
+    conversation_id: &str,
+    checkpoint: Option<&CompactionCheckpoint>,
+    recent: &[LlmMessage],
+    note: Option<LlmMessage>,
+) -> (Vec<LlmMessage>, usize) {
+    let mut messages = checkpoint_evidence_messages(conversation_id, checkpoint);
+    let cache_prefix_messages = messages.len().saturating_add(recent.len());
+    messages.extend_from_slice(recent);
+    messages.extend(note);
+    (messages, cache_prefix_messages)
+}
+
+/// Legacy tail-evidence assembly that appends the live ledger on every request.
+/// The agent loop instead injects one ledger snapshot via
+/// [`assemble_request_without_ledger`] and only adds a one-turn note here.
 pub fn assemble_request_with_evidence_tail(
     conversation_id: &str,
     checkpoint: Option<&CompactionCheckpoint>,
@@ -208,11 +240,24 @@ pub fn assemble_request_with_evidence_tail(
     recent: &[LlmMessage],
     note: Option<LlmMessage>,
 ) -> Vec<LlmMessage> {
+    assemble_request_with_evidence_tail_counted(conversation_id, checkpoint, ledger, recent, note).0
+}
+
+/// Counted variant of [`assemble_request_with_evidence_tail`]. It reports how
+/// many leading messages form the stable cache prefix.
+pub fn assemble_request_with_evidence_tail_counted(
+    conversation_id: &str,
+    checkpoint: Option<&CompactionCheckpoint>,
+    ledger: &RunStateLedger,
+    recent: &[LlmMessage],
+    note: Option<LlmMessage>,
+) -> (Vec<LlmMessage>, usize) {
     let mut messages = checkpoint_evidence_messages(conversation_id, checkpoint);
+    let cache_prefix_messages = messages.len().saturating_add(recent.len());
     messages.extend_from_slice(recent);
     messages.push(LlmMessage::text(LlmRole::User, ledger.render_markdown()));
     messages.extend(note);
-    messages
+    (messages, cache_prefix_messages)
 }
 
 /// Token-aware recent raw selection with a permissive retry when the static

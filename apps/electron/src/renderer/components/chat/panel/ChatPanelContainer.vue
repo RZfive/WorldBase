@@ -34,6 +34,7 @@ import {
 import type { WorkSuggestion } from '../../../../shared/daily-suggestion-types.js'
 import { getRecommendedProviderTemplate } from '../../../../shared/provider-templates.js'
 import { resolveModelStrength } from '../../../../shared/reasoning-effort'
+import { IMAGE_MIME_BY_EXTENSION } from '../../../../shared/image-file-types.js'
 import type { ChatPanelEmit, ChatPanelProps, SidebarConversationItem } from './types'
 import type { AnnotationAnchor, MessageAnnotationLocator, QuickAskMode, QuickAskPopoverState } from '../types'
 import {
@@ -97,7 +98,7 @@ const {
   conversationDetailState,
   createLongTermGoal,
   currentAuthMode,
-  currentAskUserRequest,
+  currentAskUserRequests,
   currentAssistantIcon,
   currentAssistantName,
   currentCodingDiff,
@@ -395,14 +396,14 @@ const pendingAttentionPanels = computed<AttentionPanelId[]>(() => {
   const ids: AttentionPanelId[] = []
   if (currentPendingAuthRequest.value) ids.push('auth')
   if (currentSudoPasswordRequest.value) ids.push('sudo')
-  if (currentAskUserRequest.value) ids.push('ask')
+  if (currentAskUserRequests.value.length > 0) ids.push('ask')
   if (activeTodoItems.value.length > 0) ids.push('todo')
   return ids
 })
 const attentionSignature = computed(() => [
   currentPendingAuthRequest.value?.requestId ?? '-',
   currentSudoPasswordRequest.value?.requestId ?? '-',
-  currentAskUserRequest.value?.requestId ?? '-',
+  currentAskUserRequests.value.map(request => request.requestId).join(',') || '-',
   activeTodoItems.value.length > 0 ? 'todo' : '-'
 ].join('|'))
 const { expandedPanel: expandedAttentionPanel, togglePanel: toggleAttentionPanel } =
@@ -1151,6 +1152,39 @@ async function openWorkspaceTab (kind: string, payload?: Record<string, unknown>
   }
 
   if (kind === 'document') {
+    const payloadRecord = payload || {}
+    let payloadDocumentId = typeof payloadRecord.documentId === 'string'
+      ? payloadRecord.documentId.trim()
+      : ''
+    let documentFileName = typeof payloadRecord.fileName === 'string' && payloadRecord.fileName.trim()
+      ? payloadRecord.fileName.trim()
+      : (typeof payloadRecord.title === 'string' && payloadRecord.title.trim() ? payloadRecord.title.trim() : '')
+    const markdown = typeof payloadRecord.markdown === 'string' ? payloadRecord.markdown : ''
+    if (!payloadDocumentId && markdown.trim() && window.electronAPI?.createInMemoryDocument) {
+      let created: Awaited<ReturnType<NonNullable<typeof window.electronAPI.createInMemoryDocument>>> | null = null
+      try {
+        created = await window.electronAPI.createInMemoryDocument({
+          title: typeof payloadRecord.title === 'string' ? payloadRecord.title : undefined,
+          markdown
+        })
+      } catch (error) {
+        console.error('[workspace] failed to create in-memory document:', error)
+      }
+      if (!created) return
+      payloadDocumentId = created.artifactId
+      documentFileName = created.fileName
+    }
+    if (markdown.trim() && !payloadDocumentId) return
+    if (payloadDocumentId) {
+      const result = ensureWorkspaceTab('document', {
+        documentId: payloadDocumentId,
+        fileName: documentFileName || '方案.md',
+        ephemeral: true
+      })
+      if (result) result.tab.title = documentFileName || result.tab.title
+      await revealWorkspaceTab(result)
+      return
+    }
     const payloadFilePath = typeof payload?.filePath === 'string' ? payload.filePath.trim() : ''
     if (payloadFilePath) {
       const documentFileName = typeof payload?.fileName === 'string' && payload.fileName.trim()
@@ -1217,7 +1251,10 @@ async function openWorkspaceTab (kind: string, payload?: Record<string, unknown>
 }
 
 /** Extensions the document workbench renders as a rich document tab. */
-const DOCUMENT_TAB_EXTENSIONS = new Set(['.md', '.markdown', '.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt'])
+const DOCUMENT_TAB_EXTENSIONS = new Set([
+  '.md', '.markdown', '.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt',
+  ...Object.keys(IMAGE_MIME_BY_EXTENSION)
+])
 
 function getFileExtension (filePath: string): string {
   const name = filePath.split(/[\\/]/).pop() || ''
@@ -1996,8 +2033,8 @@ watch(
             />
 
             <AskUserPanel
-              v-if="currentAskUserRequest"
-              :request="currentAskUserRequest"
+              v-if="currentAskUserRequests.length > 0"
+              :requests="currentAskUserRequests"
               :expanded="expandedAttentionPanel === 'ask'"
               @toggle="toggleAttentionPanel('ask')"
               @submit="(requestId, answers) => respondToAskUserRequest(requestId, answers)"

@@ -92,7 +92,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   })
 
   const {
-    currentAskUserRequest,
+    currentAskUserRequests,
     currentPendingAuthCount,
     currentPendingAuthRequest,
     currentPendingSudoPasswordCount,
@@ -710,7 +710,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     respondToAuthRequest,
     respondToSudoPasswordRequest,
     respondToAskUserRequest,
-    currentAskUserRequest,
+    currentAskUserRequests,
     selectedChannelBindingId,
     selectedGroupId,
     selectedModel,

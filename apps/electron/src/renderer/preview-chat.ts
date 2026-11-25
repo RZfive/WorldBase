@@ -170,11 +170,11 @@ const App = defineComponent({
         h('div',{class:'preview-attention'},[
           h(PinnedTodoPanel,{items:[{id:1,title:'定位表格渲染瓶颈',status:'completed'},{id:2,title:'实现虚拟滚动窗口',status:'in-progress'},{id:3,title:'补充性能回归数据',status:'not-started'}],isLoading:true,expanded:accordion.expandedPanel.value==='todo',onToggle:()=>accordion.togglePanel('todo')}),
           ...(auth ? [h(AuthPermissionPanel,{request:{requestId:'r1',title:'运行命令',detail:'local_run_command · 只读'},pendingCount:1,expanded:accordion.expandedPanel.value==='auth',onToggle:()=>accordion.togglePanel('auth'),onRespond:()=>{}})] : []),
-          ...(ask ? [h(AskUserPanel,{request:{requestId:'q1',questions:[
+          ...(ask ? [h(AskUserPanel,{requests:[{requestId:'q1',questions:[
             {id:'q-1',question:'接下来您想对壁纸项目做什么?',options:['继续完善 PPT','做一个壁纸展示网站','暂时不需要']},
             {id:'q-2',question:'您更偏好哪种壁纸风格作为主打方向?',options:['偏简约清新风','偏国潮/插画风']},
             {id:'q-3',question:'下个月的更新频率?',options:['每周一次','每月一次','不定期']}
-          ]},expanded:accordion.expandedPanel.value==='ask',onToggle:()=>accordion.togglePanel('ask'),onSubmit:()=>{},onCancel:()=>{}})] : [])
+          ]}],expanded:accordion.expandedPanel.value==='ask',onToggle:()=>accordion.togglePanel('ask'),onSubmit:()=>{},onCancel:()=>{}})] : [])
         ]),
         h(ChatInput,{
           modelValue:text.value,'onUpdate:modelValue':(v:string)=>text.value=v,isLoading,pendingAuthCount:auth?1:0,pendingImages:[],pendingFiles:[],isUploadingFiles:false,uploadFeedback:'',workspaceVisible:false,authMode:'strict',planModeActive:false,computerUseEnabled:false,computerUsePermissionGranted:true,availableSkills:[{id:'s1',name:'网页开发'},{id:'s2',name:'代码审查'}],activeSkillIds:new Set(['s1']),showSkillPicker:false,isGroupConversation:false,onSend:()=>{},onStop:()=>{},onAddAttachments:()=>{},onRemoveImage:()=>{},onRemoveFile:()=>{},onToggleWorkspace:()=>{},'onUpdate:authMode':()=>{},onTogglePlanMode:()=>{},onToggleComputerUse:()=>{},onToggleSkillPicker:()=>{},onSelectAllSkills:()=>{},onClearSkills:()=>{},onToggleSkill:()=>{}

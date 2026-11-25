@@ -1160,14 +1160,15 @@ interface ScheduledTaskRunReport {
 }
 
 // Document types (renderer-side DTOs)
-type DocumentFileType = 'pdf' | 'xlsx' | 'docx' | 'pptx' | 'md' | 'unknown'
+type DocumentFileType = 'pdf' | 'xlsx' | 'docx' | 'pptx' | 'md' | 'image' | 'unknown'
 
 interface DocumentRenderPreviewDTO {
-  kind: 'pdf' | 'html' | 'markdown' | 'structured'
+  kind: 'pdf' | 'html' | 'markdown' | 'image' | 'structured'
   source: 'original' | 'generated' | 'fallback'
   status: 'ready' | 'unavailable'
   mimeType?: string
   assetPath?: string
+  inlineContent?: string
   error?: string
   generatedAt: string
 }
@@ -1192,6 +1193,7 @@ interface DocumentArtifactDTO {
   nodes: DocumentNodeDTO[]
   render?: DocumentRenderPreviewDTO
   importedAt: string
+  ephemeral?: boolean
 }
 
 interface DocumentSelectionDTO {
@@ -1526,6 +1528,7 @@ interface ElectronAPI {
   pickDocumentFiles: () => Promise<{ canceled: boolean; filePaths: string[] }>
   pickOfficeFiles: () => Promise<{ canceled: boolean; filePaths: string[] }>
   importDocument: (filePath: string) => Promise<{ artifact: DocumentArtifactDTO }>
+  createInMemoryDocument: (payload: { title?: string; markdown: string }) => Promise<{ artifactId: string; fileName: string; fileType: DocumentFileType; ephemeral: boolean }>
   listDocuments: () => Promise<DocumentSummaryDTO[]>
   getDocument: (artifactId: string) => Promise<DocumentArtifactDTO | null>
   ensureDocumentRenderPreview: (artifactId: string) => Promise<DocumentArtifactDTO | null>

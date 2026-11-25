@@ -172,6 +172,22 @@ test('a failed temporary worker remains available for a retry', async () => {
   assert.deepEqual(events.filter(event => event.type === 'room_member_status').map(event => event.roomMemberStatus.status), ['queued', 'failed'])
 })
 
+test('a room instructs members to hand off proactively instead of asking the user to coordinate', async () => {
+  const { runNativeRoom } = await roomModule
+  const { input, rounds } = makeRoomRequest('@Document Agent Draft the report.')
+  await runNativeRoom(input)
+  const prompt = rounds[0].context.systemPromptSections.join('\n')
+  assert.match(prompt, /@Reviewer \(default\)/)
+  assert.match(prompt, /@Document Agent \(member\)/)
+  assert.match(prompt, /@Tester \(other\)/)
+  assert.match(prompt, /Proactively call handoff_room_task/)
+  assert.match(prompt, /split it into concrete parts and hand off independent parts immediately/)
+  assert.match(prompt, /Before calling ask_user, check whether a safe, reversible default exists/)
+  assert.match(prompt, /bundle every current blocking decision into one ask_user call/)
+  assert.match(prompt, /Do not hand coordination back to the user/)
+  assert.match(prompt, /Do not ask the user to @ someone, relay a request/)
+})
+
 test('a room continues only explicit handoffs, with host tools still scoped to the current member stream', async () => {
   const { runNativeRoom } = await roomModule
   const hostContexts = []

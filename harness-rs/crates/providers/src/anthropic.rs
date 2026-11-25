@@ -157,23 +157,61 @@ impl AnthropicProvider {
             .collect()
     }
 
-    fn to_wire_messages(messages: &[LlmMessage]) -> Vec<Value> {
-        let mut turns: Vec<(LlmRole, Vec<Value>)> = Vec::new();
-        for message in messages {
+    /// Build the Messages API wire shape.
+    ///
+    /// `cache_prefix_messages` marks the stable prefix boundary when volatile
+    /// evidence (for example the per-turn run-state ledger) is appended after
+    /// the conversation. Some Anthropic-compatible gateways only honor the
+    /// last `cache_control` block, so a breakpoint on the volatile tail would
+    /// invalidate the whole cached prefix. We instead mark the newest stable
+    /// assistant message before that boundary.
+    fn to_wire_messages(
+        messages: &[LlmMessage],
+        cache_prefix_messages: Option<usize>,
+    ) -> Vec<Value> {
+        let mut turns: Vec<(LlmRole, Vec<Value>, usize)> = Vec::new();
+        for (index, message) in messages.iter().enumerate() {
             let blocks = Self::to_wire_content(message);
             if blocks.is_empty() {
                 continue;
             }
-            if let Some((last_role, last_blocks)) = turns.last_mut() {
+            if let Some((last_role, last_blocks, last_index)) = turns.last_mut() {
                 if *last_role == message.role {
                     last_blocks.extend(blocks);
+                    *last_index = index;
                     continue;
                 }
             }
-            turns.push((message.role, blocks));
+            turns.push((message.role, blocks, index));
         }
 
-        if let Some((_, content)) = turns.last_mut() {
+        let mark_turn = match cache_prefix_messages {
+            None => turns.len().checked_sub(1),
+            Some(limit) if limit >= messages.len() => turns.len().checked_sub(1),
+            Some(limit) => {
+                let breakpoint_source = messages
+                    .iter()
+                    .enumerate()
+                    .take(limit)
+                    .rev()
+                    .find(|(_, message)| {
+                        message.role == LlmRole::Assistant
+                            && message.content.iter().any(|block| match block {
+                                ContentBlock::Text { text } => !text.is_empty(),
+                                ContentBlock::ImageUrl { url } => !url.is_empty(),
+                                _ => true,
+                            })
+                    })
+                    .map(|(index, _)| index);
+                breakpoint_source.and_then(|source| {
+                    turns
+                        .iter()
+                        .position(|(_, _, last_index)| *last_index == source)
+                })
+            }
+        };
+
+        if let Some((_, content, _)) = mark_turn.and_then(|index| turns.get_mut(index)) {
             if let Some(last_block) = content.last_mut() {
                 if last_block.get("cache_control").is_none() {
                     last_block["cache_control"] = json!({ "type": "ephemeral" });
@@ -181,7 +219,10 @@ impl AnthropicProvider {
             }
         }
 
-        if turns.first().is_none_or(|(role, _)| *role != LlmRole::User) {
+        if turns
+            .first()
+            .is_none_or(|(role, _, _)| *role != LlmRole::User)
+        {
             turns.insert(
                 0,
                 (
@@ -190,13 +231,14 @@ impl AnthropicProvider {
                         "type": "text",
                         "text": "Continue the current task from the existing context. Do not repeat completed steps."
                     })],
+                    usize::MAX,
                 ),
             );
         }
 
         turns
             .into_iter()
-            .map(|(role, content)| {
+            .map(|(role, content, _)| {
                 json!({
                     "role": match role {
                         LlmRole::User => "user",
@@ -265,7 +307,7 @@ impl AnthropicProvider {
             "model": self.model,
             "max_tokens": max_tokens,
             "stream": true,
-            "messages": Self::to_wire_messages(messages),
+            "messages": Self::to_wire_messages(messages, options.cache_prefix_messages),
         });
         if let Some(system) = system.filter(|value| !value.is_empty()) {
             // The cache breakpoint ends at the stable head. The per-run tail
@@ -1190,26 +1232,29 @@ mod tests {
 
     #[test]
     fn request_messages_normalize_repairable_tool_calls_and_empty_results() {
-        let wire = AnthropicProvider::to_wire_messages(&[
-            LlmMessage {
-                role: LlmRole::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "toolu_1".into(),
-                    name: "write_file".into(),
-                    input: json!({ "_raw": "{broken" }),
-                    raw_input: Some("{broken".into()),
-                    input_error: Some("invalid JSON".into()),
-                }],
-            },
-            LlmMessage {
-                role: LlmRole::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "toolu_1".into(),
-                    content: String::new(),
-                    is_error: true,
-                }],
-            },
-        ]);
+        let wire = AnthropicProvider::to_wire_messages(
+            &[
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "write_file".into(),
+                        input: json!({ "_raw": "{broken" }),
+                        raw_input: Some("{broken".into()),
+                        input_error: Some("invalid JSON".into()),
+                    }],
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "toolu_1".into(),
+                        content: String::new(),
+                        is_error: true,
+                    }],
+                },
+            ],
+            None,
+        );
 
         assert_eq!(
             wire[1]["content"][0]["input"],
@@ -1217,6 +1262,88 @@ mod tests {
         );
         assert_eq!(wire[2]["content"][0]["content"], "(empty result)");
         assert_eq!(wire[2]["content"][0]["is_error"], true);
+    }
+
+    #[test]
+    fn cache_breakpoint_stays_on_stable_assistant_before_dynamic_tail() {
+        let provider = AnthropicProvider::new(
+            "key".into(),
+            "glm-5.4".into(),
+            Some("https://open.bigmodel.cn/api/anthropic".into()),
+        )
+        .unwrap();
+        let messages = vec![
+            LlmMessage::text(LlmRole::User, "build a voxel game"),
+            LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "list_files".into(),
+                    input: json!({ "path": "." }),
+                    raw_input: None,
+                    input_error: None,
+                }],
+            },
+            LlmMessage {
+                role: LlmRole::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "files: a.js b.js".into(),
+                    is_error: false,
+                }],
+            },
+            LlmMessage::text(LlmRole::User, "# Run State Ledger\nestimatedTokens: 1234"),
+        ];
+        let body = provider.request_body(
+            Some("stable instructions"),
+            &messages,
+            &[],
+            8192,
+            &ChatOptions {
+                cache_prefix_messages: Some(3),
+                ..ChatOptions::default()
+            },
+        );
+
+        let wire = body["messages"].as_array().unwrap();
+        assert_eq!(wire.len(), 3);
+        assert_eq!(wire[1]["role"], "assistant");
+        assert_eq!(wire[1]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(wire[2]["role"], "user");
+        assert_eq!(wire[2]["content"].as_array().unwrap().len(), 2);
+        assert!(wire[2]["content"][0].get("cache_control").is_none());
+        assert!(wire[2]["content"][1].get("cache_control").is_none());
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn cache_prefix_without_stable_assistant_leaves_system_breakpoint_only() {
+        let provider = AnthropicProvider::new(
+            "key".into(),
+            "glm-5.4".into(),
+            Some("https://open.bigmodel.cn/api/anthropic".into()),
+        )
+        .unwrap();
+        let body = provider.request_body(
+            Some("stable instructions"),
+            &[
+                LlmMessage::text(LlmRole::User, "build a voxel game"),
+                LlmMessage::text(LlmRole::User, "# Run State Ledger"),
+            ],
+            &[],
+            8192,
+            &ChatOptions {
+                cache_prefix_messages: Some(1),
+                ..ChatOptions::default()
+            },
+        );
+
+        let wire = body["messages"].as_array().unwrap();
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "user");
+        assert!(wire[0]["content"][0].get("cache_control").is_none());
+        assert!(wire[0]["content"][1].get("cache_control").is_none());
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]

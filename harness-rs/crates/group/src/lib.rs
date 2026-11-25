@@ -652,9 +652,20 @@ fn build_prompt(
         format!("\n\n【用户实时澄清(HITL)】\n{}", injections.join("\n"))
     };
     if session.room {
+        let collaboration = if others.is_empty() {
+            "当前群内没有其他可交接成员。请独立完成属于你的部分；只有在缺少必要信息、授权或需要用户做决定时才停下来。"
+        } else {
+            "按团队成员的方式自主推进：先完成属于你的部分；当下一步需要其他成员的执行、专长意见、讨论、评审、验证或决定时，立即调用 handoff_room_task 主动 @ 对方，并交接具体任务、上下文、证据和验收标准，然后简短说明已交给谁。多步骤或跨领域目标应主动拆成具体部分，可并行的立即分别交接，不要等用户点名成员；持续推进到目标完成或出现真正需要用户决定的阻塞。调用 ask_user 前先判断是否存在安全、可回退的默认值；有默认值就说明假设并继续，不要为了确认或非阻塞偏好停下来。只有某个回答确实阻塞下一步时，才把当前所有阻塞决策合并到同一次 ask_user 调用，方便用户一起回答。不要把本可内部完成的协作交回给用户，不要请用户代为转达或让用户再 @ 某位成员。只有在缺少必要信息/授权、需要用户做产品或风险决策，或你的部分已完成且无需其他成员继续时，才直接回复用户。不要代其他成员发言。"
+        };
         return format!(
-            "你是「{}」。人设：{}\n群聊主题：{}\n其他成员：\n{}\n用户消息：{}{}\n\n请以自己的身份直接回复用户，不需要汇报协作过程或代其他成员发言。",
-            member.name, member.persona, session.topic, others, user_input, inject_block
+            "你是「{}」。人设：{}\n群聊主题：{}\n其他成员：\n{}\n用户消息：{}{}\n\n{}",
+            member.name,
+            member.persona,
+            session.topic,
+            others,
+            user_input,
+            inject_block,
+            collaboration
         );
     }
     let recent: Vec<String> = session
@@ -1024,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn room_prompt_addresses_user_without_including_the_board() {
+    fn room_prompt_encourages_autonomous_handoff_without_exposing_the_board() {
         let mut session = GroupEngine::create("t", GroupMode::Targeted, members(), None).unwrap();
         session.room = true;
         session.board.goal = "Internal board entry".into();
@@ -1035,6 +1046,12 @@ mod tests {
             &["请简短回答".into()],
             false,
         );
+        assert!(prompt.contains("handoff_room_task"));
+        assert!(prompt.contains("主动 @ 对方"));
+        assert!(prompt.contains("多步骤或跨领域目标应主动拆成具体部分"));
+        assert!(prompt.contains("调用 ask_user 前先判断是否存在安全、可回退的默认值"));
+        assert!(prompt.contains("当前所有阻塞决策合并到同一次 ask_user 调用"));
+        assert!(prompt.contains("不要把本可内部完成的协作交回给用户"));
         assert!(prompt.contains("直接回复用户"));
         assert!(prompt.contains("你好"));
         assert!(prompt.contains("请简短回答"));

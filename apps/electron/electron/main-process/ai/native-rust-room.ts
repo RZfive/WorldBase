@@ -355,6 +355,22 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
       )
     })]
   }
+  const roomMemberRoster = agents.map(agent => `@${agent.name} (${agent.id})`).join(', ')
+  const roomCollaborationSections = agents.length > 1
+    ? [
+        '- Work as an autonomous teammate. Complete your own part, then check whether the next step belongs to another member.',
+        '- Proactively call handoff_room_task when the next step needs another member’s execution, specialist input, discussion, review, verification, or decision. Include the concrete task, current context, evidence, and acceptance criteria.',
+        '- For multi-step or cross-domain work, split it into concrete parts and hand off independent parts immediately. Do not wait for the user to name every participant.',
+        '- Keep the room moving through handoffs until the goal is complete or a real blocker requires a user decision.',
+        '- Before calling ask_user, check whether a safe, reversible default exists. If it does, choose it, state the assumption, and keep working; do not pause for confirmation or preference-only questions.',
+        '- When an answer truly blocks the next step, bundle every current blocking decision into one ask_user call so the user can answer them together.',
+        '- Do not hand coordination back to the user. Do not ask the user to @ someone, relay a request, or decide who should continue when you can hand off directly.',
+        '- After a handoff, briefly state what you handed off and to whom. Do not speak or claim completion for the recipient.',
+        '- Reply to the user directly only when your part is complete and no follow-up is needed, or when you are genuinely blocked on missing user input, authorization, or a user-owned decision.'
+      ]
+    : [
+        '- You are the only member in this room. Complete the task yourself and reply to the user; ask only for missing input, authorization, or a user-owned decision.'
+      ]
   const runContext: RustChatOptions = {
     ...input.context,
     authMode: currentAuthMode(),
@@ -366,12 +382,12 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
     customTools: createHostTools(`${sessionId}:catalog`),
     systemPromptSections: [
       ...(input.context?.systemPromptSections || []),
-      '## Shared room and local agents',
-      '- The user addressed you for this turn. Answer in the room as yourself; do not wait for a coordinator or speak for other members.',
+      '## Shared room collaboration',
+      `Room members: ${roomMemberRoster}`,
+      ...roomCollaborationSections,
       '- If one message names several members with different tasks, perform only the task addressed to you.',
       '- Stay within the current request and later user clarifications. Use read_room_messages when earlier messages are relevant.',
-      '- If specific follow-up work is necessary, use handoff_room_task with the recipient ID or @name, a clear task, and acceptance criteria. Plain mentions do not schedule work.',
-      ...(allowInvites ? ['- To delegate distinct work, use discover_local_agents then invite_local_agent with each Worker’s role and task. The same CLI can host multiple Workers; avoid overlapping file edits.'] : [])
+      ...(allowInvites ? ['- For distinct work that needs a new Worker, use discover_local_agents then invite_local_agent with each Worker’s role and task. The same CLI can host multiple Workers; avoid overlapping file edits.'] : [])
     ]
   }
 

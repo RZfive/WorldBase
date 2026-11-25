@@ -13,7 +13,7 @@ export interface AskUserPanelRequest {
 }
 
 const props = defineProps<{
-  request: AskUserPanelRequest
+  requests: AskUserPanelRequest[]
   /** Controlled by the attention-zone accordion; undefined keeps the panel
       self-managed (standalone usage). */
   expanded?: boolean
@@ -30,8 +30,23 @@ interface DraftAnswer {
   customAnswer: string
 }
 
+interface QuestionEntry {
+  key: string
+  requestId: string
+  question: AskUserQuestionItem
+}
+
 const drafts = reactive<Record<string, DraftAnswer>>({})
+const submittedRequestIds = reactive(new Set<string>())
 const collapsed = ref(false)
+
+const questionEntries = computed<QuestionEntry[]>(() => props.requests.flatMap((request) => {
+  return request.questions.map(question => ({
+    key: `${request.requestId}:${question.id}`,
+    requestId: request.requestId,
+    question
+  }))
+}))
 
 // The attention-zone accordion owns expansion when wired up; follow it.
 watch(
@@ -43,50 +58,70 @@ watch(
 )
 
 watch(
-  () => props.request.requestId,
-  () => {
+  () => questionEntries.value.map(entry => entry.key),
+  (keys) => {
+    const liveKeys = new Set(keys)
     for (const key of Object.keys(drafts)) {
-      delete drafts[key]
+      if (!liveKeys.has(key)) delete drafts[key]
     }
     if (props.expanded === undefined) collapsed.value = false
   },
   { immediate: true }
 )
 
-function ensureDraft (questionId: string): DraftAnswer {
-  if (!drafts[questionId]) {
-    drafts[questionId] = { selectedOption: null, customAnswer: '' }
+watch(
+  () => props.requests.map(request => request.requestId),
+  (requestIds) => {
+    const liveIds = new Set(requestIds)
+    for (const requestId of submittedRequestIds) {
+      if (!liveIds.has(requestId)) submittedRequestIds.delete(requestId)
+    }
+  },
+  { immediate: true }
+)
+
+function ensureDraft (key: string): DraftAnswer {
+  if (!drafts[key]) {
+    drafts[key] = { selectedOption: null, customAnswer: '' }
   }
-  return drafts[questionId]
+  return drafts[key]
 }
 
-const allAnswered = computed(() => {
-  return props.request.questions.every((q) => {
-    const draft = drafts[q.id]
-    if (!draft) return false
-    if (draft.customAnswer.trim().length > 0) return true
-    return Boolean(draft.selectedOption)
-  })
-})
+function isAnswered (entry: QuestionEntry): boolean {
+  const draft = drafts[entry.key]
+  if (!draft) return false
+  if (draft.customAnswer.trim().length > 0) return true
+  return Boolean(draft.selectedOption)
+}
+
+const completedRequests = computed(() => props.requests.filter((request) => {
+  return !submittedRequestIds.has(request.requestId) && request.questions.every((question) => isAnswered({
+    key: `${request.requestId}:${question.id}`,
+    requestId: request.requestId,
+    question
+  }))
+}))
+
+const canSubmit = computed(() => completedRequests.value.length > 0)
 
 const answeredCount = computed(() => {
-  return props.request.questions.reduce((count, q) => {
-    const draft = drafts[q.id]
+  return questionEntries.value.reduce((count, entry) => {
+    const draft = drafts[entry.key]
     if (!draft) return count
     if (draft.customAnswer.trim().length > 0) return count + 1
     return count + (draft.selectedOption ? 1 : 0)
   }, 0)
 })
 
-function pickOption (questionId: string, option: string) {
-  const draft = ensureDraft(questionId)
+function pickOption (key: string, option: string) {
+  const draft = ensureDraft(key)
   draft.selectedOption = option
   // Picking a chip clears any half-typed custom text so the chip wins unambiguously.
   draft.customAnswer = ''
 }
 
-function onCustomInput (questionId: string, value: string) {
-  const draft = ensureDraft(questionId)
+function onCustomInput (key: string, value: string) {
+  const draft = ensureDraft(key)
   draft.customAnswer = value
   // Typing into the free-text input takes precedence over any chip selection.
   if (value.trim().length > 0) {
@@ -95,21 +130,35 @@ function onCustomInput (questionId: string, value: string) {
 }
 
 function submit () {
-  if (!allAnswered.value) return
-  const answers = props.request.questions.map((q) => {
-    const draft = drafts[q.id]
+  if (!canSubmit.value) return
+  const completedRequestIds = new Set(completedRequests.value.map(request => request.requestId))
+  const answersByRequest = new Map<string, Array<{
+    questionId: string
+    selectedOption: string | null
+    customAnswer: string | null
+  }>>()
+  for (const entry of questionEntries.value) {
+    if (!completedRequestIds.has(entry.requestId)) continue
+    const draft = drafts[entry.key]
     const customAnswer = draft?.customAnswer.trim() || ''
-    return {
-      questionId: q.id,
+    const answers = answersByRequest.get(entry.requestId) || []
+    answers.push({
+      questionId: entry.question.id,
       selectedOption: customAnswer.length > 0 ? null : (draft?.selectedOption ?? null),
       customAnswer: customAnswer.length > 0 ? customAnswer : null
-    }
-  })
-  emit('submit', props.request.requestId, answers)
+    })
+    answersByRequest.set(entry.requestId, answers)
+  }
+  for (const [requestId, answers] of answersByRequest) {
+    submittedRequestIds.add(requestId)
+    emit('submit', requestId, answers)
+  }
 }
 
 function cancel () {
-  emit('cancel', props.request.requestId)
+  for (const request of props.requests) {
+    emit('cancel', request.requestId)
+  }
 }
 
 function toggleCollapsed () {
@@ -125,28 +174,28 @@ function toggleCollapsed () {
         <div v-if="!collapsed" class="ask-detail">
           <div class="ask-detail-head">
             <span>{{ $t('chatUi.askNeedAnswer') }}</span>
-            <span>{{ answeredCount }}/{{ props.request.questions.length }}</span>
+            <span>{{ answeredCount }}/{{ questionEntries.length }}</span>
           </div>
 
           <div class="ask-scroll">
             <div
-              v-for="(q, qIdx) in props.request.questions"
-              :key="q.id"
+              v-for="(entry, qIdx) in questionEntries"
+              :key="entry.key"
               class="ask-question"
             >
               <div class="ask-question-head">
                 <span class="ask-question-index">{{ qIdx + 1 }}</span>
-                <span class="ask-question-text">{{ q.question }}</span>
+                <span class="ask-question-text">{{ entry.question.question }}</span>
               </div>
 
               <div class="ask-question-options">
                 <button
-                  v-for="option in q.options.slice(0, 4)"
+                  v-for="option in entry.question.options.slice(0, 4)"
                   :key="option"
                   class="ask-option"
-                  :class="{ active: drafts[q.id]?.selectedOption === option && !(drafts[q.id]?.customAnswer.trim().length) }"
+                  :class="{ active: drafts[entry.key]?.selectedOption === option && !(drafts[entry.key]?.customAnswer.trim().length) }"
                   type="button"
-                  @click="pickOption(q.id, option)"
+                  @click="pickOption(entry.key, option)"
                 >
                   <span class="ask-option-radio" aria-hidden="true"></span>
                   <span class="ask-option-label">{{ option }}</span>
@@ -156,11 +205,11 @@ function toggleCollapsed () {
               <div class="ask-custom-row">
                 <span class="ask-custom-label">{{ $t('chatUi.askOther') }}</span>
                 <input
-                  :value="drafts[q.id]?.customAnswer || ''"
+                  :value="drafts[entry.key]?.customAnswer || ''"
                   class="ask-custom-input"
                   type="text"
                   :placeholder="$t('chatUi.askCustomPlaceholder')"
-                  @input="onCustomInput(q.id, ($event.target as HTMLInputElement).value)"
+                  @input="onCustomInput(entry.key, ($event.target as HTMLInputElement).value)"
                   @keydown.enter.prevent="submit"
                 />
               </div>
@@ -172,7 +221,7 @@ function toggleCollapsed () {
             <button
               class="ask-submit-btn"
               type="button"
-              :disabled="!allAnswered"
+              :disabled="!canSubmit"
               @click="submit"
             >
               {{ $t('chatUi.askSubmitAnswer') }}
@@ -188,8 +237,8 @@ function toggleCollapsed () {
         @click="toggleCollapsed"
       >
         <span class="ask-strip-status">{{ $t('chatUi.askNeedAnswerShort') }}</span>
-        <span class="ask-strip-title">{{ props.request.questions.length === 1 ? props.request.questions[0].question : $t('chatUi.askQuestionsPending', { count: props.request.questions.length }) }}</span>
-        <span class="ask-strip-count">{{ answeredCount }}/{{ props.request.questions.length }}</span>
+        <span class="ask-strip-title">{{ questionEntries.length === 1 ? questionEntries[0].question.question : $t('chatUi.askQuestionsPending', { count: questionEntries.length }) }}</span>
+        <span class="ask-strip-count">{{ answeredCount }}/{{ questionEntries.length }}</span>
         <span class="ask-toggle" :class="{ collapsed }" aria-hidden="true">
           <svg
             width="15"

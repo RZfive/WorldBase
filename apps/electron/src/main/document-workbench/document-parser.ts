@@ -10,6 +10,7 @@ import { parseWordToNodes } from './document-parser-word.js'
 import { parsePptxToNodes } from './document-parser-pptx.js'
 import { parsePdfToNodes } from './document-parser-pdf.js'
 import { parseMarkdownToNodes } from './document-parser-markdown.js'
+import { isImageFilePath } from '../../shared/image-file-types.js'
 
 interface ParseDocumentBufferOptions {
   fileName: string
@@ -30,6 +31,7 @@ const EXTENSION_TYPE_MAP: Record<string, DocumentFileType> = {
 }
 
 export function detectDocumentType (filePath: string): DocumentFileType {
+  if (isImageFilePath(filePath)) return 'image'
   const ext = path.extname(filePath).toLowerCase()
   return EXTENSION_TYPE_MAP[ext] || 'unknown'
 }
@@ -78,8 +80,17 @@ export async function parseDocumentBuffer (buffer: Buffer, options: ParseDocumen
   const fileType = detectDocumentType(fileName)
   if (fileType === 'unknown') throw new Error(`不支持的文件格式: ${path.extname(fileName)}`)
 
-  const nodes = await parseDocumentNodes(fileType, buffer, options.filePath)
-  const plainText = flattenNodeText(nodes)
+  const nodes = fileType === 'image'
+    ? [{
+        id: generateId(),
+        type: 'image_placeholder' as const,
+        text: fileName,
+        level: 0,
+        pageIndex: 1,
+        meta: { fileName }
+      }]
+    : await parseDocumentNodes(fileType, buffer, options.filePath)
+  const plainText = fileType === 'image' ? '' : flattenNodeText(nodes)
 
   return {
     id: generateId(),

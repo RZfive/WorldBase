@@ -101,9 +101,8 @@ export function createChatAuthorizationState (options: ChatAuthorizationStateOpt
     return conversationId ? pendingAskUserRequestsByConversation.get(conversationId) ?? [] : []
   }
 
-  const currentAskUserRequest = computed<AskUserRequestPayload | null>(() => {
-    const list = getPendingAskUserRequests(currentConversationId.value)
-    return list[0] || null
+  const currentAskUserRequests = computed<AskUserRequestPayload[]>(() => {
+    return getPendingAskUserRequests(currentConversationId.value)
   })
 
   function removeQueuedRequest<T extends { requestId: string }> (requestsByConversation: Map<string, T[]>, requestId: string): void {
@@ -219,7 +218,7 @@ export function createChatAuthorizationState (options: ChatAuthorizationStateOpt
   }
 
   return {
-    currentAskUserRequest,
+    currentAskUserRequests,
     currentPendingAuthCount,
     currentPendingAuthRequest,
     currentPendingSudoPasswordCount,

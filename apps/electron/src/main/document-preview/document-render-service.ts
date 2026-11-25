@@ -6,6 +6,7 @@ import type {
   DocumentRenderAsset,
   DocumentRenderPreview
 } from '../document-workbench/document-types.js'
+import { getImageMimeType } from '../../shared/image-file-types.js'
 import { getMainLocale, t } from '../i18n/main-i18n.js'
 import {
   ensureDirectory,
@@ -68,6 +69,17 @@ async function buildWordHtmlPreview (filePath: string): Promise<string> {
 
 export async function buildDocumentRenderPreview (filePath: string, fileType: DocumentFileType): Promise<DocumentRenderPreview> {
   const generatedAt = new Date().toISOString()
+
+  if (fileType === 'image') {
+    return {
+      kind: 'image',
+      source: 'original',
+      status: 'ready',
+      mimeType: getImageMimeType(filePath) || 'application/octet-stream',
+      assetPath: filePath,
+      generatedAt
+    }
+  }
 
   if (fileType === 'pdf') {
     return {
@@ -170,9 +182,18 @@ export async function buildDocumentRenderPreview (filePath: string, fileType: Do
 }
 
 export async function readDocumentRenderAsset (render: DocumentRenderPreview | undefined): Promise<DocumentRenderAsset | null> {
-  if (!render || render.status !== 'ready' || render.kind === 'structured' || !render.mimeType || !render.assetPath) {
+  if (!render || render.status !== 'ready' || render.kind === 'structured' || !render.mimeType) {
     return null
   }
+
+  if (render.inlineContent !== undefined) {
+    return {
+      mimeType: render.mimeType,
+      bytes: new Uint8Array(Buffer.from(render.inlineContent, 'utf8'))
+    }
+  }
+
+  if (!render.assetPath) return null
 
   const bytes = await fs.readFile(render.assetPath)
   return {

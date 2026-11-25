@@ -30,7 +30,7 @@ impl Tool for AskUserTool {
         "ask_user"
     }
     fn description(&self) -> &str {
-        "一次提交 1-4 个澄清问题并等待用户统一回答（人机协作）"
+        "一次提交 1-4 个澄清问题并等待用户统一回答（人机协作）。请求方案/PRD 审批前，如 open_workspace_tab 可用，先用它把完整方案作为内存 Markdown 文档打开在工作区 tab，再用本工具提一个审批问题；否则先在对话正文完整展示方案。方案未展示时不要请求审批。"
     }
     fn input_schema(&self) -> Value {
         json!({

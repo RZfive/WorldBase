@@ -118,11 +118,16 @@ export function localGroupRuntimeTools (options: LocalGroupRuntimeOptions): Rust
             `Installed CLI platforms: ${catalog.map(item => `${item.name} (${item.agentId})`).join(', ')}`,
             'To create a Worker for a distinct assignment, use a platform ID in the handoff and include a short "role". Multiple Workers can use one platform. The Worker leaves after its result unless you include "exitAfterTask": false.'
           ] : []),
-          'Answer as yourself in the room. Use plain text if no follow-up is needed.',
+          'Work as an autonomous teammate, not an assistant waiting for the user to dispatch others.',
+          'When the next step needs another member’s execution, specialist input, discussion, review, verification, or decision, queue the handoff yourself. Do not ask the user to @ someone, relay the request, or decide who should continue.',
+          'For multi-step or cross-domain work, split it into concrete parts and hand off independent parts immediately. Do not wait for the user to name every participant.',
+          'Keep the room moving through handoffs until the goal is complete or a real blocker requires a user decision.',
+          'Before asking the user, check whether a safe, reversible default exists. If it does, state the assumption and continue. Only stop for a question whose answer truly blocks the next action, and then ask once with all blocking decisions together.',
+          'Answer as plain text only when your part is complete and no follow-up is needed, or when you are genuinely blocked on user input, authorization, or a user-owned decision.',
           'If one message assigns different tasks to several members, perform only the task addressed to your displayed name or role.',
           'When the current request needs another member to do specific follow-up work, return only a JSON object with this shape:',
           '{"message":"your visible result", "handoffs":[{"agentId":"stable ID or @exact member name","task":"specific next task with evidence and acceptance criteria"}]}',
-          'A mention in your reply does not assign work. Do not request a handoff for an ordinary chat reply or unrelated task.'
+          'After a handoff, briefly say what you handed off and to whom. Do not request a handoff for an ordinary chat reply or unrelated task.'
         ].join('\n\n')
         const result = await runLocalAgent({
           groupId: localRoomSessionKey(group),

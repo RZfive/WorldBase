@@ -65,6 +65,7 @@ const isLoadingTree = ref(false)
 const isLoadingFile = ref(false)
 const workspaceError = ref('')
 const fileError = ref('')
+const svgPreviewMode = ref<'preview' | 'source'>('source')
 const promptedForOpen = ref(false)
 /** Mirrors onActivated/onDeactivated so cached (KeepAlive) tabs stay passive. */
 const isActiveTab = ref(false)
@@ -124,6 +125,14 @@ const flatFileTree = computed(() => flattenFileTree(fileTree.value))
 const allFileEntries = computed(() => flattenAllFileTree(fileTree.value))
 const selectedPath = computed(() => currentActiveFilePath.value || selectedFile.value?.filePath || null)
 const lineCount = computed(() => selectedFile.value?.lineCount || 0)
+const showImagePreview = computed(() => {
+  const file = selectedFile.value
+  if (!file) return false
+  if (file.kind === 'image') return true
+  return file.kind === 'svg'
+    && svgPreviewMode.value === 'preview'
+    && Boolean(file.imageDataUrl)
+})
 const normalizedFileSearchQuery = computed(() => fileSearchQuery.value.trim().toLowerCase())
 const searchResults = computed(() => {
   const query = normalizedFileSearchQuery.value
@@ -158,11 +167,29 @@ watch(normalizedCodeSelection, (selection) => {
 
 // 当前文件的元信息（行数/截断）也进 store，供 AI 上下文使用；换文件时重置
 // 虚拟滚动视图。
-watch(selectedFile, (file) => {
-  workspaceStore.folderActiveFileMeta.value = file
+watch(selectedFile, (file, previousFile) => {
+  if (file?.kind === 'svg' && file.imageDataUrl) {
+    if (file.filePath !== previousFile?.filePath) svgPreviewMode.value = 'preview'
+  } else {
+    svgPreviewMode.value = 'source'
+  }
+  workspaceStore.folderActiveFileMeta.value = file && file.kind !== 'image'
     ? { lineCount: file.lineCount, truncated: file.truncated }
     : null
   resetCodeView()
+})
+
+// SVG 源码视图在首次渲染时可能被图片预览分支遮挡，切换回来需要重新计算
+// 虚拟滚动窗口；否则 renderedRows 会停留在空数组。
+watch(svgPreviewMode, (mode) => {
+  if (mode === 'preview') {
+    resetCodeSelection()
+    return
+  }
+  void nextTick(() => {
+    if (codePreviewRef.value) codePreviewRef.value.scrollTop = 0
+    updateVirtualWindow()
+  })
 })
 const codeSelectionLabel = computed(() => {
   const selection = normalizedCodeSelection.value
@@ -197,7 +224,7 @@ let markdownRenderTimer: number | null = null
 
 const virtualRowCount = computed(() => {
   const file = selectedFile.value
-  return file && !file.isMarkdown ? sourceCodeLines.length : 0
+  return file && file.kind !== 'image' && !file.isMarkdown ? sourceCodeLines.length : 0
 })
 const virtualScrollHeight = computed(() => Math.round(virtualRowCount.value * virtualRowHeight.value))
 
@@ -223,6 +250,7 @@ function resetCodeView (): void {
   virtualRowHeight.value = DEFAULT_ROW_HEIGHT
   const file = selectedFile.value
   if (!file) return
+  if (file.kind === 'image') return
   if (file.isMarkdown) {
     scheduleMarkdownRender()
     return
@@ -564,6 +592,8 @@ function formatFileSize (bytes?: number): string {
 function getFileBadge (item: WorkspaceEntry): string {
   if (item.type === 'directory') return 'DIR'
   if (item.kind === 'markdown') return 'MD'
+  if (item.kind === 'svg') return 'SVG'
+  if (item.kind === 'image') return 'IMG'
   if (item.language) return item.language.toUpperCase().slice(0, 6)
   if (item.kind === 'binary') return 'BIN'
   if (item.kind === 'large') return 'BIG'
@@ -573,6 +603,8 @@ function getFileBadge (item: WorkspaceEntry): string {
 function getFileIcon (item: WorkspaceEntry): string {
   if (item.type === 'directory') return expandedDirs.value.has(item.path) ? '▾' : '▸'
   if (item.kind === 'markdown') return 'MD'
+  if (item.kind === 'svg') return 'SVG'
+  if (item.kind === 'image') return 'IMG'
   if (item.kind === 'binary') return 'BIN'
   return item.language?.slice(0, 2).toUpperCase() || 'F'
 }
@@ -1132,6 +1164,27 @@ defineExpose({
               <span v-if="currentRootName && selectedFile" class="path-sep" aria-hidden="true">›</span>
               <span v-if="selectedFile" class="path-file" :title="selectedFile.filePath">{{ selectedFile.filePath }}</span>
             </div>
+            <div
+              v-if="selectedFile && selectedFile.kind === 'svg' && selectedFile.imageDataUrl"
+              class="preview-mode-toggle"
+              role="group"
+              aria-label="SVG"
+            >
+              <button
+                type="button"
+                :class="{ active: svgPreviewMode === 'preview' }"
+                @click="svgPreviewMode = 'preview'"
+              >
+                {{ $t('chatUi.svgPreview') }}
+              </button>
+              <button
+                type="button"
+                :class="{ active: svgPreviewMode === 'source' }"
+                @click="svgPreviewMode = 'source'"
+              >
+                {{ $t('chatUi.svgSource') }}
+              </button>
+            </div>
             <div v-if="selectedFile" class="preview-meta">
               <span>{{ formatFileSize(selectedFile.size) }}</span>
               <span v-if="lineCount > 0">{{ $t('chatUi.lineCount', { count: lineCount }) }}</span>
@@ -1140,7 +1193,15 @@ defineExpose({
           </div>
 
             <template v-if="selectedFile">
-              <template v-if="selectedFile.isMarkdown">
+              <div v-if="showImagePreview" class="image-preview">
+                <img
+                  v-if="selectedFile.imageDataUrl"
+                  :src="selectedFile.imageDataUrl"
+                  :alt="selectedFile.fileName"
+                  draggable="false"
+                >
+              </div>
+              <template v-else-if="selectedFile.isMarkdown">
                 <div class="markdown-preview markdown-body">
                   <div v-for="(html, index) in markdownChunks" :key="index" class="markdown-chunk" v-html="html"></div>
                 </div>
@@ -1629,6 +1690,42 @@ defineExpose({
   font-size: 0.7rem;
 }
 
+.preview-mode-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.preview-mode-toggle button {
+  appearance: none;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #94a3b8;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.preview-mode-toggle button:hover {
+  color: #e2e8f0;
+}
+
+.preview-mode-toggle button.active {
+  background: rgba(56, 189, 248, 0.16);
+  color: #e0f2fe;
+}
+
+.preview-mode-toggle button:focus-visible {
+  outline: 2px solid rgba(56, 189, 248, 0.7);
+  outline-offset: 1px;
+}
+
 .code-preview {
   position: relative;
   flex: 1;
@@ -1814,6 +1911,35 @@ defineExpose({
   font: inherit;
   line-height: inherit;
   white-space: pre;
+}
+
+.image-preview {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background-color: #0b0f16;
+  background-image:
+    linear-gradient(45deg, rgba(148, 163, 184, 0.09) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(148, 163, 184, 0.09) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(148, 163, 184, 0.09) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(148, 163, 184, 0.09) 75%);
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
+}
+
+.image-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+  user-select: none;
 }
 
 .markdown-preview {

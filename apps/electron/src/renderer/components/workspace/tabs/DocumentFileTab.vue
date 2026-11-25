@@ -43,9 +43,11 @@ interface DocumentFileSummary {
   error?: string
 }
 
-const state = props.tab.state as { filePath?: string; fileName?: string } | undefined
+const state = props.tab.state as { filePath?: string; fileName?: string; documentId?: string; ephemeral?: boolean } | undefined
+const documentId = (state?.documentId || '').trim()
 const filePath = (state?.filePath || '').trim()
 const fileName = state?.fileName?.trim() || filePath.split(/[\\/]/).filter(Boolean).pop() || filePath
+const isEphemeralDocument = Boolean(documentId)
 
 const documentSummary = ref<DocumentFileSummary>({
   artifactId: null,
@@ -212,12 +214,54 @@ async function loadSelectedArtifact (artifactId: string | null): Promise<void> {
  * token discards stale resolutions after conversation switches.
  */
 async function resolveDocumentArtifact (): Promise<void> {
-  if (!filePath) return
+  if (!documentId && !filePath) return
   const token = ++resolveToken
   isResolving.value = true
   importError.value = ''
 
   try {
+    if (documentId) {
+      if (!window.electronAPI?.getDocument) {
+        documentSummary.value = {
+          artifactId: null,
+          filePath: '',
+          fileName,
+          fileType: 'error',
+          fileSize: 0,
+          selectionCount: 0,
+          status: 'error',
+          error: t('chatUi.inMemoryDocumentExpired')
+        }
+        return
+      }
+      const artifact = await window.electronAPI.getDocument(documentId) as DocumentArtifact | null
+      if (token !== resolveToken) return
+      if (!artifact) {
+        documentSummary.value = {
+          artifactId: null,
+          filePath: '',
+          fileName,
+          fileType: 'missing',
+          fileSize: 0,
+          selectionCount: 0,
+          status: 'missing',
+          error: t('chatUi.inMemoryDocumentExpired')
+        }
+        return
+      }
+      documentSummary.value = {
+        artifactId: artifact.id,
+        filePath: artifact.filePath,
+        fileName: artifact.fileName || fileName,
+        fileType: artifact.fileType,
+        fileSize: artifact.fileSize,
+        selectionCount: 0,
+        status: 'ready'
+      }
+      await loadSelectedArtifact(artifact.id)
+      return
+    }
+
     let summaries = await listImportedDocumentSummaries()
     let summary = summaries.find(item => normalizeDocumentFileKey(item.filePath) === normalizeDocumentFileKey(filePath))
 
@@ -275,7 +319,7 @@ async function resolveDocumentArtifact (): Promise<void> {
 }
 
 async function refreshSelectionCount (): Promise<void> {
-  if (documentSummary.value.status !== 'ready') return
+  if (!filePath || documentSummary.value.status !== 'ready') return
   const summaries = await listImportedDocumentSummaries()
   const summary = summaries.find(item => normalizeDocumentFileKey(item.filePath) === normalizeDocumentFileKey(filePath))
   if (summary && documentSummary.value.artifactId === summary.id) {
@@ -411,7 +455,7 @@ async function removeSelection (regionId: string): Promise<void> {
 }
 
 async function openOriginalFile (): Promise<void> {
-  if (!activeArtifact.value || !window.electronAPI?.openDocumentOriginal) return
+  if (isEphemeralDocument || !activeArtifact.value || !window.electronAPI?.openDocumentOriginal) return
   importError.value = ''
   const result = await window.electronAPI.openDocumentOriginal(activeArtifact.value.id)
   if (!result.success) {
@@ -420,6 +464,7 @@ async function openOriginalFile (): Promise<void> {
 }
 
 async function copyFilePath (): Promise<void> {
+  if (!filePath) return
   try {
     await navigator.clipboard.writeText(filePath)
   } catch {
@@ -431,7 +476,7 @@ async function copyFilePath (): Promise<void> {
 // AI draft preview (draft state owned by the Rust harness; UI mirrors it)
 // ---------------------------------------------------------------------------
 
-const draft = computed(() => getWorkspaceDocumentDraft(filePath))
+const draft = computed(() => (filePath ? getWorkspaceDocumentDraft(filePath) : null))
 const draftArtifact = ref<DocumentArtifact | null>(null)
 const draftBusy = ref(false)
 const draftError = ref('')
@@ -634,6 +679,7 @@ async function discardDraft (): Promise<void> {
 
 /** Surfaces a pending draft again after an app restart / conversation switch. */
 async function restorePendingDraft (): Promise<void> {
+  if (!filePath) return
   if (!window.electronAPI?.getDocumentDraft) return
   try {
     const record = await window.electronAPI.getDocumentDraft(filePath)
@@ -649,7 +695,7 @@ async function restorePendingDraft (): Promise<void> {
 function insertDocumentContextTag (): void {
   const artifactId = documentSummary.value.artifactId
   if (!artifactId) return
-  emit('insertSelectionTag', `[[docfile:${artifactId}|${fileName}]]`)
+  emit('insertSelectionTag', `[[docfile:${artifactId}|${documentSummary.value.fileName || fileName}]]`)
 }
 
 // ---------------------------------------------------------------------------
@@ -727,7 +773,7 @@ onActivated(() => {
   isActiveTab.value = true
   if (documentSummary.value.status === 'resolving' || !documentSummary.value.artifactId) {
     void resolveDocumentArtifact()
-  } else {
+  } else if (filePath) {
     void registerFileWatch()
   }
   void restorePendingDraft()
@@ -743,7 +789,7 @@ onDeactivated(() => {
   fileChangedCleanup?.()
   fileChangedCleanup = null
   diskChange.value = null
-  if (window.electronAPI?.unwatchDocumentFile) {
+  if (filePath && window.electronAPI?.unwatchDocumentFile) {
     void window.electronAPI.unwatchDocumentFile(filePath)
   }
 })
@@ -753,7 +799,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('focus', handleWindowFocus)
   fileChangedCleanup?.()
   fileChangedCleanup = null
-  if (window.electronAPI?.unwatchDocumentFile) {
+  if (filePath && window.electronAPI?.unwatchDocumentFile) {
     void window.electronAPI.unwatchDocumentFile(filePath)
   }
 })

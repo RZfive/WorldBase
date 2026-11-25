@@ -1,7 +1,7 @@
 {
   "name": "the-world",
   "productName": "WorldBase",
-  "version": "1.7.5",
+  "version": "1.7.6",
   "description": "AI-powered project generator and manager",
   "license": "Apache-2.0",
   "repository": {
@@ -53,9 +53,12 @@
     "test:message-render-blocks": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-utils-blocks.test.mjs",
     "test:message-segments": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/message-segments.test.mjs",
     "test:work-routing": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/coding-task-detection.test.mjs tests/work-file-kind.test.mjs tests/work-run-context.test.mjs tests/workspace-tab-control.test.mjs",
+    "test:folder-workspace": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/folder-workspace-image.test.mjs",
     "test:tool-run-summary": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/tool-run-summary.test.mjs",
     "test:computer-use-permissions": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/computer-use-permissions.test.mjs",
     "test:document-html-preview": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/document-html-preview.test.mjs",
+    "test:document-image": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/document-image-preview.test.mjs",
+    "test:document-memory": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/document-memory.test.mjs",
     "test:document-editing": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/document-file-watcher.test.mjs",
     "test:mcp-settings": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/mcp-settings-toggle.test.mjs",
     "test:daily-suggestions": "node --experimental-strip-types --import ./tests/register-ts-hooks.mjs --test tests/daily-suggestions.test.mjs",

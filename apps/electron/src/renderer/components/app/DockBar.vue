@@ -20,7 +20,7 @@ interface RunningApp {
 }
 
 const props = defineProps<{
-  currentView: 'chat' | 'app' | 'source' | 'settings' | 'studio'
+  currentView: 'chat' | 'app' | 'source' | 'settings' | 'studio' | 'automation'
   showLaunchpad: boolean
   runningApps: Map<string, RunningApp>
   pinnedApps: RunningApp[]
@@ -30,6 +30,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'openChat'): void
   (e: 'openStudio'): void
+  (e: 'openAutomation'): void
   (e: 'toggleLaunchpad'): void
   (e: 'openSettings'): void
   (e: 'switchToApp', app: RunningApp): void
@@ -77,7 +78,7 @@ function appInitial (app: RunningApp): string {
 
 <template>
   <aside class="dock-bar">
-    <!-- design v1.7: core three = chat bubble / studio hexahedron SVGs -->
+    <!-- design v1.7: core workbench entries = chat / studio / automation -->
     <div class="dock-top">
       <div
         :class="['dock-item', { 'dock-active': props.currentView === 'chat' && !props.showLaunchpad }]"
@@ -108,6 +109,22 @@ function appInitial (app: RunningApp): string {
           </svg>
         </span>
         <span class="dock-tooltip">{{ $t('appShell.studio') }}</span>
+      </div>
+
+      <div
+        :class="['dock-item', { 'dock-active': props.currentView === 'automation' && !props.showLaunchpad }]"
+        :title="$t('appShell.automationTitle')"
+        :data-tip="$t('appShell.automation')"
+        @click="emit('openAutomation')"
+      >
+        <span class="dock-item-surface">
+          <svg class="dock-item-svg" width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="7.6" cy="8.4" r="5.15" stroke="currentColor" stroke-width="1.2" />
+            <path d="M7.6 5.5v2.9l1.9 1.15" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M12.6 1.65l.28.82.82.28-.82.28-.28.82-.28-.82-.82-.28.82-.28.28-.82Z" fill="currentColor" />
+          </svg>
+        </span>
+        <span class="dock-tooltip">{{ $t('appShell.automation') }}</span>
       </div>
     </div>
 

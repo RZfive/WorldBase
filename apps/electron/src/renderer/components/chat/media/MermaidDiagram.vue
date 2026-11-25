@@ -30,6 +30,15 @@ const emit = defineEmits<{
   (e: "openPreview"): void;
 }>();
 
+function canOpenPreview(): boolean {
+  return props.previewable && props.mode === "inline";
+}
+
+function openPreview(): void {
+  if (!canOpenPreview()) return;
+  emit("openPreview");
+}
+
 const svgMarkup = ref("");
 const renderError = ref("");
 const isRendering = ref(false);
@@ -80,18 +89,22 @@ watch(
 </script>
 
 <template>
-  <div class="mermaid-diagram" :class="props.mode">
+  <div
+    class="mermaid-diagram"
+    :class="[props.mode, { clickable: canOpenPreview() }]"
+    @click="openPreview"
+  >
     <div class="mermaid-diagram-header" v-if="props.mode === 'inline'">
       <div class="mermaid-diagram-meta">
         <span class="mermaid-diagram-badge">Mermaid</span>
-        <span class="mermaid-diagram-hint">{{ $t('chatUi.clickToExpand') }}</span>
+        <span v-if="props.previewable" class="mermaid-diagram-hint">{{ $t('chatUi.clickToExpand') }}</span>
       </div>
       <button
         v-if="props.previewable && props.mode === 'inline'"
         class="mermaid-diagram-action"
         data-export-ignore="true"
         type="button"
-        @click="emit('openPreview')"
+        @click.stop="emit('openPreview')"
       >
         {{ $t('chatUi.expand') }}
       </button>
@@ -201,6 +214,10 @@ watch(
     rgba(244, 247, 255, 0.96)
   );
   overflow-x: auto;
+}
+
+.mermaid-diagram.clickable {
+  cursor: zoom-in;
 }
 
 .mermaid-diagram-canvas.preview {
