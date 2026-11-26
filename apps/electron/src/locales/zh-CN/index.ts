@@ -1944,7 +1944,12 @@ const zhCN = {
       resultTitle: '执行结果',
       emptyResult: '暂无执行结果。',
       progressTitle: '执行过程',
-      emptyProgress: '当前没有进度记录。'
+      emptyProgress: '当前没有进度记录。',
+      duration: '用时 {time}',
+      toolCount: '{count} 个工具',
+      stepCount: '{count} 步',
+      thinkingTitle: '思考过程',
+      errorTitle: '失败详情'
     },
     dailySuggestions: {
       title: '每日推荐',

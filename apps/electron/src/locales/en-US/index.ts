@@ -1945,7 +1945,12 @@ const enUS: MessageSchema = {
       resultTitle: 'Result',
       emptyResult: 'No result yet.',
       progressTitle: 'Progress',
-      emptyProgress: 'No progress records yet.'
+      emptyProgress: 'No progress records yet.',
+      duration: 'Took {time}',
+      toolCount: '{count} tools',
+      stepCount: '{count} steps',
+      thinkingTitle: 'Reasoning',
+      errorTitle: 'Failure details'
     },
     dailySuggestions: {
       title: 'Daily Picks',

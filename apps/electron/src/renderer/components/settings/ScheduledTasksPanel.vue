@@ -1,12 +1,25 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import ScheduledTaskReportDialog from './ScheduledTaskReportDialog.vue'
+import ScheduledTaskReportPanel from './ScheduledTaskReportPanel.vue'
 import ProviderModelDropdown from '../chat/layout/ProviderModelDropdown.vue'
 import { renderMarkdown } from '../chat/markdown'
 
+interface ScheduledTaskReportRequest {
+  report: ScheduledTaskRunReport
+  seq: number
+}
+
 type ScheduleKind = 'once' | 'interval' | 'daily' | 'weekly' | 'dates'
 type ToolPolicy = 'standard' | 'autoApprove'
+
+const props = defineProps<{
+  reportRequest?: ScheduledTaskReportRequest | null
+}>()
+
+const emit = defineEmits<{
+  (e: 'reportRequestConsumed'): void
+}>()
 
 interface ScheduledTaskDraft {
   id: string
@@ -52,7 +65,8 @@ const aiGenerating = ref(false)
 const statusMessage = ref('')
 const aiDraftPrompt = ref('')
 const activeReportId = ref<string | null>(null)
-const activeDetailTab = ref<'details' | 'logs'>('details')
+const pendingManualReportSince = ref(0)
+const activeDetailTab = ref<'details' | 'logs'>('logs')
 const searchQuery = ref('')
 const statusFilter = ref<'all' | 'enabled' | 'disabled'>('all')
 const { t, locale } = useI18n()
@@ -157,6 +171,8 @@ const activeReport = computed(() => {
   if (!activeReportId.value) return null
   return reports.value.find(report => report.id === activeReportId.value) || null
 })
+
+const reportPanelOpen = computed(() => Boolean(activeReport.value))
 
 const skillNameMap = computed(() => {
   return new Map(skills.value.map(skill => [skill.id, skill.name]))
@@ -633,6 +649,7 @@ async function loadData () {
 }
 
 function startAdd () {
+  activeReportId.value = null
   editing.value = true
   draft.value = buildEmptyDraft()
   selectedTaskId.value = draft.value.id
@@ -640,6 +657,7 @@ function startAdd () {
 
 function startEdit () {
   if (!selectedTask.value) return
+  activeReportId.value = null
   editing.value = true
   draft.value = buildDraftFromTask(selectedTask.value)
 }
@@ -655,7 +673,8 @@ function cancelEdit () {
 function selectTask (taskId: string) {
   if (editing.value) return
   selectedTaskId.value = taskId
-  activeDetailTab.value = 'details'
+  activeDetailTab.value = 'logs'
+  activeReportId.value = null
 }
 
 function addDateInput () {
@@ -707,6 +726,7 @@ async function saveDraft () {
     tasks.value = [savedTask, ...tasks.value.filter(item => item.id !== savedTask.id)]
       .sort((left, right) => left.title.localeCompare(right.title, locale.value))
     selectedTaskId.value = savedTask.id
+    activeDetailTab.value = 'logs'
     editing.value = false
     draft.value = null
     setStatus(t('settings.scheduledTasks.saved'))
@@ -784,23 +804,77 @@ async function runSelectedTaskNow () {
   if (!selectedTask.value || !window.electronAPI?.runScheduledTaskNow) return
 
   try {
+    const manualRunStartedAt = Date.now()
+    pendingManualReportSince.value = manualRunStartedAt
+    window.setTimeout(() => {
+      if (pendingManualReportSince.value === manualRunStartedAt) {
+        pendingManualReportSince.value = 0
+      }
+    }, 120_000)
     const report = await window.electronAPI.runScheduledTaskNow(selectedTask.value.id)
-    activeReportId.value = report.id
-    activeDetailTab.value = 'logs'
+    if (report?.id) {
+      activeReportId.value = report.id
+      activeDetailTab.value = 'logs'
+    }
     setStatus(t('settings.scheduledTasks.started'))
     await loadData()
+    if (activeReportId.value && reports.value.some(item => item.id === activeReportId.value)) {
+      pendingManualReportSince.value = 0
+    } else {
+      // The run-now response may be a run record rather than the lazily created
+      // report. Keep the pending window open for the reports-changed event.
+      if (activeReportId.value) activeReportId.value = null
+      const candidate = findPendingManualReport(reports.value)
+      if (candidate) {
+        activeReportId.value = candidate.id
+        activeDetailTab.value = 'logs'
+        pendingManualReportSince.value = 0
+      }
+    }
   } catch (error) {
+    pendingManualReportSince.value = 0
     setStatus(t('settings.scheduledTasks.runNowFailed', { message: (error as Error).message }))
   }
 }
 
-function openReport (reportId: string) {
-  activeReportId.value = reportId
+function findPendingManualReport (list: ScheduledTaskRunReport[]): ScheduledTaskRunReport | null {
+  if (!selectedTaskId.value || pendingManualReportSince.value <= 0) return null
+  return list.find(report => {
+    return report.taskId === selectedTaskId.value &&
+      (report.status === 'running' || report.status === 'retrying')
+  }) || list.find(report => {
+    const startedAt = new Date(report.startedAt).getTime()
+    return report.taskId === selectedTaskId.value &&
+      Number.isFinite(startedAt) &&
+      startedAt >= pendingManualReportSince.value
+  }) || null
 }
 
-function closeReportDialog () {
+function openReport (reportId: string) {
+  activeReportId.value = reportId
+  activeDetailTab.value = 'logs'
+}
+
+function closeReportPanel () {
   activeReportId.value = null
 }
+
+function applyReportRequest (request: ScheduledTaskReportRequest | null | undefined) {
+  if (!request) return
+  reports.value = [
+    request.report,
+    ...reports.value.filter(report => report.id !== request.report.id)
+  ]
+  if (!editing.value) {
+    selectedTaskId.value = request.report.taskId
+    activeDetailTab.value = 'logs'
+  }
+  activeReportId.value = request.report.id
+  emit('reportRequestConsumed')
+}
+
+watch(() => props.reportRequest, applyReportRequest, { immediate: true })
+onActivated(() => applyReportRequest(props.reportRequest))
 
 async function generateDraftWithAi () {
   if (!window.electronAPI?.chat || !aiDraftPrompt.value.trim()) return
@@ -885,12 +959,17 @@ onMounted(async () => {
   if (window.electronAPI?.onScheduledTaskReportsChanged) {
     cleanupReportsChanged = window.electronAPI.onScheduledTaskReportsChanged((nextReports) => {
       reports.value = nextReports
-      // Auto-open the live report of the manually run task. Rust executions
-      // create their report lazily on the first tool event, so the run-now
-      // response carries no report id for this path.
-      if (!activeReportId.value && selectedTaskId.value) {
-        const live = nextReports.find(report => report.taskId === selectedTaskId.value && report.status === 'running')
-        if (live) activeReportId.value = live.id
+      // Rust executions create their report lazily on the first tool event, so
+      // the run-now response may carry no report id. Only chase that report for
+      // an explicit manual run; scheduled background runs must not open a panel
+      // while the user is doing something else.
+      if (!activeReportId.value && selectedTaskId.value && pendingManualReportSince.value > 0) {
+        const candidate = findPendingManualReport(nextReports)
+        if (candidate) {
+          activeReportId.value = candidate.id
+          activeDetailTab.value = 'logs'
+          pendingManualReportSince.value = 0
+        }
       }
       if (activeReportId.value && !nextReports.some(report => report.id === activeReportId.value)) {
         activeReportId.value = null
@@ -942,7 +1021,7 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <div class="st-body" :class="{ 'is-editing': editing }">
+    <div class="st-body" :class="{ 'is-editing': editing, 'has-report': reportPanelOpen }">
     <aside class="st-sidebar">
       <div class="st-sidebar-header">
         <div class="st-list-heading">
@@ -1037,12 +1116,12 @@ onUnmounted(() => {
         </div>
 
         <div v-else-if="selectedTask" class="st-main-actions">
-          <button class="st-ghost-btn" type="button" @click="toggleSelectedTaskEnabled">
+          <button class="st-ghost-btn st-task-toggle-btn" type="button" @click="toggleSelectedTaskEnabled">
             {{ selectedTask.enabled ? $t('settings.scheduledTasks.disable') : $t('settings.scheduledTasks.enable') }}
           </button>
-          <button class="st-primary-btn" type="button" @click="runSelectedTaskNow">▶ {{ $t('settings.scheduledTasks.runNow') }}</button>
-          <button class="st-ghost-btn" type="button" @click="startEdit">{{ $t('settings.scheduledTasks.edit') }}</button>
-          <button class="st-danger-btn" type="button" @click="deleteSelectedTask">{{ $t('common.delete') }}</button>
+          <button class="st-primary-btn st-task-run-btn" type="button" @click="runSelectedTaskNow">▶ {{ $t('settings.scheduledTasks.runNow') }}</button>
+          <button class="st-ghost-btn st-task-edit-btn" type="button" @click="startEdit">{{ $t('settings.scheduledTasks.edit') }}</button>
+          <button class="st-danger-btn st-task-delete-btn" type="button" @click="deleteSelectedTask">{{ $t('common.delete') }}</button>
         </div>
       </div>
 
@@ -1369,30 +1448,33 @@ onUnmounted(() => {
             <h4>{{ $t('settings.scheduledTasks.logsTab') }}</h4>
             <span>{{ $t('settings.scheduledTasks.recordCount', { count: selectedTaskReports.length }) }}</span>
           </div>
-          <div v-if="selectedTaskReports.length === 0" class="st-report-empty">
-            <span>◷</span>
-            <strong>{{ $t('settings.scheduledTasks.noReports') }}</strong>
-            <p>{{ $t('settings.scheduledTasks.runHistoryEmpty') }}</p>
+          <div class="st-report-scroll">
+            <div v-if="selectedTaskReports.length === 0" class="st-report-empty">
+              <span>◷</span>
+              <strong>{{ $t('settings.scheduledTasks.noReports') }}</strong>
+              <p>{{ $t('settings.scheduledTasks.runHistoryEmpty') }}</p>
+            </div>
+            <button
+              v-for="report in selectedTaskReports"
+              :key="report.id"
+              type="button"
+              class="st-report-item"
+              :class="[reportStatusClass(report.status), { 'is-selected': activeReportId === report.id }]"
+              :aria-pressed="activeReportId === report.id"
+              @click="openReport(report.id)"
+            >
+              <div class="st-report-item-top">
+                <strong>{{ runStatusLabel(report.status) }}</strong>
+                <span>{{ formatTimestamp(report.startedAt) }}</span>
+              </div>
+              <p>{{ report.summary }}</p>
+              <div class="st-report-item-meta">
+                <span>{{ report.trigger === 'manual' ? $t('settings.scheduledTasks.manualTrigger') : $t('settings.scheduledTasks.scheduledTrigger') }}</span>
+                <span>{{ $t('settings.scheduledTasks.attemptCount', { count: report.attempt }) }}</span>
+                <span class="st-report-open">{{ $t('settings.scheduledTasks.viewReport') }} →</span>
+              </div>
+            </button>
           </div>
-          <button
-            v-for="report in selectedTaskReports"
-            :key="report.id"
-            type="button"
-            class="st-report-item"
-            :class="reportStatusClass(report.status)"
-            @click="openReport(report.id)"
-          >
-            <div class="st-report-item-top">
-              <strong>{{ runStatusLabel(report.status) }}</strong>
-              <span>{{ formatTimestamp(report.startedAt) }}</span>
-            </div>
-            <p>{{ report.summary }}</p>
-            <div class="st-report-item-meta">
-              <span>{{ report.trigger === 'manual' ? $t('settings.scheduledTasks.manualTrigger') : $t('settings.scheduledTasks.scheduledTrigger') }}</span>
-              <span>{{ $t('settings.scheduledTasks.attemptCount', { count: report.attempt }) }}</span>
-              <span class="st-report-open">{{ $t('settings.scheduledTasks.viewReport') }} →</span>
-            </div>
-          </button>
         </section>
       </div>
 
@@ -1422,9 +1504,14 @@ onUnmounted(() => {
         <small v-if="tasks.length === 0">{{ $t('settings.scheduledTasks.emptyPageHint') }}</small>
       </div>
     </section>
-    </div>
 
-    <ScheduledTaskReportDialog :report="activeReport" @close="closeReportDialog" />
+    <ScheduledTaskReportPanel
+      v-if="activeReport"
+      :key="activeReport.id"
+      :report="activeReport"
+      @close="closeReportPanel"
+    />
+    </div>
   </div>
 </template>
 
@@ -5225,6 +5312,249 @@ onUnmounted(() => {
 
   .st-root .st-body {
     padding: 0;
+  }
+}
+</style>
+
+<style scoped>
+/* Report panel opens as a third column: the task list and run history stay
+   visible, so switching between runs never drops the user into a modal. */
+.st-root .st-body.has-report {
+  --st-pane-head-height: 64px;
+  grid-template-columns: minmax(220px, 250px) minmax(390px, 0.9fr) minmax(400px, 1.1fr);
+}
+
+.st-root .st-body.has-report .st-main-header {
+  min-height: var(--st-pane-head-height);
+}
+
+.st-root .st-body.has-report .st-main-heading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.st-root .st-body.has-report .st-main-header h3 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-root .st-body.has-report .st-main-header p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-root .st-body.has-report .st-main-actions {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+}
+
+/* Keep the pane header and tab strip fixed. Only the selected tab's body
+   scrolls, matching the report panel's fixed header + scrolling body. */
+.st-root .st-main {
+  overflow: hidden;
+}
+
+.st-root .st-detail {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.st-root .st-detail-tabs {
+  flex: 0 0 auto;
+}
+
+.st-root .st-detail > .st-summary-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.st-root .st-detail > .st-report-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.st-root .st-report-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-right: -3px;
+  padding-right: 3px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.st-root .st-onboarding {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.st-root .st-body.has-report .task-report-panel {
+  min-width: 0;
+  min-height: 0;
+}
+
+.st-root .st-body.has-report .st-report-card {
+  padding: 10px;
+}
+
+.st-root .st-body.has-report .st-report-item {
+  padding: 9px 10px;
+}
+
+.st-root .st-body.has-report .st-report-item p {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.st-root .st-body.has-report .st-report-item-meta {
+  gap: 7px;
+  margin-top: 6px;
+}
+
+.st-root .st-report-item.is-selected {
+  border-color: color-mix(in srgb, var(--app-accent) 46%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent) 9%, var(--app-panel));
+  box-shadow: inset 2px 0 0 var(--app-accent);
+}
+
+.st-root .st-report-item.is-selected .st-report-open {
+  color: var(--app-accent-strong);
+}
+
+/* While editing, the report may still be requested from a notification. Keep
+   the unsaved draft mounted and show the report beside it rather than throwing
+   the draft away for a modal. */
+.st-root .st-body.is-editing .st-main {
+  overflow-y: auto;
+}
+
+.st-root .st-body.is-editing.has-report {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(440px, 0.92fr);
+  gap: 0;
+  overflow: hidden;
+}
+
+.st-root .st-body.is-editing.has-report .st-main {
+  height: auto;
+  min-height: 0;
+  padding: 13px 18px;
+  overflow-y: auto;
+  border-right: 1px solid var(--app-border);
+}
+
+.st-root .st-body.is-editing.has-report .st-editor-layout {
+  max-width: none;
+}
+
+@media (min-width: 981px) and (max-width: 1240px) {
+  .st-root .st-body.has-report:not(.is-editing) {
+    grid-template-columns: minmax(176px, 200px) minmax(360px, 0.9fr) minmax(380px, 1.1fr);
+  }
+
+  .st-root .st-body.has-report .st-sidebar {
+    gap: 6px;
+    padding: 8px 9px;
+  }
+
+  .st-root .st-body.has-report .st-search {
+    height: 28px;
+  }
+
+  .st-root .st-body.has-report .st-filter-row {
+    display: none;
+  }
+
+  .st-root .st-body.has-report .st-task-schedule,
+  .st-root .st-body.has-report .st-task-card-footer {
+    display: none;
+  }
+
+  .st-root .st-body.has-report .st-task-card {
+    padding: 8px 8px 8px 11px;
+  }
+
+  .st-root .st-body.has-report .st-task-card strong {
+    font-size: 0.75rem;
+    line-height: 1.35;
+  }
+
+  .st-root .st-body.has-report .st-task-status {
+    padding: 2px 6px;
+    font-size: 0.56rem;
+  }
+
+  .st-root .st-body.has-report .st-main-header p {
+    display: none;
+  }
+
+  .st-root .st-body.has-report .st-main-actions {
+    gap: 4px;
+  }
+
+  .st-root .st-body.has-report .st-main-actions .st-primary-btn,
+  .st-root .st-body.has-report .st-main-actions .st-ghost-btn,
+  .st-root .st-body.has-report .st-main-actions .st-danger-btn {
+    min-height: 28px;
+    padding: 4px 8px;
+    font-size: 0.66rem;
+  }
+}
+
+@media (max-width: 980px) {
+  .st-root .st-body.has-report {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(176px, 210px) minmax(360px, auto) minmax(460px, auto);
+    overflow-y: auto;
+  }
+
+  .st-root .st-body.is-editing.has-report {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(360px, auto) minmax(460px, auto);
+    overflow-y: auto;
+  }
+
+  .st-root .st-body.has-report .st-sidebar {
+    display: flex;
+    max-height: 210px;
+    border-right: 0;
+    border-bottom: 1px solid var(--app-border);
+  }
+
+  .st-root .st-body.has-report .st-main {
+    min-height: 360px;
+    border-right: 0;
+    border-bottom: 1px solid var(--app-border);
+  }
+
+  .st-root .st-body.has-report .task-report-panel {
+    min-height: 460px;
+    border-left: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .st-root .st-body.has-report {
+    grid-template-rows: minmax(164px, 196px) minmax(320px, auto) minmax(440px, auto);
+  }
+
+  .st-root .st-body.is-editing.has-report {
+    grid-template-rows: minmax(320px, auto) minmax(440px, auto);
+  }
+
+  .st-root .st-body.has-report .task-report-panel {
+    min-height: 440px;
   }
 }
 </style>

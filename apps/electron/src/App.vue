@@ -14,7 +14,6 @@ import DockBar from './renderer/components/app/DockBar.vue'
 import BrowserWebView, { type BrowserContextAddPayload } from './renderer/components/app/BrowserWebView.vue'
 import FloatingTaskBubble from './renderer/components/app/FloatingTaskBubble.vue'
 import ProjectWindowShell from './renderer/components/app/ProjectWindowShell.vue'
-import ScheduledTaskReportDialog from './renderer/components/settings/ScheduledTaskReportDialog.vue'
 import type { BackgroundWorkspaceTabClosedPayload, BackgroundWorkspaceTabOpenedPayload, ChatSurfaceStatusSummary, WorkspacePageSurfaceSummary, WorkspaceTerminalSurfaceSummary } from './renderer/components/chat/panel/types'
 import { sharedChatPanelState } from './renderer/components/chat/panel/shared-state'
 import { addWebQuote } from './renderer/components/chat/panel/web-quote-state'
@@ -434,7 +433,11 @@ let runningAppsRefreshToken = 0
 let stopThemeWatcher: (() => void) | null = null
 let runningAppsInterval: ReturnType<typeof setInterval> | null = null
 
-const scheduledTaskReport = ref<ScheduledTaskRunReport | null>(null)
+const automationReportRequest = ref<{
+  report: ScheduledTaskRunReport
+  seq: number
+} | null>(null)
+let automationReportRequestSeq = 0
 
 function clearEmbeddedApp (appId?: string) {
   if (appId) {
@@ -2205,10 +2208,6 @@ function closeLanModal () {
   lanModal.value.visible = false
 }
 
-function closeScheduledTaskReportDialog () {
-  scheduledTaskReport.value = null
-}
-
 function syncEmbeddedProjectStates (projects: ProjectListItem[]) {
   const projectStatusMap = new Map(projects.map(project => [project.id, project.runtime ?? { status: 'unknown' }]))
   const nextEmbeddedApps = new Map(embeddedApps.value)
@@ -2465,7 +2464,12 @@ onMounted(async () => {
 
   if (window.electronAPI?.onScheduledTaskReportRequested) {
     schedulerReportRequestedCleanup = window.electronAPI.onScheduledTaskReportRequested((report) => {
-      scheduledTaskReport.value = report
+      automationReportRequestSeq += 1
+      automationReportRequest.value = {
+        report,
+        seq: automationReportRequestSeq
+      }
+      openAutomation()
     })
   }
 
@@ -2641,7 +2645,11 @@ onUnmounted(() => {
           </KeepAlive>
 
           <KeepAlive>
-            <AutomationTasks v-if="currentView === 'automation'" />
+            <AutomationTasks
+              v-if="currentView === 'automation'"
+              :report-request="automationReportRequest"
+              @report-request-consumed="automationReportRequest = null"
+            />
           </KeepAlive>
 
           <Launchpad
@@ -2704,7 +2712,6 @@ onUnmounted(() => {
           </div>
         </div>
       </Teleport>
-      <ScheduledTaskReportDialog :report="scheduledTaskReport" @close="closeScheduledTaskReportDialog" />
     </template>
   </div>
 </template>
