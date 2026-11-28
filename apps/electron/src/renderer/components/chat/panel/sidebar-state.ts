@@ -149,22 +149,39 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
     return availableAgentGroups.value.map((group) => {
       const conversation = getPinnedGroupConversation(conversations.value, group.id)
       const memberIds = roomMemberIds(group)
+      const online = group.online
+      const onlineHumans = online?.members.filter(member => member.kind === 'human') || []
+      const onlineAgents = online?.members.filter(member => member.kind === 'agent') || []
+      const pendingOnlineApprovals = online?.delegations.filter(delegation => (
+        delegation.status === 'pending_owner_approval'
+        && delegation.toOwnerPeerId === online.selfPeerId
+      )).length || 0
+      const memberCount = online ? onlineHumans.length + onlineAgents.length : memberIds.length + (group.localWorkers?.length || 0)
+      const pendingAuthCount = (conversation ? getPendingAuthCount(conversation.id) : 0) + pendingOnlineApprovals
 
       return {
         id: group.id,
         conversationId: conversation?.id || null,
         title: group.name,
-        subtitle: t('chatUi.groupSidebarSubtitle', { count: memberIds.length + (group.localWorkers?.length || 0) }),
+        subtitle: online
+          ? t('onlineGroups.sidebarMemberSummary', {
+              humans: onlineHumans.length,
+              agents: onlineAgents.length
+            })
+          : t('chatUi.groupSidebarSubtitle', { count: memberCount }),
+        groupType: online ? 'online' : 'local',
         searchText: buildSidebarSearchText([
           group.name,
           ...memberIds.map(id => agentsById.value.get(id)?.name),
           ...(group.localWorkers || []).map(worker => worker.role),
+          ...onlineHumans.map(member => member.peerName),
+          ...onlineAgents.map(member => member.agentName),
           conversation?.title,
           conversation?.previewText,
         ]),
         icon: getGroupIcon(group),
         isStreaming: conversation ? streamingConversationIds.has(conversation.id) : false,
-        pendingAuthCount: conversation ? getPendingAuthCount(conversation.id) : 0,
+        pendingAuthCount,
         unreadCount: conversation ? getUnreadCount(conversation.id) : 0,
         isActive: Boolean(conversation && currentConversationId.value === conversation.id)
       }
@@ -302,6 +319,7 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
   })
   const currentModelLabel = computed(() => {
     if (currentGroupDefinition.value) {
+      if (currentGroupDefinition.value.online) return t('onlineGroups.title')
       return t('chatUi.groupCollaborationLabel', { name: currentGroupDefinition.value.name })
     }
 
@@ -328,6 +346,12 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
     }
     if (currentGroupDefinition.value) {
       const group = currentGroupDefinition.value
+      if (group.online) {
+        return t('onlineGroups.sidebarMemberSummary', {
+          humans: group.online.members.filter(member => member.kind === 'human').length,
+          agents: group.online.members.filter(member => member.kind === 'agent').length
+        })
+      }
       return t('chatUi.groupContextDetail', { count: roomMemberIds(group).length + (group.localWorkers?.length || 0) })
     }
     return currentModelLabel.value
@@ -336,6 +360,25 @@ export function createChatSidebarState (options: ChatSidebarStateOptions) {
   const groupMentionHints = computed<GroupMentionHint[]>(() => {
     const group = currentGroupDefinition.value
     if (!group) return []
+    if (group.online) {
+      const hints: GroupMentionHint[] = []
+      const seen = new Set<string>()
+      for (const member of group.online.members) {
+        if (member.kind !== 'agent') continue
+        const label = (member.agentName || member.role).trim()
+        if (!label) continue
+        const token = `@${label}`
+        if (seen.has(token)) continue
+        seen.add(token)
+        hints.push({
+          token,
+          agentId: member.id,
+          label,
+          aliases: [member.agentName, member.role, member.id].filter((value): value is string => Boolean(value))
+        })
+      }
+      return hints
+    }
 
     const hints: GroupMentionHint[] = [{
       token: '@all',

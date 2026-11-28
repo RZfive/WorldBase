@@ -444,6 +444,23 @@ html, body, #app {
   padding: 12px 14px;
 }
 
+/* Room @mention relationship chip. Kept global because markdown HTML is
+   rendered inside several scoped block components. */
+.chat-mention-chip {
+  display: inline;
+  margin: 0 1px;
+  padding: 0 2px;
+  border: none;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--app-accent-strong) 12%, transparent);
+  color: var(--app-accent-strong);
+  font-weight: 600;
+  line-height: inherit;
+  white-space: nowrap;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
 /* Left status stripe used by stateful blocks (error/warning/success/info). */
 .chat-card-status {
   position: relative;

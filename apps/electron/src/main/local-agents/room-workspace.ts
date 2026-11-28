@@ -17,8 +17,11 @@ export async function resolveRoomLocalWorkspace (
   dataDir: string,
   groupId: string,
   taskDirectory?: string | null,
-  projectDirectory?: string | null
+  projectDirectory?: string | null,
+  roomDirectory?: string | null
 ): Promise<RoomLocalWorkspace> {
+  const groupRoot = await existingDirectory(roomDirectory)
+  if (groupRoot) return { path: groupRoot, source: 'group' }
   const taskRoot = await existingDirectory(taskDirectory)
   if (taskRoot) return { path: taskRoot, source: 'task' }
   const projectRoot = await existingDirectory(projectDirectory)

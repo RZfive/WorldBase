@@ -24,9 +24,9 @@ const roomModule = loadModule('electron/main-process/ai/native-rust-room.ts', {
 })
 
 const agents = [
-  { id: 'default', name: 'Reviewer', icon: '🔎' },
-  { id: 'member', name: 'Document Agent', icon: '🎨' },
-  { id: 'other', name: 'Tester', icon: '🧪' }
+  { id: 'default', name: 'Reviewer', icon: '🔎', description: 'Reviews plans and evidence.' },
+  { id: 'member', name: 'Document Agent', icon: '🎨', description: 'Writes and edits product documents.' },
+  { id: 'other', name: 'Tester', icon: '🧪', description: 'Runs verification and reports failures.' }
 ]
 const group = {
   id: 'room-fixture', name: 'Room', coordinatorAgentId: 'default', memberAgentIds: ['member', 'other', 'member', 'missing'],
@@ -172,16 +172,39 @@ test('a failed temporary worker remains available for a retry', async () => {
   assert.deepEqual(events.filter(event => event.type === 'room_member_status').map(event => event.roomMemberStatus.status), ['queued', 'failed'])
 })
 
+test('a native group error keeps the Rust failure cause instead of a generic round message', async () => {
+  const { runNativeRoom } = await roomModule
+  const { input } = makeRoomRequest('@Document Agent Draft the report.', {
+    client: {
+      async startNativeGroupRound (params) {
+        params.onEvent({ kind: 'notice', text: 'Native group failed: provider timed out while drafting' })
+        params.onEvent({ kind: 'done', stopReason: 'group_error' })
+      }
+    }
+  })
+  await assert.rejects(
+    runNativeRoom(input),
+    /Native group failed: provider timed out while drafting/
+  )
+})
+
 test('a room instructs members to hand off proactively instead of asking the user to coordinate', async () => {
   const { runNativeRoom } = await roomModule
   const { input, rounds } = makeRoomRequest('@Document Agent Draft the report.')
   await runNativeRoom(input)
   const prompt = rounds[0].context.systemPromptSections.join('\n')
   assert.match(prompt, /@Reviewer \(default\)/)
+  assert.match(prompt, /@Reviewer \(default\): Reviews plans and evidence\./)
   assert.match(prompt, /@Document Agent \(member\)/)
+  assert.match(prompt, /@Document Agent \(member\): Writes and edits product documents\./)
   assert.match(prompt, /@Tester \(other\)/)
+  assert.match(prompt, /Never write role-play, identity, greeting/)
   assert.match(prompt, /Proactively call handoff_room_task/)
   assert.match(prompt, /split it into concrete parts and hand off independent parts immediately/)
+  assert.match(prompt, /finish this turn immediately/)
+  assert.match(prompt, /returns each recipient’s result to you as a visible @reply/)
+  assert.match(prompt, /Do not call read_room_messages, wait, poll/)
+  assert.match(prompt, /direct @member message/)
   assert.match(prompt, /Before calling ask_user, check whether a safe, reversible default exists/)
   assert.match(prompt, /bundle every current blocking decision into one ask_user call/)
   assert.match(prompt, /Do not hand coordination back to the user/)
@@ -208,19 +231,29 @@ test('a room continues only explicit handoffs, with host tools still scoped to t
           assert.deepEqual(tools.map(tool => tool.definition.name), ['handoff_room_task'])
           await assert.rejects(tools[0].handler({ agentId: '@Unknown', task }), /room member/)
           await assert.rejects(tools[0].handler({ agentId: 'member', task }), /another member/)
+          await assert.rejects(tools[0].handler({ agentId: '@Tester', task: params.text }), /specific subtask/)
           const result = await tools[0].handler({ agentId: '＠Tester', task })
           assert.equal(result.status, 'queued')
+          assert.match(result.next, /End the turn now/)
           assert.equal((await tools[0].handler({ agentId: 'other', task })).status, 'already_queued')
           assert.equal(hostContexts.at(-1).sessionId, streamId)
           assert.equal(hostContexts.at(-1).hostSessionId, input.sessionId)
           assert.equal(hostContexts.at(-1).hostConversationId, 'visible-room')
           assert.equal(hostContexts.at(-1).authMode, 'auto')
-        } else {
+        } else if (params.round === 2) {
           assert.equal(params.authMode, 'auto')
           assert.equal(params.recordMessage, false)
           assert.equal(params.memberRequests.other, `From Document Agent:\n${task}`)
+          params.onEvent({ kind: 'start', groupMemberStreamId: `${params.groupId}:member:other:child` })
+          params.onEvent({ kind: 'group_message', agentId: 'other', content: 'Reply from other' })
+          params.onEvent({ kind: 'done', stopReason: 'group_complete' })
+        } else {
+          assert.equal(params.memberRequests.member, 'From Tester:\nReply from other')
+          params.onEvent({ kind: 'start', groupMemberStreamId: `${params.groupId}:member:member:child` })
+          params.onEvent({ kind: 'group_message', agentId: 'member', content: 'Reply from member' })
+          params.onEvent({ kind: 'done', stopReason: 'group_complete' })
         }
-        finishRound(params)
+        if (params.round === 1) finishRound(params)
       }
     }
   })
@@ -229,10 +262,103 @@ test('a room continues only explicit handoffs, with host tools still scoped to t
     context: { hostConversationId: 'visible-room', getAuthMode: () => authMode },
     hostTools: { createElectronHostToolRegistrations: options => { hostContexts.push(options); return [] } }
   })
-  assert.deepEqual(membersByRound, [['member'], ['other']])
-  assert.deepEqual(recorded, [[`room-${group.id}`, 'member', 'other', task]])
-  assert.deepEqual(replies.map(reply => reply.speakerName), ['Document Agent', 'Tester'])
-  assert.deepEqual(events.filter(event => event.type === 'group_peer_message').map(event => event.peerMessage.status), ['pending', 'completed'])
+  assert.deepEqual(membersByRound, [['member'], ['other'], ['member']])
+  assert.deepEqual(recorded, [
+    [`room-${group.id}`, 'member', 'other', task],
+    [`room-${group.id}`, 'other', 'member', 'Reply from other']
+  ])
+  assert.deepEqual(replies.map(reply => reply.speakerName), ['Document Agent', 'Tester', 'Document Agent'])
+  assert.match(replies[0].content, /^@Tester Check the draft and provide evidence\.\n\nReply from member$/)
+  assert.equal(replies[1].content, '@Document Agent Reply from other')
+  assert.equal(replies[2].content, 'Reply from member')
+  assert.deepEqual(events.filter(event => event.type === 'room_message').map(event => event.roomMessage.content), replies.map(reply => reply.content))
+  assert.equal(events.some(event => event.type === 'group_peer_message'), false)
+})
+
+test('a member that only hands off still leaves a direct @mention and starts the recipients next round', async () => {
+  const { runNativeRoom } = await roomModule
+  const recorded = []
+  const membersByRound = []
+  const task = 'Prepare the evidence for review.'
+  const { input, events } = makeRoomRequest('@Reviewer Coordinate the demo.', {
+    client: {
+      async recordRoomHandoff (...args) { recorded.push(args) },
+      async startNativeGroupRound (params) {
+        membersByRound.push(params.memberIds)
+        if (params.round === 1) {
+          const streamId = `${params.groupId}:member:default:child`
+          const tools = params.customToolsForStream(streamId, new AbortController().signal)
+          await tools[0].handler({ agentId: '@Document Agent', task })
+          params.onEvent({ kind: 'start', groupMemberStreamId: streamId })
+          params.onEvent({ kind: 'done', stopReason: 'stop' })
+          params.onEvent({ kind: 'done', stopReason: 'group_complete' })
+        } else if (params.round === 2) {
+          params.onEvent({ kind: 'start', groupMemberStreamId: `${params.groupId}:member:member:child` })
+          params.onEvent({ kind: 'group_message', agentId: 'member', content: 'Evidence ready.' })
+          params.onEvent({ kind: 'done', stopReason: 'group_complete' })
+        } else {
+          assert.match(params.memberRequests.default, /From Document Agent:\nEvidence ready\./)
+          params.onEvent({ kind: 'start', groupMemberStreamId: `${params.groupId}:member:default:child` })
+          params.onEvent({ kind: 'group_message', agentId: 'default', content: 'Evidence returned to the user.' })
+          params.onEvent({ kind: 'done', stopReason: 'group_complete' })
+        }
+      }
+    }
+  })
+  const replies = await runNativeRoom(input)
+  assert.deepEqual(membersByRound, [['default'], ['member'], ['default']])
+  assert.deepEqual(recorded, [
+    [`room-${group.id}`, 'default', 'member', task],
+    [`room-${group.id}`, 'member', 'default', 'Evidence ready.']
+  ])
+  assert.deepEqual(replies.map(reply => [reply.speakerName, reply.content]), [
+    ['Reviewer', `@Document Agent ${task}`],
+    ['Document Agent', '@Reviewer Evidence ready.'],
+    ['Reviewer', 'Evidence returned to the user.']
+  ])
+  assert.deepEqual(events.filter(event => event.type === 'room_message').map(event => event.roomMessage.content), replies.map(reply => reply.content))
+  assert.equal(events.some(event => event.type === 'group_peer_message'), false)
+})
+
+test('a visible @mention without a tool call still wakes the addressed member', async () => {
+  const { runNativeRoom } = await roomModule
+  const recorded = []
+  const membersByRound = []
+  const task = 'Check the implementation and report concrete risks.'
+  const { input, events } = makeRoomRequest('@Reviewer Coordinate the demo.', {
+    client: {
+      async recordRoomHandoff (...args) { recorded.push(args) },
+      async startNativeGroupRound (params) {
+        membersByRound.push(params.memberIds)
+        if (params.round === 1) {
+          params.onEvent({ kind: 'start', groupMemberStreamId: `${params.groupId}:member:default:child` })
+          params.onEvent({ kind: 'group_message', agentId: 'default', content: `@Tester ${task}` })
+          params.onEvent({ kind: 'done', stopReason: 'group_complete' })
+        } else if (params.round === 2) {
+          params.onEvent({ kind: 'start', groupMemberStreamId: `${params.groupId}:member:other:child` })
+          params.onEvent({ kind: 'group_message', agentId: 'other', content: 'Risks checked and returned.' })
+          params.onEvent({ kind: 'done', stopReason: 'group_complete' })
+        } else {
+          assert.match(params.memberRequests.default, /From Tester:\nRisks checked and returned\./)
+          params.onEvent({ kind: 'start', groupMemberStreamId: `${params.groupId}:member:default:child` })
+          params.onEvent({ kind: 'group_message', agentId: 'default', content: 'Reported back with risks.' })
+          params.onEvent({ kind: 'done', stopReason: 'group_complete' })
+        }
+      }
+    }
+  })
+  const replies = await runNativeRoom(input)
+  assert.deepEqual(membersByRound, [['default'], ['other'], ['default']])
+  assert.deepEqual(recorded, [
+    [`room-${group.id}`, 'default', 'other', task],
+    [`room-${group.id}`, 'other', 'default', 'Risks checked and returned.']
+  ])
+  assert.deepEqual(replies.map(reply => [reply.speakerName, reply.content]), [
+    ['Reviewer', `@Tester ${task}`],
+    ['Tester', '@Reviewer Risks checked and returned.'],
+    ['Reviewer', 'Reported back with risks.']
+  ])
+  assert.deepEqual(events.filter(event => event.type === 'room_message').map(event => event.roomMessage.content), replies.map(reply => reply.content))
 })
 
 test('live clarifications route to the active, mentioned, or all members without a planner', async () => {

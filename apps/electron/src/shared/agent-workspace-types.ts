@@ -1,4 +1,9 @@
 import type { RoomLocalWorker } from './local-agent-types.js'
+import type {
+  OnlineGroupAccessRole,
+  OnlineGroupDelegation,
+  OnlineGroupMember
+} from './online-group-types.js'
 
 export type AgentReasoningStrength = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 
@@ -48,11 +53,26 @@ export interface AgentGroupDefinition {
   memberAgentIds: string[]
   localWorkers?: RoomLocalWorker[]
   roomContextId?: string
+  workspaceRoot?: string
+  workspaceRootName?: string
   maxRounds: number
   maxParallelWorkers: number
   sharedMemoryScopes: Array<'group' | 'project' | 'channel'>
   visibility: 'summary_only' | 'expandable_internal_transcript'
   createdAt: string
+  updatedAt: string
+  /** Present only for a synthetic definition backed by an online group. */
+  online?: OnlineGroupLink
+}
+
+export interface OnlineGroupLink {
+  groupId: string
+  ownerPeerId: string
+  ownerName: string
+  accessRole: OnlineGroupAccessRole
+  selfPeerId: string
+  members: OnlineGroupMember[]
+  delegations: OnlineGroupDelegation[]
   updatedAt: string
 }
 
@@ -197,6 +217,8 @@ export interface AgentGroupMessage {
   createdAt: string
   resolvedAt?: string
   error?: string
+  /** Runtime-created return handoff used to wake the original requester. */
+  autoCallback?: boolean
 }
 
 /**

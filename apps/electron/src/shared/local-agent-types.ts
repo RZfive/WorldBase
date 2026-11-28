@@ -30,7 +30,7 @@ export interface LocalAgentSession {
 
 export interface RoomLocalWorkspace {
   path: string
-  source: 'task' | 'project' | 'room'
+  source: 'group' | 'task' | 'project' | 'room'
 }
 
 export interface RoomLocalWorkerOptions {

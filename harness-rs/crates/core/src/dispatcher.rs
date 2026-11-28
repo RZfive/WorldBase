@@ -182,6 +182,15 @@ pub async fn dispatch(
         GROUP_MESSAGE => group_message(hub, ctx, params),
         GROUP_BLACKBOARD_ADD => group_blackboard_add(hub, params),
 
+        LAN_DISCOVERY_START => lan_discovery_start(hub, params),
+        LAN_DISCOVERY_UPDATE => lan_discovery_update(hub, params),
+        LAN_DISCOVERY_STOP => {
+            hub.lan_discovery.stop();
+            Ok(serde_json::to_value(hub.lan_discovery.status()).unwrap())
+        }
+        LAN_DISCOVERY_STATUS => Ok(serde_json::to_value(hub.lan_discovery.status()).unwrap()),
+        LAN_DISCOVERY_REFRESH => Ok(serde_json::to_value(hub.lan_discovery.refresh()).unwrap()),
+
         MCP_LIST => Ok(
             json!({ "servers": hub.mcp.server_names().await, "tools": hub.mcp.list_tools().await }),
         ),
@@ -3137,7 +3146,7 @@ fn group_record_handoff(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObj
     let member = |key| room.members.iter().find(|member| group_member_id(member) == Some(key));
     let source = member(from).ok_or_else(|| params_err("handoff sender is not a room member"))?;
     let target = member(to).ok_or_else(|| params_err("handoff recipient is not a room member"))?;
-    persist_group_member_message(hub, id, &source.name, &format!("Handoff to {}:\n{task}", target.name)).map_err(internal)?;
+    persist_group_member_message(hub, id, &source.name, &format!("@{}\n{task}", target.name)).map_err(internal)?;
     Ok(json!({ "recorded": true }))
 }
 
@@ -3674,6 +3683,27 @@ async fn run_local_cli_group_member(
         .ok_or_else(|| anyhow::anyhow!("Local CLI returned no assistant text."))
 }
 
+fn lan_discovery_identity(params: &Value) -> Result<worldbase_lan::DiscoveryIdentity, ErrorObject> {
+    let value = params
+        .get("identity")
+        .cloned()
+        .unwrap_or_else(|| params.clone());
+    serde_json::from_value(value)
+        .map_err(|error| params_err(format!("invalid LAN discovery identity: {error}")))
+}
+
+fn lan_discovery_start(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let identity = lan_discovery_identity(&params)?;
+    let status = hub.lan_discovery.start(identity).map_err(internal)?;
+    serde_json::to_value(status).map_err(internal)
+}
+
+fn lan_discovery_update(hub: &Arc<Hub>, params: Value) -> Result<Value, ErrorObject> {
+    let identity = lan_discovery_identity(&params)?;
+    let status = hub.lan_discovery.update(identity).map_err(internal)?;
+    serde_json::to_value(status).map_err(internal)
+}
+
 fn group_message(
     hub: &Arc<Hub>,
     ctx: &ConnectionContext,
@@ -3913,6 +3943,13 @@ fn group_message(
                 hub2.emit(
                     &id,
                     EventKind::Notice { text: format!("Native group failed: {e}") },
+                )
+                .await;
+                hub2.emit(
+                    &id,
+                    EventKind::Error {
+                        message: format!("Native group failed: {e}"),
+                    },
                 )
                 .await;
                 hub2.runs.lock().unwrap().remove(&id);
@@ -5309,6 +5346,14 @@ fn normalize_agent_group(value: &Value, existing: Option<&Value>, fallback_name:
             .cloned()
             .unwrap_or_else(|| json!([])),
         "roomContextId": existing.and_then(|group| group_string(group, "roomContextId")),
+        "workspaceRoot": group_source_value(value, existing, "workspaceRoot")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty()),
+        "workspaceRootName": group_source_value(value, existing, "workspaceRootName")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty()),
         "maxRounds": max_rounds,
         "maxParallelWorkers": max_parallel_workers,
         "sharedMemoryScopes": scopes,

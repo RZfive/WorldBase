@@ -5,6 +5,10 @@ import type {
   ChannelBinding,
   SkillItem
 } from './types'
+import {
+  applyOnlineGroupCatalogState,
+  onlineGroupCatalog
+} from './online-group-catalog'
 
 interface ChatWorkspaceOptionsStateOptions {
   availableSkills: Ref<SkillItem[]>
@@ -65,20 +69,24 @@ export function createChatWorkspaceOptionsState (options: ChatWorkspaceOptionsSt
     if (!window.electronAPI?.listAgents || !window.electronAPI?.listAgentGroups || !window.electronAPI?.listChannelBindings) return
 
     try {
-      const [agents, groups, bindings] = await Promise.all([
+      const [agents, groups, bindings, onlineState] = await Promise.all([
         window.electronAPI.listAgents(),
         window.electronAPI.listAgentGroups(),
-        window.electronAPI.listChannelBindings()
+        window.electronAPI.listChannelBindings(),
+        window.electronAPI.getOnlineGroupState?.().catch(() => null) || Promise.resolve(null)
       ])
 
       availableAgents.value = agents
-      availableAgentGroups.value = groups
       availableChannelBindings.value = bindings
+      onlineGroupCatalog.localGroups.value = groups
+      applyOnlineGroupCatalogState(onlineState, availableAgentGroups)
 
       if (selectedAgentId.value && !agents.some(agent => agent.id === selectedAgentId.value)) {
         selectedAgentId.value = ''
       }
-      if (selectedGroupId.value && !groups.some(group => group.id === selectedGroupId.value)) {
+      if (selectedGroupId.value
+        && !selectedGroupId.value.startsWith('online:')
+        && !availableAgentGroups.value.some(group => group.id === selectedGroupId.value)) {
         selectedGroupId.value = ''
       }
       if (selectedChannelBindingId.value && !bindings.some(binding => binding.id === selectedChannelBindingId.value)) {
@@ -94,6 +102,16 @@ export function createChatWorkspaceOptionsState (options: ChatWorkspaceOptionsSt
       }
     } catch {
       /* ignore */
+    }
+  }
+
+  async function refreshOnlineGroupCatalog (): Promise<void> {
+    if (!window.electronAPI?.getOnlineGroupState) return
+    try {
+      const state = await window.electronAPI.getOnlineGroupState()
+      applyOnlineGroupCatalogState(state, availableAgentGroups)
+    } catch {
+      /* keep the last known catalog */
     }
   }
 
@@ -119,6 +137,7 @@ export function createChatWorkspaceOptionsState (options: ChatWorkspaceOptionsSt
   return {
     clearSkills,
     loadAgentWorkspaceOptions,
+    refreshOnlineGroupCatalog,
     loadSkills,
     selectAllSkills,
     toggleSkill

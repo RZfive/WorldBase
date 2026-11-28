@@ -1,6 +1,14 @@
 export const ROOM_ALL_MENTIONS = ['all', 'everyone', '全组', '全员', '全部agent', '所有agent']
 export const ROOM_DEFAULT_MENTIONS = ['主Agent', '主协调', '协调Agent', 'coordinator', 'mainagent']
 
+const REDUNDANT_HANDOFF_INSTRUCTION_PATTERNS = [
+  /(?:请|请你|请务必)?\s*以[^。\n]{0,80}?(?:本人|专家|agent|助手|角色)?(?:的)?身份[^。\n]{0,80}?(?:回复|发言|问候|介绍|面向用户)[^。\n]*[。.]?/giu,
+  /(?:可|可以|并|并且)?\s*(?:简单)?(?:说明|介绍)(?:一下)?(?:你的|自己的)?(?:专家)?身份[^。\n]*[。.]?/giu,
+  /(?:回复|发送|给出)(?:一句)?[^。\n]{0,40}?问候[^。\n]*[。.]?/giu,
+  /(?:由你本人发言|不要代[^。\n]{0,20}协调人发言|不虚构任何工作成果|不要虚构[^。\n]{0,20}成果|不展开无关建议)[^。\n]*[。.]?/giu,
+  /(?:验收标准|acceptance criteria)\s*[:：][^。\n]*(?:问候|自我介绍|本人发言|虚构|无关建议)[^。\n]*[。.]?/giu
+]
+
 export function normalizeMentionToken (value: string): string {
   return value
     .replace(/^[@＠]+/, '')
@@ -8,6 +16,57 @@ export function normalizeMentionToken (value: string): string {
     .replace(/\s+/g, '')
     .trim()
     .toLowerCase()
+}
+
+/**
+ * Role, greeting and delivery-style instructions belong in the runtime
+ * system prompt, not in a visible handoff message. Strip the common forms
+ * models emit when asked to transfer a turn to a specialist.
+ */
+export function stripRedundantHandoffInstructions (value: string): string {
+  let result = value
+  for (const pattern of REDUNDANT_HANDOFF_INSTRUCTION_PATTERNS) {
+    result = result.replace(pattern, '')
+  }
+  return result
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^[\s；;，,。]+/u, '')
+    .trim()
+}
+
+function normalizeForwardComparable (value: string): string {
+  return value
+    .replace(/[@＠][^\s，。！？,.!?；;：:、]+/gu, '')
+    .replace(/[^\p{L}\p{N}]/gu, '')
+    .toLowerCase()
+}
+
+/**
+ * Reject a handoff that merely forwards the user's whole request. A useful
+ * delegation names the recipient's specific responsibility instead.
+ */
+export function isVerbatimRoomForward (task: string, userRequest: string): boolean {
+  const normalizedTask = normalizeForwardComparable(task)
+  const normalizedRequest = normalizeForwardComparable(userRequest)
+  if (!normalizedTask || !normalizedRequest) return false
+  if (normalizedTask === normalizedRequest) return true
+  const shorter = normalizedTask.length <= normalizedRequest.length ? normalizedTask : normalizedRequest
+  const longer = shorter === normalizedTask ? normalizedRequest : normalizedTask
+  return shorter.length >= 12
+    && longer.includes(shorter)
+    && shorter.length / longer.length >= 0.82
+}
+
+/**
+ * A room handoff is a normal member message that directly @mentions the
+ * recipient. The task body stays visible in the transcript so it can be read
+ * by people and by other members instead of being hidden inside a UI card.
+ */
+export function formatRoomHandoffMessage (toAgentName: string, task: string): string {
+  const name = toAgentName.trim().replace(/^[@＠]+\s*/u, '')
+  const body = stripRedundantHandoffInstructions(task)
+  return body ? `@${name} ${body}` : `@${name}`
 }
 
 export function resolveRoomAddress (

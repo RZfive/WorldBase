@@ -52,6 +52,7 @@ the-world/
 │   │   ├── tools/                    # 全部内置 Agent 工具和 feature gate
 │   │   ├── core/                     # Agent loop、session/turn、权限、dispatcher
 │   │   ├── group/                    # 群组协作状态机
+│   │   ├── lan/                      # 局域网 WorldBase 发现（UDP 组播）
 │   │   ├── memory/                   # SQLite/FTS5 长期记忆
 │   │   ├── skills/                   # YAML Skill 加载与执行
 │   │   ├── scheduler/                # 定时任务
@@ -100,13 +101,13 @@ harness-rs     ── in-process ──> cli；mobile-ffi ── loopback WS ─
 harness-rs/crates/
 ├── protocol, providers
 ├── core, tools
-├── group, memory, skills, scheduler, mcp-client, docs, search
+├── group, lan, memory, skills, scheduler, mcp-client, docs, search
 ├── app-server, cli
 ├── exec, project-runtime, im-gateway
 └── mobile-ffi
 ```
 
-- **Agent Loop/共享能力层**：`protocol`、`providers`、`core`、`tools`、`group`、`memory`、`skills`、`scheduler`、`mcp-client`、`docs`、`search`。
+- **Agent Loop/共享能力层**：`protocol`、`providers`、`core`、`tools`、`group`、`lan`、`memory`、`skills`、`scheduler`、`mcp-client`、`docs`、`search`。
 - **可选桌面接入层**：`app-server`、`exec`、`project-runtime`、`im-gateway`、`cli`；其中 `app-server` 是 Electron Rust 模式的接入点，其他桌面 crate 不构成 Agent Loop 完成的前置条件。
 - **移动接入层**：`mobile-ffi`。它只导出 FFI API 和能力协商，不承载 Flutter 页面。
 - 移动构建当前主要通过 transport capability ceiling、initialize 能力协商和显式工具白名单隐藏子进程、端口监听、webhook 及 Electron-only 能力；Rust Agent Loop 和文档公共能力仍可复用。`desktop-support` 目前是兼容 feature，不应被描述为完整编译期裁剪。

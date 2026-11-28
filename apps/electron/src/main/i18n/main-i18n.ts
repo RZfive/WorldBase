@@ -50,10 +50,17 @@ function lookup (obj: unknown, path: string): unknown {
   return current
 }
 
-/** Replace `{name}` placeholders with provided params. */
+/**
+ * Replace `{name}` placeholders with provided params.
+ *
+ * A literal at-sign is written `{'@'}` in the catalog because vue-i18n, which
+ * compiles the same strings for the renderer, reads a bare `@` as the start of
+ * a linked message. The main process compiles nothing, so undo that one escape.
+ */
 function interpolate (template: string, params?: Record<string, string | number>): string {
-  if (!params) return template
-  return template.replace(/\{(\w+)\}/g, (match, key: string) => {
+  const text = template.replace(/\{'@'\}/g, '@')
+  if (!params) return text
+  return text.replace(/\{(\w+)\}/g, (match, key: string) => {
     const value = params[key]
     return value !== undefined ? String(value) : match
   })

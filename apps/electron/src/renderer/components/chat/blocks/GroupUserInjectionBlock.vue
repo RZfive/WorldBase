@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, inject, ref, type Ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { renderMarkdown } from '../markdown'
 import type { ChatMessageBlock } from '../types'
@@ -9,8 +9,9 @@ const props = defineProps<{
 }>()
 
 const { t } = useI18n()
+const chatMentionNames = inject<Readonly<Ref<string[]>>>('chatMentionNames', ref([]))
 const injection = computed(() => props.block.injection)
-const contentHtml = computed(() => renderMarkdown(injection.value.content))
+const contentHtml = computed(() => renderMarkdown(injection.value.content, { mentionNames: chatMentionNames.value }))
 const targetLabel = computed(() => {
   if (injection.value.targetAgentIds.length === 0) return t('chatUi.groupInjectionTargetAll')
   return injection.value.targetAgentIds.join(', ')

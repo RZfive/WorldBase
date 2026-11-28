@@ -120,6 +120,7 @@ interface FootnoteDefinition {
 interface RenderMarkdownOptions {
   footnotes?: Map<string, FootnoteDefinition>
   enableFootnotes?: boolean
+  mentionNames?: readonly string[]
 }
 
 interface ExtractedDisplayMath {
@@ -295,6 +296,87 @@ function shouldSkipMathNode (node: Node): boolean {
     current = current.parentElement
   }
   return false
+}
+
+function shouldSkipMentionNode (node: Node): boolean {
+  let current = node.parentElement
+  while (current) {
+    const tag = current.tagName.toLowerCase()
+    if (['a', 'code', 'pre', 'kbd', 'samp', 'var', 'script', 'style', 'textarea'].includes(tag)) return true
+    if (current.classList.contains('chat-mention-chip') || current.classList.contains('katex')) return true
+    current = current.parentElement
+  }
+  return false
+}
+
+function escapeRegExp (value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Wrap known room-member mentions in a visual chip while preserving the
+ * original text node content and all markdown/annotation offsets.
+ */
+export interface MentionChipRange {
+  start: number
+  end: number
+  text: string
+}
+
+export function findMentionChipRanges (value: string, names: readonly string[] | undefined): MentionChipRange[] {
+  const labels = [...new Set((names || [])
+    .map(name => name.trim().replace(/^[@＠]+\s*/u, ''))
+    .filter(Boolean))]
+    .sort((left, right) => right.length - left.length)
+  if (labels.length === 0) return []
+
+  const alternatives = labels.map(label => (
+    label.split(/\s+/u).map(escapeRegExp).join('\\s+')
+  )).join('|')
+  const matcher = new RegExp(`(^|[^A-Za-z0-9_@])[@＠](${alternatives})(?![A-Za-z0-9_])`, 'giu')
+  const ranges: MentionChipRange[] = []
+  let match: RegExpExecArray | null
+  while ((match = matcher.exec(value))) {
+    const prefix = match[1] || ''
+    const start = match.index + prefix.length
+    const end = match.index + match[0].length
+    ranges.push({ start, end, text: value.slice(start, end) })
+  }
+  return ranges
+}
+
+function renderMentionChips (root: Element, names: readonly string[] | undefined): void {
+  const doc = root.ownerDocument
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const textNodes: Text[] = []
+  let currentNode = walker.nextNode()
+  while (currentNode) {
+    if (!shouldSkipMentionNode(currentNode)) textNodes.push(currentNode as Text)
+    currentNode = walker.nextNode()
+  }
+
+  for (const textNode of textNodes) {
+    const value = textNode.nodeValue || ''
+    if (!value.includes('@') && !value.includes('＠')) continue
+    const ranges = findMentionChipRanges(value, names)
+    if (ranges.length === 0) continue
+    const fragment = doc.createDocumentFragment()
+    let cursor = 0
+    for (const range of ranges) {
+      const { start, end } = range
+      if (start > cursor) {
+        fragment.appendChild(doc.createTextNode(value.slice(cursor, start)))
+      }
+      const chip = doc.createElement('span')
+      chip.className = 'chat-mention-chip'
+      chip.textContent = range.text
+      fragment.appendChild(chip)
+      cursor = end
+    }
+    if (cursor === 0) continue
+    if (cursor < value.length) fragment.appendChild(doc.createTextNode(value.slice(cursor)))
+    textNode.parentNode?.replaceChild(fragment, textNode)
+  }
 }
 
 function appendKatex (fragment: DocumentFragment, doc: Document, expression: string, displayMode: boolean): void {
@@ -769,6 +851,7 @@ function renderMarkdownInternal (text: string, options: RenderMarkdownOptions = 
   renderDisplayMathPlaceholders(root, extractedDisplayMath.expressions)
   renderMathInNode(root)
   if (shouldExtractFootnotes) renderFootnotes(root, extracted.footnotes)
+  renderMentionChips(root, options.mentionNames)
 
   return root.innerHTML
 }
@@ -777,6 +860,6 @@ export function sanitizeHtml (html: string): string {
   return sanitizeHtmlInternal(html, false)
 }
 
-export function renderMarkdown (text: string): string {
-  return renderMarkdownInternal(text)
+export function renderMarkdown (text: string, options: Pick<RenderMarkdownOptions, 'mentionNames'> = {}): string {
+  return renderMarkdownInternal(text, options)
 }

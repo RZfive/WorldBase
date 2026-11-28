@@ -2,6 +2,14 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { ComputerUsePermissionTarget } from '../src/shared/computer-use-permissions.js'
 import type { ConversationMetadataPatch } from '../src/shared/conversation-metadata.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentGroupProgressSnapshot, AgentGroupUserInjection, AgentMemoryScope, AuthRequestPayload, ChannelBinding, ChatStreamResult, ConnectorDefinition, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType, RoomMemberMessage, RoomMemberStatus } from '../src/shared/agent-workspace-types.js'
+import type {
+  OnlineGroupChangeEvent,
+  OnlineGroupFileInput,
+  OnlineGroupIdentity,
+  OnlineGroupInboxItem,
+  OnlineGroupSendResult,
+  OnlineGroupState
+} from '../src/shared/online-group-types.js'
 import type { LocalAgentProfile, LocalAgentSessionSummary, RoomLocalWorker, RoomLocalWorkerOptions, RoomLocalWorkspace } from '../src/shared/local-agent-types.js'
 import type { AppAboutInfo, AppUpdateChannel, AppUpdateConfig, AppUpdateState, AppUpdateWebsiteKind } from '../src/shared/app-update-types.js'
 import type { ActivePageAutomationContext, BrowserAutomationNetworkEntry, BrowserPageContextMenuPayload, BrowserPageKeyDispatchRequest, BrowserPageKeyDispatchResult, BrowserPageScreenshotRequest, BrowserPageScreenshotResult, PageAutomationRequestEnvelope, PageAutomationResponseEnvelope } from '../src/shared/page-automation-types.js'
@@ -632,8 +640,31 @@ export interface ElectronAPI {
   getAgentGroup: (id: string) => Promise<AgentGroupDefinition | null>
   saveAgentGroup: (group: Partial<AgentGroupDefinition>) => Promise<AgentGroupDefinition>
   deleteAgentGroup: (id: string) => Promise<boolean>
+  getOnlineGroupState: () => Promise<OnlineGroupState>
+  getOnlineGroup: (groupId: string) => Promise<{ group: import('../src/shared/online-group-types.js').OnlineGroup; identity: OnlineGroupIdentity }>
+  saveOnlineGroupIdentity: (identity: Partial<Pick<OnlineGroupIdentity, 'displayName' | 'role' | 'avatar' | 'background' | 'tags' | 'discoveryEnabled' | 'advertiseGroups'>>) => Promise<OnlineGroupState>
+  refreshOnlineGroups: () => Promise<OnlineGroupState>
+  createOnlineGroup: (input: { name: string; icon?: string; description?: string; role?: string; invitePeerIds?: string[] }) => Promise<OnlineGroupState['groups'][number]>
+  updateOnlineGroup: (groupId: string, input: { name?: string; icon?: string; description?: string }) => Promise<OnlineGroupState['groups'][number]>
+  inviteOnlineGroupPeers: (groupId: string, peerIds: string[], role?: string) => Promise<{ invited: number; errors: string[] }>
+  requestJoinOnlineGroup: (peerId: string, groupId: string, role?: string) => Promise<OnlineGroupInboxItem>
+  acceptOnlineGroupInvitation: (invitationId: string, role?: string) => Promise<OnlineGroupState['groups'][number]>
+  declineOnlineGroupInvitation: (invitationId: string) => Promise<OnlineGroupState>
+  decideOnlineGroupJoinRequest: (requestId: string, approved: boolean) => Promise<OnlineGroupState>
+  addOnlineGroupAgent: (groupId: string, agentId: string, role?: string) => Promise<OnlineGroupState['groups'][number]>
+  removeOnlineGroupAgent: (groupId: string, memberId: string) => Promise<OnlineGroupState['groups'][number]>
+  sendOnlineGroupMessage: (groupId: string, content: string, files?: OnlineGroupFileInput[]) => Promise<OnlineGroupSendResult>
+  syncOnlineGroup: (groupId: string) => Promise<OnlineGroupState['groups'][number]>
+  decideOnlineGroupDelegation: (groupId: string, delegationId: string, approved: boolean) => Promise<OnlineGroupState['groups'][number]>
+  runOnlineGroupAgentMessage: (groupId: string, agentMemberId: string, prompt: string) => Promise<OnlineGroupSendResult>
+  readOnlineGroupAttachment: (groupId: string, attachmentId: string) => Promise<{ name: string; mimeType: string; dataBase64: string }>
+  readOnlineGroupFile: (filePath: string, name?: string, mimeType?: string) => Promise<{ name: string; mimeType: string; size: number; dataBase64: string }>
+  leaveOnlineGroup: (groupId: string) => Promise<boolean>
+  deleteOnlineGroup: (groupId: string) => Promise<boolean>
+  onOnlineGroupsChanged: (callback: (event: OnlineGroupChangeEvent) => void) => () => void
   discoverLocalAgents: () => Promise<LocalAgentProfile[]>
   getRoomLocalWorkspace: (groupId: string, taskDirectory?: string | null, projectId?: string | null) => Promise<RoomLocalWorkspace>
+  setRoomLocalWorkspace: (groupId: string, workspaceRoot: string, workspaceRootName?: string) => Promise<AgentGroupDefinition>
   joinLocalAgentGroup: (agentId: string, groupId: string) => Promise<{ agent: AgentDefinition; group: AgentGroupDefinition }>
   inviteRoomLocalWorker: (agentId: string, groupId: string, options: RoomLocalWorkerOptions) => Promise<{ worker: RoomLocalWorker; group: AgentGroupDefinition }>
   removeRoomLocalWorker: (groupId: string, workerId: string) => Promise<{ group: AgentGroupDefinition; removed: boolean }>
@@ -968,8 +999,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAgentGroup: (id: string) => ipcRenderer.invoke('agentGroups:get', id),
   saveAgentGroup: (group: Partial<AgentGroupDefinition>) => ipcRenderer.invoke('agentGroups:save', group),
   deleteAgentGroup: (id: string) => ipcRenderer.invoke('agentGroups:delete', id),
+  getOnlineGroupState: () => ipcRenderer.invoke('onlineGroups:state'),
+  getOnlineGroup: (groupId) => ipcRenderer.invoke('onlineGroups:getGroup', groupId),
+  saveOnlineGroupIdentity: (identity) => ipcRenderer.invoke('onlineGroups:saveIdentity', identity),
+  refreshOnlineGroups: () => ipcRenderer.invoke('onlineGroups:refresh'),
+  createOnlineGroup: (input) => ipcRenderer.invoke('onlineGroups:create', input),
+  updateOnlineGroup: (groupId, input) => ipcRenderer.invoke('onlineGroups:update', groupId, input),
+  inviteOnlineGroupPeers: (groupId, peerIds, role) => ipcRenderer.invoke('onlineGroups:invite', groupId, peerIds, role),
+  requestJoinOnlineGroup: (peerId, groupId, role) => ipcRenderer.invoke('onlineGroups:requestJoin', peerId, groupId, role),
+  acceptOnlineGroupInvitation: (invitationId, role) => ipcRenderer.invoke('onlineGroups:acceptInvitation', invitationId, role),
+  declineOnlineGroupInvitation: (invitationId) => ipcRenderer.invoke('onlineGroups:declineInvitation', invitationId),
+  decideOnlineGroupJoinRequest: (requestId, approved) => ipcRenderer.invoke('onlineGroups:decideJoinRequest', requestId, approved),
+  addOnlineGroupAgent: (groupId, agentId, role) => ipcRenderer.invoke('onlineGroups:addAgent', groupId, agentId, role),
+  removeOnlineGroupAgent: (groupId, memberId) => ipcRenderer.invoke('onlineGroups:removeAgent', groupId, memberId),
+  sendOnlineGroupMessage: (groupId, content, files) => ipcRenderer.invoke('onlineGroups:sendMessage', groupId, content, files),
+  syncOnlineGroup: (groupId) => ipcRenderer.invoke('onlineGroups:sync', groupId),
+  decideOnlineGroupDelegation: (groupId, delegationId, approved) => ipcRenderer.invoke('onlineGroups:decideDelegation', groupId, delegationId, approved),
+  runOnlineGroupAgentMessage: (groupId, agentMemberId, prompt) => ipcRenderer.invoke('onlineGroups:runAgentMessage', groupId, agentMemberId, prompt),
+  readOnlineGroupAttachment: (groupId, attachmentId) => ipcRenderer.invoke('onlineGroups:readAttachment', groupId, attachmentId),
+  readOnlineGroupFile: (filePath, name, mimeType) => ipcRenderer.invoke('onlineGroups:readFile', filePath, name, mimeType),
+  leaveOnlineGroup: (groupId) => ipcRenderer.invoke('onlineGroups:leave', groupId),
+  deleteOnlineGroup: (groupId) => ipcRenderer.invoke('onlineGroups:delete', groupId),
+  onOnlineGroupsChanged: (callback) => {
+    const listener = (_event: unknown, event: OnlineGroupChangeEvent) => callback(event)
+    ipcRenderer.on('onlineGroups:changed', listener)
+    return () => ipcRenderer.removeListener('onlineGroups:changed', listener)
+  },
   discoverLocalAgents: () => ipcRenderer.invoke('localAgents:discover'),
   getRoomLocalWorkspace: (groupId: string, taskDirectory?: string | null, projectId?: string | null) => ipcRenderer.invoke('localAgents:roomWorkspace', groupId, taskDirectory, projectId),
+  setRoomLocalWorkspace: (groupId: string, workspaceRoot: string, workspaceRootName?: string) => ipcRenderer.invoke('localAgents:setRoomWorkspace', groupId, workspaceRoot, workspaceRootName),
   joinLocalAgentGroup: (agentId: string, groupId: string) => ipcRenderer.invoke('localAgents:joinGroup', agentId, groupId),
   inviteRoomLocalWorker: (agentId: string, groupId: string, options: RoomLocalWorkerOptions) => ipcRenderer.invoke('localAgents:inviteWorker', agentId, groupId, options),
   removeRoomLocalWorker: (groupId: string, workerId: string) => ipcRenderer.invoke('localAgents:removeWorker', groupId, workerId),

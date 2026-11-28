@@ -199,6 +199,7 @@ app.on('before-quit', (event) => {
       if (mainState.lanServer) {
         await mainState.lanServer.stop()
       }
+      mainState.onlineGroupService?.stop()
       if (mainState.mcpService) {
         await mainState.mcpService.dispose()
       }

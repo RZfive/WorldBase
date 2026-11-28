@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, inject, ref, type Ref } from 'vue'
 import { renderMarkdown } from '../markdown'
 import type { ChatMessageBlock } from '../types'
 
@@ -7,8 +7,9 @@ const props = defineProps<{
   block: Extract<ChatMessageBlock, { kind: 'group_direct_reply' }>
 }>()
 
+const chatMentionNames = inject<Readonly<Ref<string[]>>>('chatMentionNames', ref([]))
 const reply = computed(() => props.block.directReply)
-const contentHtml = computed(() => renderMarkdown(reply.value.content))
+const contentHtml = computed(() => renderMarkdown(reply.value.content, { mentionNames: chatMentionNames.value }))
 </script>
 
 <template>

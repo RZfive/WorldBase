@@ -13,6 +13,8 @@ import GroupProgressBlock from '../blocks/GroupProgressBlock.vue'
 import GroupDirectReplyBlock from '../blocks/GroupDirectReplyBlock.vue'
 import GroupUserInjectionBlock from '../blocks/GroupUserInjectionBlock.vue'
 import GroupPeerMessageBlock from '../blocks/GroupPeerMessageBlock.vue'
+import OnlineGroupAttachmentBlock from '../blocks/OnlineGroupAttachmentBlock.vue'
+import OnlineGroupDelegationBlock from '../blocks/OnlineGroupDelegationBlock.vue'
 import WebSearchBlock from '../blocks/WebSearchBlock.vue'
 import WebFetchBlock from '../blocks/WebFetchBlock.vue'
 import AttachmentBlock from '../blocks/AttachmentBlock.vue'
@@ -32,6 +34,7 @@ const props = defineProps<{
   assistantIcon?: string
   assistantName?: string
   editingMessageId?: string | null
+  readonly?: boolean
 }>()
 
 const { t } = useI18n()
@@ -244,6 +247,16 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
                 :block="segment.block"
               />
 
+              <OnlineGroupAttachmentBlock
+                v-else-if="segment.block.kind === 'online_group_attachment'"
+                :block="segment.block"
+              />
+
+              <OnlineGroupDelegationBlock
+                v-else-if="segment.block.kind === 'online_group_delegation'"
+                :block="segment.block"
+              />
+
               <WebSearchBlock
                 v-else-if="segment.block.kind === 'web_search'"
                 :block="segment.block"
@@ -293,7 +306,7 @@ const hasImages = computed(() => Array.isArray(props.msg.content) && props.msg.c
             </template>
           </template>
 
-          <div v-if="isUserMessage && props.msg.id" class="message-user-actions">
+          <div v-if="!props.readonly && isUserMessage && props.msg.id" class="message-user-actions">
             <button
               v-if="isMessageEditable"
               class="message-user-action-btn"

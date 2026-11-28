@@ -5,12 +5,14 @@ import { isIP } from 'node:net'
 import { projectsRouter, type LanProjectControl } from './routes/projects.js'
 import { aiRouter } from './routes/ai.js'
 import { systemRouter } from './routes/system.js'
+import { onlineGroupsRouter } from './routes/online-groups.js'
 import type { ProjectFS } from '../project-fs/project-fs.js'
 import type { ProjectDataAccess } from '../project-data-access/data-access.js'
 import type { AIExecutionEngine } from '../ai-harness/types.js'
 import type { SettingsStore } from '../settings/settings-store.js'
 import type { SystemService } from '../system-capabilities/system-service.js'
 import type { ImGatewayService } from '../im/im-gateway-service.js'
+import type { OnlineGroupService } from '../online-groups/online-group-service.js'
 import type { Server } from 'node:http'
 
 const LOCAL_RESOURCE_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1'])
@@ -152,6 +154,7 @@ export interface LanServerConfig {
   systemService: SystemService
   settingsStore?: SettingsStore
   imGatewayService?: ImGatewayService
+  onlineGroupService?: OnlineGroupService
   /**
    * Returns the active Rust project control plane while the migration switch
    * selects Rust. When it returns a client, LAN project routes must not read
@@ -240,7 +243,7 @@ export class LanServer {
     this.app.use((_req: Request, res: Response, next: NextFunction) => {
       res.header('Access-Control-Allow-Origin', '*')
       res.header('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS')
-      res.header('Access-Control-Allow-Headers', `Content-Type, Authorization, ${LAN_AUTH_HEADER_NAME}`)
+      res.header('Access-Control-Allow-Headers', `Content-Type, Authorization, ${LAN_AUTH_HEADER_NAME}, x-worldbase-group-token, x-worldbase-peer-id`)
       if (_req.method === 'OPTIONS') {
         res.sendStatus(200)
         return
@@ -257,6 +260,10 @@ export class LanServer {
 
     if (this.services.imGatewayService) {
       this.app.use('/api/im', this.services.imGatewayService.router())
+    }
+
+    if (this.services.onlineGroupService) {
+      this.app.use('/api/online-groups', onlineGroupsRouter(this.services.onlineGroupService))
     }
 
     this.app.use(['/api/projects', '/api/ai', '/api/system'], this._requireTrustedApiAccess)

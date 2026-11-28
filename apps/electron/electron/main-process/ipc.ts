@@ -35,7 +35,14 @@ import type { ActivePageAutomationContext, BrowserAutomationNetworkEntry, Browse
 import type { WorkspaceTabControlResponseEnvelope } from '../../src/shared/workspace-control-types.js'
 import type { ActiveTerminalContext } from '../../src/shared/terminal-types.js'
 import type { AgentDefinition, AgentGroupDefinition, AgentMemoryScope, ChannelBinding, ChannelEvent, MemoryCompactionResult, MemoryCompactionSettings, MemoryCompactionStatus, MemoryEmbeddingSettings, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
-import { addLocalAgentToGroup, discoverLocalAgents, discoverLocalAgentSessions, inviteRoomLocalWorker, preserveLocalAgentRuntime, removeRoomLocalWorker } from '../../src/main/local-agents/service.js'
+import type {
+  OnlineGroupFileInput,
+  OnlineGroupIdentity,
+  OnlineGroupInboxItem,
+  OnlineGroupSendResult,
+  OnlineGroupState
+} from '../../src/shared/online-group-types.js'
+import { addLocalAgentToGroup, discoverLocalAgents, discoverLocalAgentSessions, inviteRoomLocalWorker, preserveLocalAgentRuntime, removeRoomLocalWorker, setRoomLocalWorkspace } from '../../src/main/local-agents/service.js'
 import type { RoomLocalWorkerOptions } from '../../src/shared/local-agent-types.js'
 import { resolveRoomLocalWorkspace } from '../../src/main/local-agents/room-workspace.js'
 import type { ActiveCodeViewContext, FolderWorkspacePickResult } from '../../src/shared/folder-workspace-types.js'
@@ -140,7 +147,12 @@ async function resolveFolderWorkspaceRootForRequest (workspaceRoot?: string | nu
   }
 }
 
-async function resolveLocalWorkspaceForRoom (groupId: string, taskDirectory?: string | null, targetProjectId?: string | null) {
+async function resolveLocalWorkspaceForRoom (
+  groupId: string,
+  taskDirectory?: string | null,
+  targetProjectId?: string | null,
+  roomDirectory?: string | null
+) {
   let projectDirectory: string | undefined
   if (targetProjectId) {
     try {
@@ -149,7 +161,13 @@ async function resolveLocalWorkspaceForRoom (groupId: string, taskDirectory?: st
       projectDirectory = undefined
     }
   }
-  return await resolveRoomLocalWorkspace(app.getPath('userData'), groupId, taskDirectory, projectDirectory)
+  return await resolveRoomLocalWorkspace(
+    app.getPath('userData'),
+    groupId,
+    taskDirectory,
+    projectDirectory,
+    roomDirectory
+  )
 }
 
 function stringFromUnknown (value: unknown): string {
@@ -1796,13 +1814,12 @@ export function setupIPC (): void {
     const senderWindow = getSenderWindow(event) || getMainWindow()
     const channel = `ai:stream-event:${sessionId}`
     const abortController = new AbortController()
-    const authModeRef = { current: groupId ? 'strict' as const : authMode ?? 'strict' }
+    const authModeRef: { current: AIExecutionAuthMode } = { current: authMode === 'auto' ? 'auto' : 'strict' }
     // Register before any asynchronous context resolution so a stop request
     // arriving immediately after invocation can always find this stream.
     const activeSession = {
       abortController,
-      authMode: authModeRef,
-      fixedAuthMode: Boolean(groupId)
+      authMode: authModeRef
     }
     activeChatSessions.set(sessionId, activeSession)
     const executionPreferences = settingsStore!.getAIExecutionPreferences()
@@ -1821,10 +1838,6 @@ export function setupIPC (): void {
       requestedReasoningStrength: reasoningStrength,
       requestedTemperature: temperature
     })
-    if (runtimeContext.group) {
-      activeSession.fixedAuthMode = true
-      authModeRef.current = 'strict'
-    }
     // Work mode (coding/document/chat) is selected by the model through
     // select_work_mode. The renderer's regex may suggest a coding root, but it
     // never pre-arms the coding gate for the run.
@@ -2024,7 +2037,12 @@ export function setupIPC (): void {
               .map(id => agentStore.get(id))
               .filter((agent): agent is AgentDefinition => Boolean(agent)),
             localAgentRegistry: mainState.localAgentRegistry,
-            localWorkspace: await resolveLocalWorkspaceForRoom(group.id, effectiveWorkspaceRoot, runtimeContext.effectiveTargetProjectId),
+            localWorkspace: await resolveLocalWorkspaceForRoom(
+              group.id,
+              effectiveWorkspaceRoot,
+              runtimeContext.effectiveTargetProjectId,
+              group.workspaceRoot
+            ),
             requestWorkspaceApproval: (approval, signal) => requestRoomWorkspaceApproval(sender, sessionId, conversationId, approval, signal),
             onMembershipChanged: notifyRoomGroupChanged,
             messages,
@@ -2164,7 +2182,6 @@ export function setupIPC (): void {
     // a user can switch back to TS while an existing Rust stream is still
     // running.  Keep authorization updates flowing to that stream.
     const sessionState = activeChatSessions.get(sessionId)
-    if (sessionState?.fixedAuthMode) return { ok: true, updated: false }
     if (sessionState) sessionState.authMode.current = authMode
     const rustUpdated = mainState.rustHarness?.hasSession(sessionId) === true
     if (rustUpdated) {
@@ -2330,7 +2347,16 @@ export function setupIPC (): void {
   })
 
   ipcMain.handle('localAgents:roomWorkspace', async (_event: IpcMainInvokeEvent, groupId: string, taskDirectory?: string | null, projectId?: string | null) => {
-    return await resolveLocalWorkspaceForRoom(groupId, taskDirectory, projectId)
+    const client = await selectedRustProjectClient()
+    const group = await client.getAgentGroup(groupId)
+    return await resolveLocalWorkspaceForRoom(groupId, taskDirectory, projectId, group?.workspaceRoot)
+  })
+
+  ipcMain.handle('localAgents:setRoomWorkspace', async (_event: IpcMainInvokeEvent, groupId: string, workspaceRoot: string, workspaceRootName?: string) => {
+    if (isNativeRoomRunning(groupId)) throw new Error(t('mainDialog.roomWorkspaceStopBeforeChanging'))
+    const group = await setRoomLocalWorkspace(groupId, workspaceRoot, workspaceRootName)
+    notifyAgentWorkspaceChanged({ entity: 'group', action: 'saved', id: group.id })
+    return group
   })
 
   ipcMain.handle('localAgents:joinGroup', async (_event: IpcMainInvokeEvent, agentId: string, groupId: string) => {
@@ -2557,6 +2583,115 @@ export function setupIPC (): void {
       notifyAgentWorkspaceChanged({ entity: 'group', action: 'deleted', id })
     }
     return deleted
+  })
+
+  const requireOnlineGroups = () => {
+    if (!mainState.onlineGroupService) throw new Error('Online group service is not initialized.')
+    return mainState.onlineGroupService
+  }
+
+  ipcMain.handle('onlineGroups:state', async (): Promise<OnlineGroupState> => {
+    return await requireOnlineGroups().getState()
+  })
+
+  ipcMain.handle('onlineGroups:getGroup', async (_event: IpcMainInvokeEvent, groupId: string) => {
+    return requireOnlineGroups().getGroupView(groupId)
+  })
+
+  ipcMain.handle('onlineGroups:saveIdentity', async (_event: IpcMainInvokeEvent, identity: Partial<Pick<OnlineGroupIdentity, 'displayName' | 'role' | 'avatar' | 'background' | 'tags' | 'discoveryEnabled' | 'advertiseGroups'>>) => {
+    return await requireOnlineGroups().saveIdentity(identity || {})
+  })
+
+  ipcMain.handle('onlineGroups:refresh', async (): Promise<OnlineGroupState> => {
+    return await requireOnlineGroups().refreshDiscovery()
+  })
+
+  ipcMain.handle('onlineGroups:create', async (_event: IpcMainInvokeEvent, input: {
+    name: string
+    icon?: string
+    description?: string
+    role?: string
+    invitePeerIds?: string[]
+  }) => {
+    return await requireOnlineGroups().createGroup(input)
+  })
+
+  ipcMain.handle('onlineGroups:update', async (_event: IpcMainInvokeEvent, groupId: string, input: {
+    name?: string
+    icon?: string
+    description?: string
+  }) => {
+    return await requireOnlineGroups().updateGroup(groupId, input)
+  })
+
+  ipcMain.handle('onlineGroups:invite', async (_event: IpcMainInvokeEvent, groupId: string, peerIds: string[], role?: string) => {
+    return await requireOnlineGroups().invitePeers(groupId, peerIds, role)
+  })
+
+  ipcMain.handle('onlineGroups:requestJoin', async (_event: IpcMainInvokeEvent, peerId: string, groupId: string, role?: string): Promise<OnlineGroupInboxItem> => {
+    return await requireOnlineGroups().requestJoin(peerId, groupId, role)
+  })
+
+  ipcMain.handle('onlineGroups:acceptInvitation', async (_event: IpcMainInvokeEvent, invitationId: string, role?: string) => {
+    return await requireOnlineGroups().acceptInvitation(invitationId, role)
+  })
+
+  ipcMain.handle('onlineGroups:declineInvitation', async (_event: IpcMainInvokeEvent, invitationId: string): Promise<OnlineGroupState> => {
+    return await requireOnlineGroups().declineInvitation(invitationId)
+  })
+
+  ipcMain.handle('onlineGroups:decideJoinRequest', async (_event: IpcMainInvokeEvent, requestId: string, approved: boolean): Promise<OnlineGroupState> => {
+    return await requireOnlineGroups().decideJoinRequest(requestId, approved)
+  })
+
+  ipcMain.handle('onlineGroups:addAgent', async (_event: IpcMainInvokeEvent, groupId: string, agentId: string, role?: string) => {
+    return await requireOnlineGroups().addAgent(groupId, agentId, role)
+  })
+
+  ipcMain.handle('onlineGroups:removeAgent', async (_event: IpcMainInvokeEvent, groupId: string, memberId: string) => {
+    return await requireOnlineGroups().removeAgent(groupId, memberId)
+  })
+
+  ipcMain.handle('onlineGroups:sendMessage', async (_event: IpcMainInvokeEvent, groupId: string, content: string, files: OnlineGroupFileInput[] = []): Promise<OnlineGroupSendResult> => {
+    return await requireOnlineGroups().sendMessage(groupId, content, files)
+  })
+
+  ipcMain.handle('onlineGroups:sync', async (_event: IpcMainInvokeEvent, groupId: string) => {
+    return await requireOnlineGroups().syncGroup(groupId)
+  })
+
+  ipcMain.handle('onlineGroups:decideDelegation', async (_event: IpcMainInvokeEvent, groupId: string, delegationId: string, approved: boolean) => {
+    return await requireOnlineGroups().decideDelegation(groupId, delegationId, approved)
+  })
+
+  ipcMain.handle('onlineGroups:runAgentMessage', async (_event: IpcMainInvokeEvent, groupId: string, agentMemberId: string, prompt: string): Promise<OnlineGroupSendResult> => {
+    return await requireOnlineGroups().runOwnedAgentMessage(groupId, agentMemberId, prompt)
+  })
+
+  ipcMain.handle('onlineGroups:readAttachment', async (_event: IpcMainInvokeEvent, groupId: string, attachmentId: string) => {
+    return await requireOnlineGroups().readAttachment(groupId, attachmentId)
+  })
+
+  ipcMain.handle('onlineGroups:readFile', async (_event: IpcMainInvokeEvent, filePath: string, name?: string, mimeType?: string) => {
+    const resolved = path.resolve(String(filePath || ''))
+    const stat = await fs.stat(resolved)
+    if (!stat.isFile()) throw new Error('Online-group attachment is not a file.')
+    if (stat.size > 6 * 1024 * 1024) throw new Error('Online-group file exceeds 6MB.')
+    const data = await fs.readFile(resolved)
+    return {
+      name: String(name || path.basename(resolved)),
+      mimeType: typeof mimeType === 'string' && mimeType.includes('/') ? mimeType : 'application/octet-stream',
+      size: data.length,
+      dataBase64: data.toString('base64')
+    }
+  })
+
+  ipcMain.handle('onlineGroups:leave', async (_event: IpcMainInvokeEvent, groupId: string): Promise<boolean> => {
+    return await requireOnlineGroups().leaveGroup(groupId)
+  })
+
+  ipcMain.handle('onlineGroups:delete', async (_event: IpcMainInvokeEvent, groupId: string): Promise<boolean> => {
+    return await requireOnlineGroups().deleteGroup(groupId)
   })
 
   ipcMain.handle('im:listConnectors', async () => {
@@ -3173,7 +3308,7 @@ export function setupIPC (): void {
     }
 
     if (stat.size > MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
-      throw new Error(t('mainDialog.fileTooLargeTenMb', { size: (stat.size / 1024 / 1024).toFixed(1) }))
+      throw new Error(t('mainDialog.fileTooLargeAttachment', { size: (stat.size / 1024 / 1024).toFixed(1) }))
     }
 
     if (!isOfficeFile(resolvedPath)) {

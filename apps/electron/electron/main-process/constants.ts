@@ -29,7 +29,7 @@ export const MEMORY_AI_COMPACTION_TIMEOUT_MS = 180000
 
 export const LOCAL_APP_HOSTS = new Set(['localhost', '127.0.0.1'])
 export const ALLOWED_WEBVIEW_POPUP_PROTOCOLS = new Set(['http:', 'https:'])
-export const MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES = 10 * 1024 * 1024
+export const MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES = 100 * 1024 * 1024
 export const MAX_DOCUMENT_WORKBENCH_FILE_SIZE_BYTES = 100 * 1024 * 1024
 export const MAX_UPLOADED_OFFICE_CONTENT_LENGTH = 100000
 // The renderer bounds an entire page request (queue wait + handle resolution +

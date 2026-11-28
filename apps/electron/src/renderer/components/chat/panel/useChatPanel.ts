@@ -9,6 +9,7 @@ import { ensureSharedChatPanelLifecycleBindings } from './lifecycle-bindings'
 import { createLongTermGoalState } from './long-term-goal-state'
 import { createChatMessageSender } from './message-sender'
 import { createChatMessageBranching } from './message-branching'
+import { createOnlineGroupChatState } from './online-group-chat'
 import { createChatProviderState } from './provider-state'
 import { clearCodingState } from './coding-status-storage'
 import { getLatestVisibleTodoItems } from './message-runtime'
@@ -290,6 +291,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
   const {
     clearSkills,
     loadAgentWorkspaceOptions,
+    refreshOnlineGroupCatalog,
     loadSkills,
     selectAllSkills,
     toggleSkill
@@ -305,6 +307,20 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     currentConversationId,
     getDefaultAgentId,
     syncProviderSelectionForAgent
+  })
+
+  const onlineGroupChat = createOnlineGroupChatState({
+    t,
+    messages,
+    inputText,
+    pendingImages,
+    pendingFiles,
+    uploadFeedback,
+    currentConversationId,
+    selectedGroupId,
+    currentGroupDefinition,
+    availableAgents,
+    availableAgentGroups
   })
 
   function resetTransientStreamState () {
@@ -592,6 +608,7 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
       loadSkills(),
       loadAgentWorkspaceOptions()
     ])
+    void refreshOnlineGroupCatalog()
   })
 
   let disposed = false
@@ -656,7 +673,8 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     filePreview,
     forkFromMessage,
     groupMentionHints,
-    roomLocalWorkers: computed(() => currentGroupDefinition.value?.localWorkers),
+    roomLocalWorkers: computed(() => currentGroupDefinition.value?.online ? [] : currentGroupDefinition.value?.localWorkers),
+    currentGroupDefinition,
     groupSidebarItems,
     longTermGoalSidebarItems,
     longTermGoalSnapshot,
@@ -750,6 +768,16 @@ export function useChatPanel (props: ChatPanelProps, bindings: UseChatPanelBindi
     targetProjectId,
     startOptimizationConversation,
     backgroundStreamMessages,
-    updateBackgroundConversationWorkspace
+    updateBackgroundConversationWorkspace,
+    ...onlineGroupChat,
+    onlineGroupSending: onlineGroupChat.sending,
+    onlineGroupBusy: onlineGroupChat.busy,
+    pendingOnlineGroupApprovals: onlineGroupChat.pendingApprovals,
+    decideOnlineGroupDelegation: onlineGroupChat.decideDelegation,
+    deleteOnlineGroup: onlineGroupChat.deleteGroup,
+    leaveOnlineGroup: onlineGroupChat.leaveGroup,
+    addOnlineGroupAgent: onlineGroupChat.addAgent,
+    removeOnlineGroupAgent: onlineGroupChat.removeAgent,
+    refreshOnlineGroupCatalog
   }
 }

@@ -12,7 +12,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: 'close'): void
   (event: 'joined', agentName: string): void
-  (event: 'selectFolder', folder: { rootPath: string; rootName?: string }): void
 }>()
 
 const { t } = useI18n()
@@ -29,6 +28,7 @@ const exitAfterTask = ref(false)
 const discovering = ref(false)
 const loadingWorkspace = ref(false)
 const pickingFolder = ref(false)
+const savingWorkspace = ref(false)
 const joining = ref(false)
 const removingId = ref('')
 const agentError = ref('')
@@ -38,11 +38,12 @@ let active = true
 let workspaceRequest = 0
 
 const availableAgents = computed(() => [...agents.value].sort((left, right) => Number(right.available) - Number(left.available)))
-const busy = computed(() => joining.value || pickingFolder.value || Boolean(removingId.value))
-const canJoin = computed(() => Boolean(workspace.value && role.value.trim() && !/[@＠]/u.test(role.value) && agents.value.some(agent => {
+const busy = computed(() => joining.value || pickingFolder.value || savingWorkspace.value || Boolean(removingId.value))
+const canJoin = computed(() => Boolean(workspace.value?.source === 'group' && role.value.trim() && !/[@＠]/u.test(role.value) && agents.value.some(agent => {
   return agent.agentId === selectedId.value && agent.available
 })) && !discovering.value && !loadingWorkspace.value && !busy.value)
 const workspaceLabel = computed(() => {
+  if (workspace.value?.source === 'group') return t('chatUi.roomSelectedWorkspace')
   if (workspace.value?.source === 'task') return t('chatUi.roomTaskWorkspace')
   if (workspace.value?.source === 'project') return t('chatUi.roomProjectWorkspace')
   return t('chatUi.roomDefaultWorkspace')
@@ -87,12 +88,20 @@ async function loadWorkspace () {
 
 async function chooseWorkspace () {
   pickingFolder.value = true
+  workspaceError.value = ''
   try {
     const folder = await desktopApi().pickFolderWorkspace()
-    if (active && !folder.canceled && folder.rootPath) emit('selectFolder', { rootPath: folder.rootPath, rootName: folder.rootName })
+    if (active && !folder.canceled && folder.rootPath) {
+      savingWorkspace.value = true
+      const group = await desktopApi().setRoomLocalWorkspace(props.groupId, folder.rootPath, folder.rootName)
+      if (active && group.workspaceRoot) {
+        workspace.value = { path: group.workspaceRoot, source: 'group' }
+      }
+    }
   } catch (error) {
     workspaceError.value = error instanceof Error ? error.message : String(error)
   } finally {
+    savingWorkspace.value = false
     pickingFolder.value = false
   }
 }
@@ -168,10 +177,15 @@ onBeforeUnmount(() => {
           <section class="room-agent-workspace">
             <div class="room-agent-section-head">
               <strong>{{ workspaceLabel }}</strong>
-              <button class="room-agent-link" type="button" :disabled="busy" @click="chooseWorkspace">{{ $t('chatUi.roomChangeWorkspace') }}</button>
+              <button class="room-agent-link" type="button" :disabled="busy" @click="chooseWorkspace">
+                {{ workspace?.source === 'group' ? $t('chatUi.roomChangeWorkspace') : $t('chatUi.roomChooseWorkspace') }}
+              </button>
             </div>
             <code v-if="workspace" class="room-agent-path" :title="workspace.path">{{ workspace.path }}</code>
             <p v-else-if="loadingWorkspace" class="room-agent-note" role="status">{{ $t('common.loading') }}</p>
+            <p v-if="workspace?.source !== 'group' && !loadingWorkspace" class="room-agent-note" role="status">
+              {{ $t('chatUi.roomWorkspaceRequired') }}
+            </p>
             <p v-if="workspaceError" class="room-agent-error" role="alert">{{ workspaceError }}</p>
           </section>
 

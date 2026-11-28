@@ -74,7 +74,7 @@ const summaryText = computed(() => {
     :meta="getSummaryStatusLabel(snapshot.status)"
     :detail="`${snapshot.groupName} · ${summaryText}`"
     :status="snapshot.status === 'failed' ? 'failed' : snapshot.status === 'running' ? 'running' : 'completed'"
-    :default-expanded="snapshot.status === 'failed'"
+    :default-expanded="snapshot.status === 'failed' || snapshot.status === 'running'"
   >
     <section class="group-progress-card">
     <div class="group-progress-header">

@@ -3,6 +3,12 @@ import test from 'node:test'
 import { computed, reactive, ref } from 'vue'
 import { createChatMessageSender } from '../src/renderer/components/chat/panel/message-sender.ts'
 import { buildRenderSegments } from '../src/renderer/components/chat/message-segments.ts'
+import {
+  formatRoomHandoffMessage,
+  isVerbatimRoomForward,
+  stripRedundantHandoffInstructions
+} from '../src/shared/group-mentions.ts'
+import { findMentionChipRanges } from '../src/renderer/components/chat/markdown.ts'
 
 function createStreamFixture (context) {
   const messages = ref([])
@@ -106,6 +112,32 @@ function memberStatus (status) {
 
 const roomDone = { type: 'done', message: { role: 'assistant', content: '' } }
 
+test('a handoff is a direct @mention message, not a separate task-handoff payload', () => {
+  assert.equal(formatRoomHandoffMessage('QA', 'Verify this.'), '@QA Verify this.')
+})
+
+test('handoffs drop roleplay, greeting and delivery-style instructions from visible text', () => {
+  const noisy = '请以 📊 市场营销专家本人的身份直接面向用户，回复一句简短、自然、友好的问候，并可简单说明你的专家身份。验收标准：确实包含问候；由你本人发言而非代总协调人发言；不虚构任何工作成果；不展开无关建议。'
+  assert.equal(stripRedundantHandoffInstructions(noisy), '')
+  assert.equal(formatRoomHandoffMessage('市场营销专家', noisy), '@市场营销专家')
+  assert.equal(formatRoomHandoffMessage('市场营销专家', `整理本周渠道数据。\n${noisy}`), '@市场营销专家 整理本周渠道数据。')
+})
+
+test('known room mentions are isolated as chip ranges without catching email addresses', () => {
+  const value = '请 @Document Agent 和 @市场营销专家 接手，不要发给 foo@市场营销专家.example。'
+  assert.deepEqual(
+    findMentionChipRanges(value, ['Document Agent', '市场营销专家']).map(range => range.text),
+    ['@Document Agent', '@市场营销专家']
+  )
+})
+
+test('a handoff cannot simply forward the user request to another member', () => {
+  const request = '请策划下周产品发布，并整理渠道安排。'
+  assert.equal(isVerbatimRoomForward(request, request), true)
+  assert.equal(isVerbatimRoomForward('@市场营销专家 请策划下周产品发布，并整理渠道安排。', request), true)
+  assert.equal(isVerbatimRoomForward('负责设计发布海报：突出新品卖点，输出可编辑源文件。', request), false)
+})
+
 test('an IPC return before room done leaves only the real, saved reply', async context => {
   const fixture = createStreamFixture(context)
   const stream = await fixture.send()
@@ -195,7 +227,7 @@ test('the room activity stays in one disclosure above the final answer', async c
   assert.equal(segments.at(-1).block.content, '已核对。')
 })
 
-test('a handoff retains two independent replies and updates the original handoff block', async context => {
+test('a legacy handoff block keeps two independent replies and its terminal status', async context => {
   const fixture = createStreamFixture(context)
   const stream = await fixture.send()
   const handoff = { id: 'handoff', kind: 'handoff', fromAgentName: 'Member', toAgentName: 'QA', request: 'Verify this.' }

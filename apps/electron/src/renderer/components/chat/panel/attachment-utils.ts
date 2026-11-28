@@ -2,6 +2,7 @@ import type { PendingAttachment, UploadedAttachmentResult } from './types'
 
 export const MAX_ATTACHMENT_PREVIEW_TEXT_LENGTH = 180
 export const MAX_IMAGE_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024
+export const MAX_DOCUMENT_ATTACHMENT_SIZE_BYTES = 100 * 1024 * 1024
 
 export function formatFileSize (size: number): string {
   if (size < 1024) return `${size} B`
@@ -32,6 +33,13 @@ async function readFileAsUint8Array (file: File): Promise<Uint8Array> {
 }
 
 export async function readUploadedAttachment (file: File, unsupportedErrorMessage?: string): Promise<UploadedAttachmentResult> {
+  // Electron exposes the local path for picker/drop files. Read from disk in
+  // the main process so large Office files are not copied through renderer IPC.
+  const filePath = getElectronFilePath(file)
+  if (filePath && window.electronAPI?.readUploadedAttachmentFile) {
+    return window.electronAPI.readUploadedAttachmentFile(filePath)
+  }
+
   if (window.electronAPI?.readUploadedAttachmentBuffer) {
     const bytes = await readFileAsUint8Array(file)
     return window.electronAPI.readUploadedAttachmentBuffer({
@@ -39,11 +47,6 @@ export async function readUploadedAttachment (file: File, unsupportedErrorMessag
       fileType: file.type || undefined,
       bytes
     })
-  }
-
-  const filePath = getElectronFilePath(file)
-  if (filePath && window.electronAPI?.readUploadedAttachmentFile) {
-    return window.electronAPI.readUploadedAttachmentFile(filePath)
   }
 
   throw new Error(unsupportedErrorMessage || `This environment does not support reading attachments: ${file.name}`)

@@ -9,7 +9,6 @@ import { removeWebQuote, WEB_QUOTE_TAG_PATTERN } from '../panel/web-quote-state'
 import type { GroupMentionHint } from '../panel/types'
 import type { RoomLocalWorker } from '../../../../shared/local-agent-types'
 import type { GalleryImage } from '../types'
-import RoomLocalAgentDialog from './RoomLocalAgentDialog.vue'
 
 interface PendingAttachment {
   id: string
@@ -60,6 +59,7 @@ interface MentionQueryState {
 const props = defineProps<{
   modelValue: string
   isLoading: boolean
+  isSending?: boolean
   pendingAuthCount?: number
   pendingImages: Array<{ base64: string; mimeType: string }>
   pendingFiles: PendingAttachment[]
@@ -78,6 +78,7 @@ const props = defineProps<{
   activeGroupSessionId?: string
   groupMentionHints?: GroupMentionHint[]
   isGroupConversation?: boolean
+  onlineGroupMode?: boolean
   roomTaskDirectory?: string | null
   roomLocalWorkers?: RoomLocalWorker[]
   targetProjectId?: string | null
@@ -98,7 +99,6 @@ const emit = defineEmits<{
   (e: 'selectAllSkills'): void
   (e: 'clearSkills'): void
   (e: 'toggleSkill', skillId: string): void
-  (e: 'selectRoomFolder', folder: { rootPath: string; rootName?: string }): void
 }>()
 
 const { t } = useI18n()
@@ -146,17 +146,7 @@ const injectFeedback = ref<'idle' | 'sent' | 'failed'>('idle')
 const isInjecting = ref(false)
 let injectFeedbackTimer: ReturnType<typeof setTimeout> | null = null
 const canInject = computed(() => Boolean(props.isGroupConversation && props.selectedGroupId && props.activeGroupSessionId && props.isLoading))
-const canCompose = computed(() => (!props.isLoading || canInject.value) && !props.isUploadingFiles)
-const showLocalAgents = ref(false)
-
-watch(() => props.selectedGroupId, () => { showLocalAgents.value = false })
-
-function handleLocalAgentJoined (agentName: string) {
-  const prefix = plainDraftText.value.trimEnd()
-  const text = `${prefix}${prefix ? ' ' : ''}@${agentName} `
-  pendingSelection.value = { start: text.length, end: text.length }
-  emit('update:modelValue', buildTaggedDraftValue(text))
-}
+const canCompose = computed(() => (!props.isLoading || canInject.value) && !props.isUploadingFiles && !props.isSending)
 const inputContextMenu = reactive({
   visible: false,
   x: 0,
@@ -277,6 +267,7 @@ const canSubmit = computed(() => canCompose.value && (canInject.value
   : hasDraftContent.value))
 const primaryActionLabel = computed(() => t(props.isLoading
   ? 'chatUi.stopGenerating'
+  : props.isSending ? 'onlineGroups.sending'
   : props.isUploadingFiles ? 'chatUi.processingFiles' : 'chatUi.send'))
 
 function clearInjectFeedbackTimer (): void {
@@ -887,7 +878,7 @@ onUnmounted(() => {
     <!-- Unified input container -->
     <div
       class="input-container"
-      :class="{ focused: inputFocused, dragging: dragActive, busy: props.isLoading, waitingAuth: (props.pendingAuthCount || 0) > 0 }"
+      :class="{ focused: inputFocused, dragging: dragActive, busy: props.isLoading || props.isSending, waitingAuth: (props.pendingAuthCount || 0) > 0 }"
       @dragenter="handleDragEnter"
       @dragover="handleDragOver"
       @dragleave="handleDragLeave"
@@ -963,7 +954,7 @@ onUnmounted(() => {
           ref="textareaRef"
           :value="plainDraftText"
           :class="{ busy: props.isLoading && !canInject }"
-          :placeholder="$t(canInject ? 'chatUi.groupInjectPlaceholder' : props.isGroupConversation ? 'chatUi.roomMessagePlaceholder' : 'chatUi.messagePlaceholder')"
+          :placeholder="$t(canInject ? 'chatUi.groupInjectPlaceholder' : props.onlineGroupMode ? 'onlineGroups.messagePlaceholder' : props.isGroupConversation ? 'chatUi.roomMessagePlaceholder' : 'chatUi.messagePlaceholder')"
           :aria-busy="props.isLoading ? 'true' : 'false'"
           :aria-autocomplete="props.isGroupConversation ? 'list' : undefined"
           :aria-controls="showMentionDropdown ? mentionListId : undefined"
@@ -1007,13 +998,13 @@ onUnmounted(() => {
              attachment / code workspace / document center. The agent switcher
              lives in the header next to the agent name. -->
         <div class="tooltip-container">
-          <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles }" :aria-disabled="props.isLoading || props.isUploadingFiles">
+          <label class="action-btn upload-btn" :class="{ disabled: props.isLoading || props.isUploadingFiles || props.isSending }" :aria-disabled="props.isLoading || props.isUploadingFiles || props.isSending">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 115.66 5.66l-9.2 9.2a2 2 0 01-2.82-2.83l8.49-8.48"/></svg>
-            <input type="file" multiple hidden :disabled="props.isLoading || props.isUploadingFiles" @change="handleAttachmentSelection" />
+            <input type="file" multiple hidden :disabled="props.isLoading || props.isUploadingFiles || props.isSending" @change="handleAttachmentSelection" />
           </label>
           <span class="tooltip-text">{{ $t('chatUi.addAttachment') }}</span>
         </div>
-        <div class="tooltip-container">
+        <div v-if="!props.onlineGroupMode" class="tooltip-container">
           <button class="action-btn workspace-btn" :class="{ active: props.workspaceVisible }" type="button" @click="emit('toggleWorkspace')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="4" width="18" height="16" rx="2.5"/>
@@ -1025,7 +1016,7 @@ onUnmounted(() => {
           <span class="tooltip-text">{{ $t('chatUi.workspace') }}</span>
         </div>
         <!-- Readable state pills follow (design v1.7): 技能 / 计划 / 电脑使用 / 授权模式. -->
-        <div v-if="props.availableSkills && props.availableSkills.length > 0" ref="composerSkillSelectorRef" class="composer-skill-selector">
+        <div v-if="!props.onlineGroupMode && props.availableSkills && props.availableSkills.length > 0" ref="composerSkillSelectorRef" class="composer-skill-selector">
             <button
               class="action-btn state-pill skills-pill"
               :class="{ active: (props.activeSkillIds?.size || 0) > 0 }"
@@ -1071,7 +1062,7 @@ onUnmounted(() => {
             </button>
             <span class="tooltip-text">{{ props.planModeActive ? $t('chatUi.exitPlanMode') : $t('chatUi.enterPlanMode') }}</span>
           </div>
-          <div class="tooltip-container">
+          <div v-if="!props.onlineGroupMode" class="tooltip-container">
             <button
               class="action-btn state-pill computer-use-btn"
               :class="{ active: props.computerUseEnabled, 'permission-locked': props.computerUsePermissionGranted === false }"
@@ -1102,7 +1093,7 @@ onUnmounted(() => {
             </button>
             <span class="tooltip-text">{{ props.authMode === 'strict' ? $t('chatUi.strictAuthTooltip') : $t('chatUi.autoAuthTooltip') }}</span>
           </div>
-          <template v-if="props.isGroupConversation && props.selectedGroupId">
+          <template v-if="!props.onlineGroupMode && props.isGroupConversation && props.selectedGroupId">
             <button
               class="action-btn room-mention-btn"
               :class="{ active: showMentionDropdown }"
@@ -1121,17 +1112,13 @@ onUnmounted(() => {
                 <path d="M16 8v5a2 2 0 0 0 4 0v-1a8 8 0 1 0-3.2 6.4" />
               </svg>
             </button>
-            <button class="action-btn state-pill room-invite-btn" type="button" aria-haspopup="dialog" :aria-expanded="showLocalAgents" :disabled="props.isLoading" @click="showLocalAgents = true">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 7 5 5-5 5m8-5h8m-4-4v8"/></svg>
-              {{ $t('chatUi.roomInviteLocalAgent') }}
-            </button>
           </template>
           <button
             class="action-btn send-btn"
             :class="{ stopping: props.isLoading, waitingAuth: (props.pendingAuthCount || 0) > 0 }"
             type="button"
             @click="handlePrimaryAction"
-            :disabled="!props.isLoading && !canSubmit"
+            :disabled="props.isSending || (!props.isLoading && !canSubmit)"
             :title="primaryActionLabel"
             :aria-label="primaryActionLabel"
           >
@@ -1164,17 +1151,6 @@ onUnmounted(() => {
       {{ $t(injectFeedback === 'sent' ? 'chatUi.groupInjectSent' : 'chatUi.groupInjectFailed') }}
     </div>
     <div v-if="props.uploadFeedback" class="upload-feedback" role="status">{{ props.uploadFeedback }}</div>
-    <RoomLocalAgentDialog
-      v-if="showLocalAgents && props.selectedGroupId"
-      :key="props.selectedGroupId"
-      :group-id="props.selectedGroupId"
-      :workers="props.roomLocalWorkers || []"
-      :task-directory="props.roomTaskDirectory"
-      :target-project-id="props.targetProjectId"
-      @close="showLocalAgents = false"
-      @select-folder="folder => emit('selectRoomFolder', folder)"
-      @joined="handleLocalAgentJoined"
-    />
     <Teleport to="body">
       <ImageLightbox
         v-if="pendingImageLightboxActive"

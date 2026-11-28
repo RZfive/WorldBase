@@ -53,6 +53,7 @@ const emit = defineEmits<{
 
 const itemIsPinned = computed(() => props.showPin && 'isPinned' in props.item && Boolean(props.item.isPinned))
 const isCompactConversation = computed(() => props.compact && props.variant === 'conversation')
+const groupType = computed(() => props.variant === 'group' ? (props.item as GroupSidebarItem).groupType : undefined)
 const showForkBadge = computed(() => props.variant === 'conversation' && (props.item as ConversationSidebarItem).isFork === true && !props.renaming)
 const renameInputEl = ref<HTMLInputElement | null>(null)
 
@@ -148,7 +149,13 @@ watch(
             <template v-if="!isCompactConversation">{{ $t('chatUi.conversationCompleted') }}</template>
           </span>
         </div>
-        <span v-if="!isCompactConversation" class="conv-subtitle">{{ item.subtitle }}</span>
+        <span v-if="!isCompactConversation" class="conv-subtitle">
+          <span v-if="groupType" class="conv-group-kind" :class="groupType">
+            <span aria-hidden="true" />
+            {{ $t(groupType === 'online' ? 'onlineGroups.onlineBadge' : 'onlineGroups.localBadge') }}
+          </span>
+          <span class="conv-subtitle-text">{{ item.subtitle }}</span>
+        </span>
       </div>
     </div>
     <div v-if="showPin || showDelete" class="conv-actions">
@@ -363,12 +370,43 @@ watch(
 }
 
 .conv-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   color: var(--app-text-muted);
   font-size: 0.68rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 1.3;
+}
+.conv-subtitle-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conv-group-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--app-panel-muted);
+  color: var(--app-text-faint);
+  font-size: 0.58rem;
+  line-height: 1.55;
+}
+.conv-group-kind > span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.conv-group-kind.online {
+  background: color-mix(in srgb, #3bb273 11%, transparent);
+  color: #4ebf83;
 }
 
 /* Agent rows repeat the provider·model line on every card; keep it as faint

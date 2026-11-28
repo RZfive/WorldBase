@@ -13,7 +13,7 @@ import { localAgentDefinition } from '../src/main/local-agents/catalog.ts'
 import { LocalAgentRegistry } from '../src/main/local-agents/registry.ts'
 import { prepareRoomLocalWorkspace, resolveRoomLocalWorkspace } from '../src/main/local-agents/room-workspace.ts'
 import { runLocalAgent } from '../src/main/local-agents/runtime.ts'
-import { inviteRoomLocalWorker, removeRoomLocalWorker } from '../src/main/local-agents/service.ts'
+import { inviteRoomLocalWorker, removeRoomLocalWorker, setRoomLocalWorkspace } from '../src/main/local-agents/service.ts'
 import { findGroupMentionQuery } from '../src/shared/group-mentions.ts'
 import { roomLocalWorkerName } from '../src/shared/local-agent-types.ts'
 import { localRoomSessionKey, nativeRoomId } from '../src/shared/room-context.ts'
@@ -78,13 +78,16 @@ test('mention completions work after spaces, next to Chinese text and with a ful
   assert.equal(findGroupMentionQuery('@Codex CLI ', 11), null)
 })
 
-test('a room prefers the task folder, then the project, then its own managed directory', async context => {
+test('a room prefers its explicit workspace, then task, project, and managed directory', async context => {
   const { root } = createFixture(context)
   const dataDir = path.join(root, 'app-data')
   const task = path.join(root, 'task')
   const project = path.join(root, 'project')
+  const room = path.join(root, 'room-workspace')
   fs.mkdirSync(task)
   fs.mkdirSync(project)
+  fs.mkdirSync(room)
+  assert.deepEqual(await resolveRoomLocalWorkspace(dataDir, 'room', task, project, room), { path: room, source: 'group' })
   const taskWorkspace = await resolveRoomLocalWorkspace(dataDir, 'room', task, project)
   assert.deepEqual(taskWorkspace, { path: task, source: 'task' })
   fs.rmdirSync(task)
@@ -125,6 +128,11 @@ test('session discovery filters other workspaces and already assigned sessions',
   writeCli('opencode', `printf '%s\n' '[{"id":"ses_here","directory":"${root}"},{"id":"ses_other","directory":"/"},{"id":"ses_unknown"},{"id":"ses_claimed","directory":"${root}"}]'`)
   registry.bindSession('room-1', 'local_cli_opencode', root, 'ses_claimed')
   assert.deepEqual((await registry.discoverSessions('local_cli_opencode', root)).map(item => item.sessionId), ['ses_here'])
+  registry.releaseRoomSessions('room-1')
+  const reopened = new LocalAgentRegistry(path.join(root, 'app-data'))
+  assert.equal(reopened.isSessionRetired('ses_claimed'), true)
+  assert.deepEqual((await reopened.discoverSessions('local_cli_opencode', root)).map(item => item.sessionId), ['ses_here'])
+  assert.throws(() => reopened.bindSession('room-2', 'local_cli_opencode', root, 'ses_claimed'), /cleared/)
 })
 
 test('workers have distinct session bindings and a CLI session cannot be shared by two workers', context => {
@@ -141,6 +149,7 @@ test('workers have distinct session bindings and a CLI session cannot be shared 
   releaseFirst()
   registry.releaseWorkerSessions('room', first)
   assert.equal(registry.getSession('room', first, root), null)
+  assert.equal(registry.isSessionRetired('first-thread'), false)
   assert.equal(registry.getSession('room', second, root)?.sessionId, 'second-thread')
   releaseSecond()
 })
@@ -260,15 +269,18 @@ printf '%s\n' '{"type":"result","session_id":"session-claude","result":"Claude r
     },
     onMembershipChanged: group => joined.push(group), onProgress: event => progress.push(event)
   })
-  assert.deepEqual(result.map(reply => reply.content), ['Codex produced evidence', 'Claude reviewed the evidence'])
   assert.equal(approvals.length, 2)
   const [reviewer] = joined[0].localWorkers
   const reviewerName = roomLocalWorkerName(reviewer)
+  assert.deepEqual(result.map(reply => reply.content), [
+    `@${reviewerName}\n\nReview the Codex result\n\nCodex produced evidence`,
+    'Claude reviewed the evidence'
+  ])
   assert.deepEqual(progress.filter(event => event.type === 'room_message').map(event => event.roomMessage.speakerName), [codex.name, reviewerName])
   assert.deepEqual(progress.filter(event => event.type === 'room_member_status').map(event => event.roomMemberStatus.status), ['queued', 'running', 'completed'])
   assert.deepEqual(progress.filter(event => event.type === 'thinking').map(event => event.content.trim()), ['Review the fixture first'])
   assert.ok(progress.some(event => event.type === 'progress' && event.detail === 'shell: check fixture'))
-  assert.ok(progress.some(event => event.type === 'group_peer_message' && event.peerMessage.status === 'completed'))
+  assert.equal(progress.some(event => event.type === 'group_peer_message'), false)
   assert.equal(joined.length, 1)
   assert.equal(reviewer.kind, 'claude')
   assert.deepEqual((await client.getAgentGroup(group.id)).localWorkers, [reviewer])
@@ -277,10 +289,13 @@ printf '%s\n' '{"type":"result","session_id":"session-claude","result":"Claude r
   assert.match(prompt, /Review the Codex result/)
   assert.match(prompt, /Work as an autonomous teammate/)
   assert.match(prompt, /split it into concrete parts and hand off independent parts immediately/)
+  assert.match(prompt, /finish this turn immediately/)
+  assert.match(prompt, /Do not wait, poll, or keep reading room messages/)
   assert.match(prompt, /Before asking the user, check whether a safe, reversible default exists/)
   assert.match(prompt, /Do not ask the user to @ someone/)
   assert.match(fs.readFileSync(path.join(localWorkspace.path, 'shared-archive'), 'utf8'), /Codex produced evidence/)
-  assert.ok((await client.listConversationMessages(`group-${nativeGroupId}`)).some(row => row.content.includes(`Handoff to ${reviewerName}:`)))
+  assert.match(fs.readFileSync(path.join(localWorkspace.path, 'shared-archive'), 'utf8'), new RegExp(`@${reviewerName}`))
+  assert.ok((await client.listConversationMessages(`group-${nativeGroupId}`)).some(row => row.content.includes(`@${reviewerName}\nReview the Codex result`)))
   const nativeGroup = await client.getNativeGroup(nativeGroupId)
   assert.equal(nativeGroup.members.length, 2)
   assert.ok(nativeGroup.members.every(member => member.localRuntime === true))
@@ -330,10 +345,13 @@ printf '%s\n' '${handoffReply}'
     },
     onProgress: event => { if (event.type === 'room_message') directReplies.push(event.roomMessage) }
   })
-  assert.deepEqual(directResult.map(reply => reply.content), ['Codex finished the draft', 'Claude reviewed the evidence'])
+  assert.deepEqual(directResult.map(reply => reply.content), [
+    `@${reviewerName}\n\nReview the direct result\n\nCodex finished the draft`,
+    'Claude reviewed the evidence'
+  ])
   assert.deepEqual(directApprovals, [codex.name, reviewerName].map(name => `mainDialog.roomWorkspaceApprovalTitle ${name}`))
   assert.deepEqual(directReplies, [
-    { speakerName: codex.name, speakerIcon: codex.icon, content: 'Codex finished the draft' },
+    { speakerName: codex.name, speakerIcon: codex.icon, content: `@${reviewerName}\n\nReview the direct result\n\nCodex finished the draft` },
     { speakerName: reviewerName, speakerIcon: '⌘', content: 'Claude reviewed the evidence' }
   ])
   assert.match(fs.readFileSync(path.join(localWorkspace.path, 'claude-prompt'), 'utf8'), /From Codex CLI:\nReview the direct result/)
@@ -389,7 +407,18 @@ printf '{"type":"item.completed","item":{"type":"agent_message","text":"%s resul
     delete globalThis.__worldbaseRoomSmokeState
   })
 
-  const group = await client.saveAgentGroup({ id: 'worker-room', name: 'Worker Room', maxParallelWorkers: 2 })
+  const created = await client.saveAgentGroup({
+    id: 'worker-room',
+    name: 'Worker Room',
+    maxParallelWorkers: 2
+  })
+  await assert.rejects(
+    inviteRoomLocalWorker('local_cli_codex', created.id, { role: 'Frontend', exitAfterTask: true }),
+    /roomWorkspaceRequiredForCli|working directory|工作目录/
+  )
+  const group = await setRoomLocalWorkspace(created.id, root, 'worker-room')
+  assert.equal(group.workspaceRoot, root)
+  assert.equal(group.workspaceRootName, 'worker-room')
   const [{ worker: frontend }, { worker: tester }] = await Promise.all([
     inviteRoomLocalWorker('local_cli_codex', group.id, { role: 'Frontend', instructions: 'Only edit UI components.', exitAfterTask: true }),
     inviteRoomLocalWorker('local_cli_codex', group.id, { role: 'Tests', instructions: 'Only write tests.', exitAfterTask: false })
@@ -398,7 +427,14 @@ printf '{"type":"item.completed","item":{"type":"agent_message","text":"%s resul
   const currentGroup = await client.getAgentGroup(group.id)
   assert.deepEqual(new Set(currentGroup.localWorkers.map(worker => worker.id)), new Set([frontend.id, tester.id]))
   assert.deepEqual(await client.listAgents(), [])
-  const workspace = await resolveRoomLocalWorkspace(path.join(root, 'app-data'), group.id)
+  const workspace = await resolveRoomLocalWorkspace(
+    path.join(root, 'app-data'),
+    group.id,
+    undefined,
+    undefined,
+    group.workspaceRoot
+  )
+  assert.deepEqual(workspace, { path: root, source: 'group' })
   const { runNativeRoom } = await loadRoomAdapter(root)
   const approvals = []
   const run = (room, text) => runNativeRoom({
@@ -475,6 +511,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"F
   assert.notEqual(nativeRoomId(updated), nativeId)
   assert.equal(updated.coordinatorAgentId, codex.id)
   assert.equal(registry.getSession(group.id, codex.id, workspace.path), null)
+  assert.equal(registry.isSessionRetired('old-thread'), true)
   assert.equal(registry.getSession(other.id, codex.id, root)?.sessionId, 'unrelated-thread')
   assert.deepEqual(await original.listConversationMessages(`group-${nativeId}`), [])
   await assert.rejects(original.getNativeGroup(nativeId), /not found/)
@@ -514,6 +551,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"F
   assert.deepEqual(await reopened.listConversationMessages(`group-${nativeRoomId(updated)}`), [])
   assert.deepEqual((await reopened.call('memory.list', { query: 'Room-only fact' })).entries, [])
   assert.equal(registry.getSession(localRoomSessionKey(updated), codex.id, workspace.path), null)
+  assert.equal(registry.isSessionRetired('new-thread'), true)
   assert.equal(registry.getSession(other.id, codex.id, root)?.sessionId, 'unrelated-thread')
   assert.ok(fs.existsSync(path.join(workspace.path, 'latest-archive')))
 })

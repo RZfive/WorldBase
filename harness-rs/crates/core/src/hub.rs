@@ -68,6 +68,9 @@ pub struct Hub {
     /// group 会话（内存态；黑板/轮次见 group crate）。
     pub group_sessions:
         std::sync::Mutex<HashMap<String, worldbase_protocol::types::GroupSessionMeta>>,
+    /// LAN discovery is harness-owned so every client sees and advertises the
+    /// same peer snapshot.
+    pub lan_discovery: Arc<worldbase_lan::DiscoveryService>,
     /// 全局事件广播（serve/app-server 向宿主转发）。
     pub event_tx: tokio::sync::broadcast::Sender<worldbase_protocol::event::EventFrame>,
     /// 直接注入的 provider（测试/特殊部署覆盖 settings 配置）。
@@ -146,6 +149,7 @@ impl Hub {
             runs: std::sync::Mutex::new(HashMap::new()),
             pending_permissions: std::sync::Mutex::new(HashMap::new()),
             group_sessions: std::sync::Mutex::new(HashMap::new()),
+            lan_discovery: Arc::new(worldbase_lan::DiscoveryService::new()),
             event_tx,
             custom_provider: std::sync::Mutex::new(None),
             pending_host_requests: std::sync::Mutex::new(HashMap::new()),

@@ -66,6 +66,7 @@ async function executableVersion (executablePath: string): Promise<string | unde
 
 export class LocalAgentRegistry {
   private readonly sessionFile: string
+  private readonly retiredSessionFile: string
   private discoveryPromise?: Promise<LocalAgentProfile[]>
   private readonly activeRuns = new Set<string>()
 
@@ -73,6 +74,7 @@ export class LocalAgentRegistry {
     const dir = path.join(userDataPath, 'local-agents')
     fs.mkdirSync(dir, { recursive: true })
     this.sessionFile = path.join(dir, 'sessions.json')
+    this.retiredSessionFile = path.join(dir, 'retired-sessions.json')
   }
 
   async discover (): Promise<LocalAgentProfile[]> {
@@ -138,8 +140,9 @@ export class LocalAgentRegistry {
     }
     const root = fs.realpathSync(workspaceRoot)
     const claimed = new Set(Object.values(this.readSessions()).filter(session => localSessionKind(session.agentId) === profile.kind).map(session => session.sessionId))
+    const retired = new Set(this.readRetiredSessions())
     return parseLocalAgentSessions(profile.kind, stdout).filter(session => {
-      if (claimed.has(session.sessionId) || !session.cwd) return false
+      if (claimed.has(session.sessionId) || retired.has(session.sessionId) || !session.cwd) return false
       try {
         return fs.realpathSync(session.cwd) === root
       } catch {
@@ -156,6 +159,7 @@ export class LocalAgentRegistry {
     const kind = localSessionKind(agentId)
     sessionId = sessionId.trim()
     if (!groupId || !kind || !sessionId) throw new Error('Invalid local Agent session.')
+    if (this.isSessionRetired(sessionId)) throw new Error('This CLI session was cleared and cannot be resumed.')
     const key = this.sessionKey(groupId, agentId, cwd)
     const sessions = this.readSessions()
     if (Object.entries(sessions).some(([entry, value]) => entry !== key && localSessionKind(value.agentId) === kind && value.sessionId === sessionId)) {
@@ -171,18 +175,30 @@ export class LocalAgentRegistry {
 
   releaseWorkerSessions (groupId: string, workerId: string): void {
     if (!LOCAL_WORKER_ID.test(workerId)) throw new Error('Invalid local worker ID.')
-    this.releaseSessions([groupId, workerId])
+    this.releaseSessions([groupId, workerId], false)
   }
 
   releaseRoomSessions (groupId: string): void {
-    this.releaseSessions([groupId])
+    this.releaseSessions([groupId], true)
   }
 
-  private releaseSessions (identity: string[]): void {
+  isSessionRetired (sessionId: string): boolean {
+    return this.readRetiredSessions().includes(sessionId.trim())
+  }
+
+  private releaseSessions (identity: string[], retireSessions: boolean): void {
     const prefix = `${JSON.stringify(identity).slice(0, -1)},`
     if ([...this.activeRuns].some(key => key.startsWith(prefix))) throw new Error('A local Agent is still running.')
     const sessions = this.readSessions()
     const keys = Object.keys(sessions).filter(key => key.startsWith(prefix))
+    if (keys.length && retireSessions) {
+      const retired = new Set(this.readRetiredSessions())
+      for (const key of keys) {
+        const sessionId = sessions[key]?.sessionId
+        if (sessionId) retired.add(sessionId)
+      }
+      this.writeRetiredSessions([...retired].slice(-1000))
+    }
     for (const key of keys) delete sessions[key]
     if (keys.length) this.writeSessions(sessions)
   }
@@ -209,6 +225,23 @@ export class LocalAgentRegistry {
     const temporary = `${this.sessionFile}.${process.pid}.tmp`
     fs.writeFileSync(temporary, JSON.stringify(sessions, null, 2), 'utf-8')
     fs.renameSync(temporary, this.sessionFile)
+  }
+
+  private readRetiredSessions (): string[] {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.retiredSessionFile, 'utf-8')) as unknown
+      return Array.isArray(parsed)
+        ? parsed.filter((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+        : []
+    } catch {
+      return []
+    }
+  }
+
+  private writeRetiredSessions (sessionIds: string[]): void {
+    const temporary = `${this.retiredSessionFile}.${process.pid}.tmp`
+    fs.writeFileSync(temporary, JSON.stringify(sessionIds, null, 2), 'utf-8')
+    fs.renameSync(temporary, this.retiredSessionFile)
   }
 
   private readSessions (): Record<string, LocalAgentSession> {

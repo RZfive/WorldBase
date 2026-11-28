@@ -61,6 +61,13 @@ pub const GROUP_RECORD_HANDOFF: &str = "group.record_handoff";
 pub const GROUP_MESSAGE: &str = "group.message";
 pub const GROUP_BLACKBOARD_ADD: &str = "group.blackboard.add";
 
+/// Harness-owned UDP multicast discovery for LAN WorldBase instances.
+pub const LAN_DISCOVERY_START: &str = "lan.discovery.start";
+pub const LAN_DISCOVERY_UPDATE: &str = "lan.discovery.update";
+pub const LAN_DISCOVERY_STOP: &str = "lan.discovery.stop";
+pub const LAN_DISCOVERY_STATUS: &str = "lan.discovery.status";
+pub const LAN_DISCOVERY_REFRESH: &str = "lan.discovery.refresh";
+
 pub const MCP_LIST: &str = "mcp.list";
 pub const MCP_CALL: &str = "mcp.call";
 pub const MCP_RELOAD: &str = "mcp.reload";
@@ -236,7 +243,14 @@ pub const APPLICATION_HOST_STATE_CHANGED: &str = "application.host.state.changed
 /// 方法所属能力域。
 pub fn method_domain(method: &str) -> &'static str {
     match method {
-        GROUP_ADD_LOCAL_WORKER | GROUP_REMOVE_LOCAL_WORKER | GROUP_CLEAR_CONTEXT => "desktop",
+        GROUP_ADD_LOCAL_WORKER
+        | GROUP_REMOVE_LOCAL_WORKER
+        | GROUP_CLEAR_CONTEXT
+        | LAN_DISCOVERY_START
+        | LAN_DISCOVERY_UPDATE
+        | LAN_DISCOVERY_STOP
+        | LAN_DISCOVERY_STATUS
+        | LAN_DISCOVERY_REFRESH => "desktop",
         PROJECT_LIST
         | PROJECT_CREATE
         | PROJECT_DEV_START
@@ -328,6 +342,11 @@ pub const ALL_METHODS: &[&str] = &[
     GROUP_RECORD_HANDOFF,
     GROUP_MESSAGE,
     GROUP_BLACKBOARD_ADD,
+    LAN_DISCOVERY_START,
+    LAN_DISCOVERY_UPDATE,
+    LAN_DISCOVERY_STOP,
+    LAN_DISCOVERY_STATUS,
+    LAN_DISCOVERY_REFRESH,
     MCP_LIST,
     MCP_CALL,
     MCP_RELOAD,

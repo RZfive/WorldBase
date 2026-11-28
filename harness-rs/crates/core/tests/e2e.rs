@@ -435,6 +435,8 @@ async fn agent_group_catalog_crud_matches_electron_store_shape() {
                 "description": "  durable catalog  ",
                 "coordinatorAgentId": " coordinator ",
                 "memberAgentIds": [" coordinator ", "worker", "worker", ""],
+                "workspaceRoot": "/tmp/rust-review-room",
+                "workspaceRootName": "rust-review-room",
                 "maxRounds": 99,
                 "maxParallelWorkers": 0,
                 "sharedMemoryScopes": ["group", "invalid", "group", "project"],
@@ -451,6 +453,8 @@ async fn agent_group_catalog_crud_matches_electron_store_shape() {
     assert_eq!(group["name"], "Rust Review Team");
     assert_eq!(group["description"], "durable catalog");
     assert_eq!(group["coordinatorAgentId"], "coordinator");
+    assert_eq!(group["workspaceRoot"], "/tmp/rust-review-room");
+    assert_eq!(group["workspaceRootName"], "rust-review-room");
     assert_eq!(
         group["memberAgentIds"],
         serde_json::json!(["coordinator", "worker"])
@@ -490,6 +494,7 @@ async fn agent_group_catalog_crud_matches_electron_store_shape() {
     .unwrap();
     assert_eq!(updated["group"]["id"], group_id);
     assert_eq!(updated["group"]["name"], "Updated team");
+    assert_eq!(updated["group"]["workspaceRoot"], "/tmp/rust-review-room");
     assert_eq!(
         updated["group"]["memberAgentIds"],
         serde_json::json!(["coordinator", "worker"])
@@ -1026,6 +1031,106 @@ async fn native_room_member_reads_shared_history_and_calls_host_catalog() {
     }).await.expect("room catalog run did not complete");
     assert!(read_history);
     assert!(called_host);
+}
+
+#[tokio::test]
+async fn queued_room_handoff_ends_a_member_turn_before_room_polling() {
+    let hub = test_hub(vec![
+        MockTurn {
+            text: String::new(),
+            tool_calls: vec![(
+                "handoff".into(),
+                "handoff_room_task".into(),
+                serde_json::json!({
+                    "agentId": "reviewer",
+                    "task": "Review the draft and report the concrete result."
+                }),
+            )],
+            stream_in_chunks: false,
+        },
+        MockTurn {
+            text: String::new(),
+            tool_calls: vec![(
+                "read".into(),
+                "read_room_messages".into(),
+                serde_json::json!({}),
+            )],
+            stream_in_chunks: false,
+        },
+        MockTurn {
+            text: "This polling turn must not run.".into(),
+            tool_calls: vec![],
+            stream_in_chunks: false,
+        },
+    ])
+    .await;
+    let ctx = ConnectionContext::new(Capabilities::desktop());
+    dispatch(&hub, &ctx, method::AGENT_SAVE, serde_json::json!({
+        "agent": { "id": "room_lead", "name": "Lead" }
+    })).await.unwrap();
+    dispatch(&hub, &ctx, method::GROUP_CREATE, serde_json::json!({
+        "sessionId": "handoff-room", "topic": "Handoff room", "room": true,
+        "mode": "coordinator_only", "members": [{
+            "name": "Lead", "persona": "Coordinate work", "agentId": "room_lead"
+        }]
+    })).await.unwrap();
+    let mut events = hub.event_tx.subscribe();
+    dispatch(&hub, &ctx, method::GROUP_MESSAGE, serde_json::json!({
+        "id": "handoff-room", "text": "Ask the reviewer to check this.", "memberIds": ["room_lead"],
+        "context": { "customTools": [{
+            "name": "handoff_room_task", "description": "Queue a room handoff",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agentId": { "type": "string" },
+                    "task": { "type": "string" }
+                },
+                "required": ["agentId", "task"]
+            },
+            "domain": "host",
+            "permission": "allow"
+        }] }
+    })).await.unwrap();
+
+    let mut handoff_ended = false;
+    let mut polled_answer_was_visible = false;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = events.recv().await.unwrap();
+            match frame.kind {
+                EventKind::HostRequest { request_id, request_kind, payload } => {
+                    assert_eq!(request_kind, "tool.execute");
+                    assert_eq!(payload["name"], "handoff_room_task");
+                    hub.host_respond(&request_id, serde_json::json!({
+                        "status": "queued",
+                        "endTurn": true,
+                        "next": "The recipient starts after this turn."
+                    }));
+                }
+                EventKind::Done { stop_reason }
+                    if frame.stream_id.starts_with("handoff-room:member:")
+                        && stop_reason == "handoff_queued" =>
+                {
+                    handoff_ended = true;
+                }
+                EventKind::AssistantMessage { content, .. }
+                    if content.contains("polling turn must not run") =>
+                {
+                    polled_answer_was_visible = true;
+                }
+                EventKind::Done { stop_reason } if frame.stream_id == "handoff-room" => {
+                    assert_eq!(stop_reason, "group_complete");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("handoff room did not complete");
+
+    assert!(handoff_ended);
+    assert!(!polled_answer_was_visible);
 }
 
 #[tokio::test]

@@ -24,6 +24,13 @@ type AuthRequestPayload = import('./shared/agent-workspace-types.js').AuthReques
 type RoomMemberMessage = import('./shared/agent-workspace-types.js').RoomMemberMessage
 type RoomMemberStatus = import('./shared/agent-workspace-types.js').RoomMemberStatus
 type ChatStreamResult = import('./shared/agent-workspace-types.js').ChatStreamResult
+type OnlineGroupState = import('./shared/online-group-types.js').OnlineGroupState
+type OnlineGroup = import('./shared/online-group-types.js').OnlineGroup
+type OnlineGroupIdentity = import('./shared/online-group-types.js').OnlineGroupIdentity
+type OnlineGroupInboxItem = import('./shared/online-group-types.js').OnlineGroupInboxItem
+type OnlineGroupFileInput = import('./shared/online-group-types.js').OnlineGroupFileInput
+type OnlineGroupSendResult = import('./shared/online-group-types.js').OnlineGroupSendResult
+type OnlineGroupChangeEvent = import('./shared/online-group-types.js').OnlineGroupChangeEvent
 
 interface BrowserPageEmulationViewportRequest {
   width: number
@@ -356,12 +363,15 @@ interface AgentGroupDefinition {
   memberAgentIds: string[]
   localWorkers?: RoomLocalWorker[]
   roomContextId?: string
+  workspaceRoot?: string
+  workspaceRootName?: string
   maxRounds: number
   maxParallelWorkers: number
   sharedMemoryScopes: Array<'group' | 'project' | 'channel'>
   visibility: 'summary_only' | 'expandable_internal_transcript'
   createdAt: string
   updatedAt: string
+  online?: import('./shared/agent-workspace-types.js').OnlineGroupLink
 }
 
 interface AgentGroupTranscriptToolCall {
@@ -1259,6 +1269,7 @@ interface DocumentFileChangedDTO {
 interface ElectronAPI {
   discoverLocalAgents: () => Promise<LocalAgentProfile[]>
   getRoomLocalWorkspace: (groupId: string, taskDirectory?: string | null, projectId?: string | null) => Promise<RoomLocalWorkspace>
+  setRoomLocalWorkspace: (groupId: string, workspaceRoot: string, workspaceRootName?: string) => Promise<AgentGroupDefinition>
   joinLocalAgentGroup: (agentId: string, groupId: string) => Promise<{ agent: AgentDefinition; group: AgentGroupDefinition }>
   inviteRoomLocalWorker: (agentId: string, groupId: string, options: RoomLocalWorkerOptions) => Promise<{ worker: RoomLocalWorker; group: AgentGroupDefinition }>
   removeRoomLocalWorker: (groupId: string, workerId: string) => Promise<{ group: AgentGroupDefinition; removed: boolean }>
@@ -1325,6 +1336,28 @@ interface ElectronAPI {
   getAgentGroup: (id: string) => Promise<AgentGroupDefinition | null>
   saveAgentGroup: (group: Partial<AgentGroupDefinition>) => Promise<AgentGroupDefinition>
   deleteAgentGroup: (id: string) => Promise<boolean>
+  getOnlineGroupState: () => Promise<OnlineGroupState>
+  getOnlineGroup: (groupId: string) => Promise<{ group: OnlineGroup; identity: OnlineGroupIdentity }>
+  saveOnlineGroupIdentity: (identity: Partial<Pick<OnlineGroupIdentity, 'displayName' | 'role' | 'avatar' | 'background' | 'tags' | 'discoveryEnabled' | 'advertiseGroups'>>) => Promise<OnlineGroupState>
+  refreshOnlineGroups: () => Promise<OnlineGroupState>
+  createOnlineGroup: (input: { name: string; icon?: string; description?: string; role?: string; invitePeerIds?: string[] }) => Promise<OnlineGroup>
+  updateOnlineGroup: (groupId: string, input: { name?: string; icon?: string; description?: string }) => Promise<OnlineGroup>
+  inviteOnlineGroupPeers: (groupId: string, peerIds: string[], role?: string) => Promise<{ invited: number; errors: string[] }>
+  requestJoinOnlineGroup: (peerId: string, groupId: string, role?: string) => Promise<OnlineGroupInboxItem>
+  acceptOnlineGroupInvitation: (invitationId: string, role?: string) => Promise<OnlineGroup>
+  declineOnlineGroupInvitation: (invitationId: string) => Promise<OnlineGroupState>
+  decideOnlineGroupJoinRequest: (requestId: string, approved: boolean) => Promise<OnlineGroupState>
+  addOnlineGroupAgent: (groupId: string, agentId: string, role?: string) => Promise<OnlineGroup>
+  removeOnlineGroupAgent: (groupId: string, memberId: string) => Promise<OnlineGroup>
+  sendOnlineGroupMessage: (groupId: string, content: string, files?: OnlineGroupFileInput[]) => Promise<OnlineGroupSendResult>
+  syncOnlineGroup: (groupId: string) => Promise<OnlineGroup>
+  decideOnlineGroupDelegation: (groupId: string, delegationId: string, approved: boolean) => Promise<OnlineGroup>
+  runOnlineGroupAgentMessage: (groupId: string, agentMemberId: string, prompt: string) => Promise<OnlineGroupSendResult>
+  readOnlineGroupAttachment: (groupId: string, attachmentId: string) => Promise<{ name: string; mimeType: string; dataBase64: string }>
+  readOnlineGroupFile: (filePath: string, name?: string, mimeType?: string) => Promise<{ name: string; mimeType: string; size: number; dataBase64: string }>
+  leaveOnlineGroup: (groupId: string) => Promise<boolean>
+  deleteOnlineGroup: (groupId: string) => Promise<boolean>
+  onOnlineGroupsChanged: (callback: (event: OnlineGroupChangeEvent) => void) => () => void
   onAgentWorkspaceChanged: (callback: (event: { entity: 'agent' | 'group' | 'binding'; action: string; id?: string }) => void) => () => void
   listImConnectors: () => Promise<ConnectorDefinition[]>
   listChannelBindings: () => Promise<ChannelBinding[]>

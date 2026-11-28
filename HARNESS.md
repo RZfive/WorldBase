@@ -17,6 +17,7 @@ the-world/
 │   │   ├── tools/                 # Agent 工具编排、跨端工具、Electron host 兼容层和能力过滤
 │   │   ├── core/                  # Hub、Agent loop、权限引擎、dispatcher
 │   │   ├── group/                 # 群组协作状态机（5 模式 + 黑板）
+│   │   ├── lan/                   # 局域网 WorldBase 发现（UDP 组播）
 │   │   ├── memory/                # SQLite/FTS5 会话/消息/长期记忆/设置
 │   │   ├── skills/                # YAML Skill 加载与执行
 │   │   ├── scheduler/             # 标准 5 段 cron 定时任务（SQLite 持久化）
@@ -56,6 +57,7 @@ harness-rs/cli -- in-process -------------------> harness-rs/core
 - ✅ **跨端文档能力已迁移**：`docs` crate 已提供 xlsx/xls、pdf、docx、pptx、csv、md、json、txt 等解析，以及 docx/xlsx/pptx/csv/文本的基础写入；Electron 复杂展示、原文件打开、Office 兼容和桌面 UI 语义仍可由宿主层实现。
 - ✅ **Rust workspace 验证通过**：`cargo test --manifest-path harness-rs/Cargo.toml --workspace` 通过；core 单元/E2E、provider、tools、docs、project-runtime、IM connector 等均有测试覆盖。
 - ✅ **协议新增（对齐桌面端）**：`provider.list/save/delete/setActive`（多供应商）、`agent.list/get/save/delete`（Agent 绑定人设/供应商/模型）、`studio.generate/list/delete`（绘图）、`conversation.fork`（分叉 fork 模式 / 就地编辑 inplace 模式）、`group.inject`（HITL 澄清注入）、`group.board.update`（黑板操作）、`skill.save/delete`、`host.respond`（反向请求应答）、`ask_user`/`read_current_page`/`interact_current_page` 宿主域工具。
+- ✅ **在线群组**：`worldbase-lan` 在 harness 内负责 UDP 组播发现（`lan.discovery.start/update/stop/status/refresh`）；Electron 在线群组服务负责邀请/入群、群聊、文件传输和 Agent 委派审批。群聊复用主消息面板，右侧成员栏按“真人 → 所属 Agent”展示成员和授权状态。跨用户 Agent 委派默认 `pending_owner_approval`，只有目标 Agent 所有者实例能批准执行。详见 [lan-online-groups.md](docs/lan-online-groups.md)。
 - ✅ **Electron 默认走 Rust**：`ai:chat`、`ai:chatStream`、`ai:updateSessionAuthMode`、`ai:stopStream` 按设置选择后端；缺失或非法配置归一化为 Rust，只有显式 `ts` 才进入冻结兼容实现。Rust 不可用或握手失败会向调用方报错，不会静默启动 Node Agent Loop。
 - ✅ **Electron 工具 ownership 已明确**：现有 68 个 Node 宿主工具是冻结兼容子集，名称、description 和 JSON Schema 由快照检查保持一致。新 Rust 工具可通过 `electron_native()` 进入 Electron 目录，无需新增 Node placeholder，且不能被同名 host override 覆盖。
 - ✅ **移动端 Agent Loop 主路径已跑通**：`apps/mobile` Flutter 工程（四 Tab：对话/应用/绘图/我的，**iOS/Apple 风格 UI**——浅色分组列表、iOS 信息气泡、Cupertino 分段控件/弹窗/动作表、毛玻璃 TabBar，设计系统在 `lib/core/ios_ui.dart`）；这里的“跑通”指 Rust Agent Loop、FFI/WS 协议和主要功能面，不等同于已完成真机发布验证：

@@ -665,6 +665,10 @@ pub struct AgentGroupDefinition {
     pub local_workers: Vec<RoomLocalWorker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_context_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root_name: Option<String>,
     #[serde(default = "default_agent_group_max_rounds")]
     pub max_rounds: u32,
     #[serde(default = "default_agent_group_parallel_workers")]

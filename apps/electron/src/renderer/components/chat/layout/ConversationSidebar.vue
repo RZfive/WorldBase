@@ -23,6 +23,8 @@ const props = defineProps<{
   conversationListLoaded: boolean
   projectItems?: SidebarProjectInfo[]
   groupingMode?: ConversationGroupingMode
+  showOnlineGroups?: boolean
+  onlineGroupCount?: number
 }>()
 
 const emit = defineEmits<{
@@ -31,6 +33,7 @@ const emit = defineEmits<{
   (e: 'selectConversation', id: string): void
   (e: 'openAgent', agentId: string): void
   (e: 'openGroup', groupId: string): void
+  (e: 'openOnlineGroups'): void
   (e: 'openLongTermGoal', goalId: string): void
   (e: 'newLongTermGoal'): void
   (e: 'deleteLongTermGoal', goalId: string): void
@@ -328,7 +331,11 @@ defineExpose({
 })
 
 const hasVisibleItems = computed(() => {
-  return filteredAgentItems.value.length > 0 || filteredGroupItems.value.length > 0 || filteredLongTermGoalItems.value.length > 0 || groupedEntries.value.length > 0
+  return filteredAgentItems.value.length > 0
+    || filteredGroupItems.value.length > 0
+    || filteredLongTermGoalItems.value.length > 0
+    || groupedEntries.value.length > 0
+    || (!isSearching.value && props.showOnlineGroups !== false)
 })
 
 function toggleSection (key: ConversationSidebarSectionKey) {
@@ -447,23 +454,45 @@ function cancelRenameConversation () {
         </div>
       </section>
 
-      <section v-if="props.groupItems.length > 0" class="conv-section">
-        <button
-          class="conv-section-toggle"
-          :class="{ collapsed: !isSectionExpanded('groups', filteredGroupItems.length) }"
-          type="button"
-          @click="toggleSection('groups')"
-        >
-          <span class="conv-section-toggle-copy">
-            <span class="conv-section-title">{{ $t('chatUi.groups') }}</span>
-          </span>
-          <span class="conv-section-meta">{{ filteredGroupItems.length }}/{{ props.groupItems.length }}</span>
-          <span class="conv-section-caret-shell" aria-hidden="true">
-            <svg class="conv-section-caret" viewBox="0 0 16 16" fill="none">
-              <path d="M4.5 6.25L8 9.75L11.5 6.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-          </span>
-        </button>
+      <section v-if="props.groupItems.length > 0 || props.showOnlineGroups !== false" class="conv-section">
+        <div class="conv-section-toggle-shell">
+          <button
+            class="conv-section-toggle conv-section-toggle-embedded"
+            :class="{ collapsed: !isSectionExpanded('groups', filteredGroupItems.length) }"
+            type="button"
+            @click="toggleSection('groups')"
+          >
+            <span class="conv-section-toggle-copy">
+              <span class="conv-section-title">{{ $t('chatUi.groups') }}</span>
+            </span>
+            <span class="conv-section-meta">{{ filteredGroupItems.length }}/{{ props.groupItems.length }}</span>
+          </button>
+          <button
+            v-if="props.showOnlineGroups !== false"
+            class="conv-online-btn"
+            type="button"
+            :title="$t('onlineGroups.sidebarHint')"
+            :aria-label="$t('onlineGroups.sidebarEntry')"
+            @click.stop="emit('openOnlineGroups')"
+          >
+            <SidebarIcon name="groupPlus" :size="13" />
+            <span class="conv-online-btn-label">{{ $t('onlineGroups.sidebarEntry') }}</span>
+            <span v-if="props.onlineGroupCount" class="conv-online-btn-count">{{ props.onlineGroupCount }}</span>
+          </button>
+          <button
+            class="conv-section-caret-btn"
+            :class="{ collapsed: !isSectionExpanded('groups', filteredGroupItems.length) }"
+            type="button"
+            aria-hidden="true"
+            @click="toggleSection('groups')"
+          >
+            <span class="conv-section-caret-shell">
+              <svg class="conv-section-caret" viewBox="0 0 16 16" fill="none">
+                <path d="M4.5 6.25L8 9.75L11.5 6.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </span>
+          </button>
+        </div>
         <div
           class="conv-section-body"
           :class="{ collapsed: !isSectionExpanded('groups', filteredGroupItems.length) }"
@@ -1209,6 +1238,39 @@ function cancelRenameConversation () {
   border: 1px dashed color-mix(in srgb, var(--app-border) 68%, transparent);
   border-radius: 10px;
   background: color-mix(in srgb, var(--app-panel-muted) 42%, transparent);
+}
+
+.conv-online-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--app-accent-strong) 24%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent-soft) 46%, transparent);
+  color: var(--app-accent-strong);
+  font-size: 0.62rem;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+
+.conv-online-btn:hover {
+  border-color: color-mix(in srgb, var(--app-accent-strong) 52%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent-soft) 78%, transparent);
+  color: var(--app-text);
+}
+
+.conv-online-btn-count {
+  min-width: 14px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-accent-strong) 18%, transparent);
+  font-size: 0.58rem;
+  text-align: center;
 }
 
 /* ── Grouping-mode switcher (time / project / folders) ──

@@ -9,6 +9,8 @@ const AskUserPanel = await loadSetupComponent(new URL('../src/renderer/component
 const PinnedTodoPanel = await loadSetupComponent(new URL('../src/renderer/components/chat/layout/PinnedTodoPanel.vue', import.meta.url))
 const ChatInput = await loadSetupComponent(new URL('../src/renderer/components/chat/layout/ChatInput.vue', import.meta.url))
 const RoomLocalAgentDialog = await loadSetupComponent(new URL('../src/renderer/components/chat/layout/RoomLocalAgentDialog.vue', import.meta.url))
+const LocalGroupSettingsDialog = await loadSetupComponent(new URL('../src/renderer/components/chat/layout/LocalGroupSettingsDialog.vue', import.meta.url))
+const GroupMembersPanel = await loadSetupComponent(new URL('../src/renderer/components/chat/layout/GroupMembersPanel.vue', import.meta.url))
 const ExecutionDisclosure = await loadSetupComponent(new URL('../src/renderer/components/chat/blocks/ExecutionDisclosure.vue', import.meta.url))
 
 function cssRule (source, selector) {
@@ -196,7 +198,7 @@ test('the invite dialog can reuse the same CLI for several roles and remove a Wo
   const joined = []
   const removals = []
   fixture.window.electronAPI = {
-    async getRoomLocalWorkspace () { return { path: '/room', source: 'room' } },
+    async getRoomLocalWorkspace () { return { path: '/room', source: 'group' } },
     async discoverLocalAgents () { return [{ agentId: 'local_cli_codex', name: 'Codex', kind: 'codex', available: true }] },
     async inviteRoomLocalWorker (agentId, groupId, options) {
       invites.push({ agentId, groupId, ...options })
@@ -222,6 +224,99 @@ test('the invite dialog can reuse the same CLI for several roles and remove a Wo
   ])
   assert.deepEqual(joined, ['Implementer-00000001', 'Tester-00000002'])
   assert.deepEqual(removals, [['room', previous.id]])
+})
+
+test('group settings own the working folder, authorization mode and local agent roster', async t => {
+  const fixture = rendererFixture(t)
+  const invites = []
+  const removals = []
+  const authChanges = []
+  const changed = []
+  const previous = { id: 'existing-worker', kind: 'codex', role: 'Reviewer', exitAfterTask: false }
+  const group = {
+    id: 'room',
+    name: 'Product room',
+    coordinatorAgentId: 'default',
+    memberAgentIds: ['default'],
+    maxRounds: 3,
+    maxParallelWorkers: 2,
+    localWorkers: [previous]
+  }
+  fixture.window.electronAPI = {
+    async getRoomLocalWorkspace () { return { path: '/room/project', source: 'group' } },
+    async pickFolderWorkspace () { return { canceled: false, rootPath: '/room/next', rootName: 'next' } },
+    async setRoomLocalWorkspace (groupId, rootPath, rootName) {
+      return { ...group, workspaceRoot: rootPath, workspaceRootName: rootName }
+    },
+    async discoverLocalAgents () {
+      return [{ agentId: 'local_cli_codex', name: 'Codex', kind: 'codex', available: true }]
+    },
+    async inviteRoomLocalWorker (agentId, groupId, options) {
+      invites.push({ agentId, groupId, ...options })
+      const worker = { id: 'local_worker_codex_00000001', kind: 'codex', ...options }
+      return { worker, group: { ...group, localWorkers: [...group.localWorkers, worker] } }
+    },
+    async removeRoomLocalWorker (groupId, workerId) {
+      removals.push([groupId, workerId])
+      return { group: { ...group, localWorkers: [] }, removed: true }
+    }
+  }
+  const { state } = fixture.mount(LocalGroupSettingsDialog, {
+    open: true,
+    group,
+    authMode: 'strict',
+    workers: [previous],
+    onAuthModeChange: value => authChanges.push(value),
+    onChanged: value => changed.push(value)
+  })
+  await flush()
+
+  assert.equal(state.workspace.path, '/room/project')
+  assert.equal(state.selectedAgentId, 'local_cli_codex')
+  assert.equal(state.canJoin, false)
+  await state.chooseWorkspace()
+  state.role = 'Tester'
+  state.exitAfterTask = true
+  await state.joinAgent()
+  state.setAuthMode('auto')
+  await state.removeWorker(previous)
+
+  assert.deepEqual(invites, [{
+    agentId: 'local_cli_codex',
+    groupId: 'room',
+    role: 'Tester',
+    instructions: '',
+    exitAfterTask: true
+  }])
+  assert.deepEqual(removals, [['room', 'existing-worker']])
+  assert.deepEqual(authChanges, ['auto'])
+  assert.equal(state.workspace.path, '/room/next')
+  assert.equal(changed.length, 3)
+  assert.equal(changed[0].workspaceRoot, '/room/next')
+})
+
+test('each member Agent branch can collapse independently', async t => {
+  const fixture = rendererFixture(t)
+  const { state } = fixture.mount(GroupMembersPanel, {
+    group: {
+      id: 'room',
+      name: 'Product room',
+      coordinatorAgentId: 'agent-a',
+      memberAgentIds: ['agent-a', 'agent-b'],
+      localWorkers: []
+    },
+    agents: [
+      { id: 'agent-a', name: 'Planner' },
+      { id: 'agent-b', name: 'Reviewer' }
+    ],
+    localWorkers: []
+  })
+
+  assert.equal(state.isAgentBranchCollapsed('room:local'), false)
+  state.toggleAgentBranch('room:local')
+  assert.equal(state.isAgentBranchCollapsed('room:local'), true)
+  state.toggleAgentBranch('room:local')
+  assert.equal(state.isAgentBranchCollapsed('room:local'), false)
 })
 
 test('the shared main button stops an active room while Enter sends a clarification', async t => {
@@ -263,4 +358,25 @@ test('the shared main button stops an active room while Enter sends a clarificat
   const source = await readFile(new URL('../src/renderer/components/chat/layout/ChatInput.vue', import.meta.url), 'utf8')
   assert.doesNotMatch(source, /room-stop-btn/)
   assert.match(source, /stopping: props\.isLoading/)
+})
+
+test('group settings stay mounted on their own state and open as a drawer under the title row', async () => {
+  const [chatPanel, localSettings] = await Promise.all([
+    readFile(new URL('../src/renderer/components/chat/panel/ChatPanelContainer.vue', import.meta.url), 'utf8'),
+    readFile(new URL('../src/renderer/components/chat/layout/LocalGroupSettingsDialog.vue', import.meta.url), 'utf8')
+  ])
+
+  assert.match(chatPanel, /const localGroupSettingsOpen = ref\(false\)/)
+  assert.match(chatPanel, /<LocalGroupSettingsDialog\s+:open="localGroupSettingsOpen"/)
+  assert.doesNotMatch(chatPanel, /<LocalGroupSettingsDialog\s+v-if=/)
+
+  // The drawer is drawn in place, inside the chat panel's drawer slot. The
+  // slot is the grid row under the title, so the drawer cannot cover the
+  // title row; it lets clicks through to the chat, the drawer takes them back.
+  assert.doesNotMatch(localSettings, /<Teleport/)
+  assert.match(cssRule(chatPanel, '.chat-panel-drawer-slot'), /grid-row:\s*2/)
+  assert.match(cssRule(chatPanel, '.chat-panel-drawer-slot'), /pointer-events:\s*none/)
+  assert.match(cssRule(localSettings, '.local-group-settings-drawer'), /pointer-events:\s*auto/)
+  // Square along its top edge: it meets the title row as a flush panel, not a card.
+  assert.doesNotMatch(cssRule(localSettings, '.local-group-settings-drawer'), /border-top-left-radius/)
 })

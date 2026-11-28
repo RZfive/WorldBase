@@ -5840,6 +5840,56 @@ mod tests {
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
+    #[test]
+    fn room_handoff_followed_by_a_room_read_ends_the_member_turn() {
+        let handoff = RunToolExecution {
+            call_id: "handoff".into(),
+            name: "handoff_room_task".into(),
+            content: r#"{"status":"queued","endTurn":true}"#.into(),
+            is_error: false,
+            images: vec![],
+        };
+        let room_read = RunToolExecution {
+            call_id: "read".into(),
+            name: "read_room_messages".into(),
+            content: r#"{"messages":[]}"#.into(),
+            is_error: false,
+            images: vec![],
+        };
+
+        assert!(queues_room_handoff(&handoff));
+        assert!(room_handoff_should_end_turn(
+            false,
+            &[(0, handoff), (1, room_read)]
+        ));
+        assert!(!room_handoff_should_end_turn(
+            false,
+            &[(
+                0,
+                RunToolExecution {
+                    call_id: "read".into(),
+                    name: "read_room_messages".into(),
+                    content: r#"{"messages":[]}"#.into(),
+                    is_error: false,
+                    images: vec![],
+                }
+            )]
+        ));
+        assert!(!room_handoff_should_end_turn(
+            true,
+            &[(
+                0,
+                RunToolExecution {
+                    call_id: "other".into(),
+                    name: "read_workspace_file".into(),
+                    content: "{}".into(),
+                    is_error: false,
+                    images: vec![],
+                }
+            )]
+        ));
+    }
+
     #[tokio::test]
     async fn finish_task_without_a_summary_does_not_end_silently() {
         let (hub, provider, workspace, conversation_id) =
@@ -7518,6 +7568,39 @@ struct RunToolExecution {
     images: Vec<String>,
 }
 
+fn queues_room_handoff(execution: &RunToolExecution) -> bool {
+    if execution.is_error
+        || !matches!(
+            execution.name.as_str(),
+            "handoff_room_task" | "invite_local_agent"
+        )
+    {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&execution.content)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|status| status == "queued" || status == "already_queued")
+}
+
+fn room_handoff_should_end_turn(
+    handoff_already_queued: bool,
+    executions: &[(usize, RunToolExecution)],
+) -> bool {
+    let queued_this_batch = executions
+        .iter()
+        .any(|(_, execution)| queues_room_handoff(execution));
+    (handoff_already_queued || queued_this_batch)
+        && executions
+            .iter()
+            .any(|(_, execution)| execution.name == "read_room_messages")
+}
+
 struct CodingToolOutcome {
     notice: String,
     diagnosis: Option<DiagnosisReport>,
@@ -7891,6 +7974,7 @@ async fn run_chat_inner(
     .await;
 
     let mut catalog_tools = platform_tools(hub.tools_for(&caps), &context);
+    let mut room_handoff_queued = false;
     if group_collaboration.is_some() {
         catalog_tools.extend(worldbase_tools::group_collaboration_tools());
     }
@@ -9352,6 +9436,12 @@ async fn run_chat_inner(
             executions.extend(group_results);
         }
 
+        let end_room_turn_for_handoff = group_collaboration.is_some()
+            && room_handoff_should_end_turn(room_handoff_queued, &executions);
+        room_handoff_queued |= executions
+            .iter()
+            .any(|(_, execution)| queues_room_handoff(execution));
+
         // Published results and LLM tool-result blocks always use the original
         // assistant turn order, even when dependency planning reordered writes.
         for execution in into_call_order(executions) {
@@ -9479,6 +9569,23 @@ async fn run_chat_inner(
         finish_task_state.record_regular_tools();
         logical_step = logical_step.saturating_add(1);
         completed_turns = completed_turns.saturating_add(1);
+
+        // A queued handoff starts recipients only after this member's turn.
+        // Models sometimes try to wait by calling read_room_messages; stop
+        // that polling loop and let the room scheduler advance immediately.
+        if end_room_turn_for_handoff {
+            publish(
+                &hub,
+                &channel,
+                &stream_id,
+                EventKind::Done {
+                    stop_reason: "handoff_queued".into(),
+                },
+            )
+            .await;
+            result = Ok(assistant_content);
+            break;
+        }
 
         // Match Electron's loop detector: identical tool calls with identical
         // results for several consecutive turns indicate an agent loop rather

@@ -22,6 +22,7 @@ const ICONS: Record<string, string> = {
   // identity glyphs
   robot: '<rect x="3" y="4" width="10" height="8.5" rx="2"/><path d="M8 1.6V4M6.4 8.2h.01M9.6 8.2h.01"/>',
   people: '<circle cx="5.6" cy="5.8" r="2.1"/><path d="M2.2 13c.5-2.3 1.8-3.4 3.4-3.4s2.9 1.1 3.4 3.4"/><path d="M10.3 4.1a2.1 2.1 0 1 1 .9 4M10.9 9.7c1.5.3 2.5 1.4 2.9 3.3"/>',
+  groupPlus: '<circle cx="4.9" cy="5.6" r="1.9"/><path d="M1.6 12.9c.4-2.1 1.6-3.2 3.3-3.2s2.9 1.1 3.3 3.2"/><path d="M9.1 4a1.8 1.8 0 0 1 1.6 1.8c0 .9-.5 1.6-1.3 1.8M10.4 9.8c1.3.3 2.1 1.3 2.5 2.8"/><path d="M12.9 6.1v3.2M11.3 7.7h3.2"/>',
   bubble: '<path d="M2.5 3.5h11v7h-6L4 13.5v-3H2.5z"/>',
   target: '<circle cx="8" cy="8" r="5.2"/><circle cx="8" cy="8" r="1.9"/>',
   // grouping-mode switcher + group actions
@@ -29,6 +30,9 @@ const ICONS: Record<string, string> = {
   cube: '<path d="M8 1.8l5.2 3v6.4l-5.2 3-5.2-3V4.8z"/><path d="M2.8 4.8L8 7.8l5.2-3M8 7.8v6.4"/>',
   arrowUpRight: '<path d="M5.5 10.5L10.5 5.5M6.2 5.5h4.3v4.3"/>',
   pencil: '<path d="M3 13l.7-2.8 6.8-6.8a1.1 1.1 0 0 1 1.6 0l.5.5a1.1 1.1 0 0 1 0 1.6L5.8 12.3z"/>',
+  settings: '<path d="M2.5 4.6h11M2.5 8h11M2.5 11.4h11"/><circle cx="6.1" cy="4.6" r="1.3"/><circle cx="9.9" cy="8" r="1.3"/><circle cx="5.5" cy="11.4" r="1.3"/>',
+  // three-dot overflow entry (group settings drawer); solid dots, so no stroke
+  more: '<circle cx="3.3" cy="8" r="1.25" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1.25" fill="currentColor" stroke="none"/><circle cx="12.7" cy="8" r="1.25" fill="currentColor" stroke="none"/>',
   // AI organize (folder mode)
   wand: '<path d="M3 13l7.2-7.2M9.4 3.2l.55 1.25 1.25.55-1.25.55-.55 1.25-.55-1.25-1.25-.55 1.25-.55zM12.9 8.1l.4.9.9.4-.9.4-.4.9-.4-.9-.9-.4.9-.4z"/>'
 }

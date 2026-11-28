@@ -19,6 +19,7 @@ export interface GroupSidebarItem {
   conversationId: string | null
   title: string
   subtitle: string
+  groupType?: 'online' | 'local'
   searchText: string
   icon: string
   isStreaming: boolean

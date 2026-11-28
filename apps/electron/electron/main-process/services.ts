@@ -1,4 +1,5 @@
 import { app, ipcMain, shell } from 'electron'
+import { randomUUID } from 'node:crypto'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -33,6 +34,7 @@ import { ScheduledTaskService } from '../../src/main/scheduler/scheduled-task-se
 import { LongTermGoalService } from '../../src/main/long-term-goals/long-term-goal-service.js'
 import { DailySuggestionStore } from '../../src/main/settings/daily-suggestion-store.js'
 import { DailySuggestionService, type SuggestionProjectContext } from '../../src/main/suggestions/daily-suggestion-service.js'
+import { OnlineGroupService } from '../../src/main/online-groups/online-group-service.js'
 import { getMainLocale } from '../../src/main/i18n/main-i18n.js'
 import type { AppUpdateState } from '../../src/shared/app-update-types.js'
 import type { BrowserAutomationAction, BrowserAutomationArticle, BrowserAutomationActionResult, BrowserAutomationSearchResults, BrowserAutomationSnapshot, PageAutomationRendererRequest, PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
@@ -1152,6 +1154,83 @@ export async function initializeServices (): Promise<void> {
       }
     }
   })
+
+  mainState.onlineGroupService = new OnlineGroupService({
+    userDataPath,
+    port: LAN_SERVER_PORT,
+    appVersion: app.getVersion(),
+    resolveHarness: async () => {
+      await startSelectedRustHarness()
+      return mainState.rustHarness
+    },
+    getAgent: agentId => mainState.agentStore?.get(agentId) || null,
+    onChanged: event => broadcastToAppWindows('onlineGroups:changed', event)
+  })
+  mainState.onlineGroupService.setAgentExecutor(async ({ agentId, task, context, groupId }) => {
+    const engine = mainState.rustHarnessEngine
+    if (!engine) throw new Error('Rust harness is unavailable.')
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5 * 60_000)
+    try {
+      const message = await engine.chat([{ role: 'user', content: task }], {
+        agentId,
+        conversationId: `online-agent-${agentId}-${randomUUID()}`,
+        sessionId: `online-agent-${agentId}-${randomUUID()}`,
+        systemPromptSections: [context],
+        deniedToolNames: ['ask_user'],
+        customTools: [{
+          definition: {
+            name: 'delegate_group_agent',
+            description: 'Delegate a bounded task to another online-group Agent. The target owner must approve when the Agent belongs to another user. Only use this with an agentMemberId from the group context.',
+            parameters: {
+              type: 'object',
+              properties: {
+                target_agent_member_id: { type: 'string', description: 'Exact agentMemberId from the online-group context.' },
+                task: { type: 'string', description: 'Self-contained task and expected result.' }
+              },
+              required: ['target_agent_member_id', 'task'],
+              additionalProperties: false
+            }
+          },
+          handler: async args => {
+            const service = mainState.onlineGroupService
+            if (!service) throw new Error('Online group service is unavailable.')
+            const targetMemberId = typeof args.target_agent_member_id === 'string' ? args.target_agent_member_id.trim() : ''
+            const delegatedTask = typeof args.task === 'string' ? args.task.trim() : ''
+            const group = (await service.getState()).groups.find(item => item.id === groupId)
+            const target = group?.members.find(member => member.id === targetMemberId && member.kind === 'agent')
+            if (!group || !target) throw new Error('The target Agent is not a member of this online group.')
+            if (target.peerId === service.getIdentity().instanceId) {
+              throw new Error('Agents cannot use delegate_group_agent for another Agent owned by the same user.')
+            }
+            const result = await service.createDelegation(groupId, targetMemberId, delegatedTask, agentId)
+            return {
+              status: 'pending_owner_approval',
+              delegation_id: result.delegation.id,
+              target_agent: result.delegation.toAgentName,
+              owner_approval_required: true
+            }
+          }
+        }],
+        autoApprovePermissions: true,
+        abortSignal: controller.signal
+      })
+      let reply = ''
+      if (typeof message.content === 'string') {
+        reply = message.content.trim()
+      } else if (Array.isArray(message.content)) {
+        reply = message.content
+          .map(part => typeof part === 'string' ? part : part.type === 'text' ? part.text : '')
+          .filter(Boolean)
+          .join('\n')
+          .trim()
+      }
+      if (!reply) throw new Error('Online group Agent returned no visible result.')
+      return reply
+    } finally {
+      clearTimeout(timer)
+    }
+  })
   mainState.scheduledTaskService = new ScheduledTaskService({
     store: mainState.scheduledTaskStore,
     aiEngine: mainState.rustHarnessEngine!,
@@ -1300,6 +1379,7 @@ export async function initializeServices (): Promise<void> {
     systemService: mainState.systemService!,
     settingsStore: mainState.settingsStore!,
     imGatewayService: mainState.imGatewayService!,
+    onlineGroupService: mainState.onlineGroupService!,
     resolveRustProjectControl: async (): Promise<LanProjectControl | null> => {
       const engine = await startSelectedRustHarness()
       return engine ? mainState.rustHarness : null
@@ -1307,5 +1387,8 @@ export async function initializeServices (): Promise<void> {
   })
 
   await mainState.lanServer.start()
+  await mainState.onlineGroupService.start().catch(error => {
+    console.warn('[main] Online group discovery startup failed:', error)
+  })
   console.log('[main] LAN server started on port 19527')
 }

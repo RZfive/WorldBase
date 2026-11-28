@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, inject, ref, type Ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { formatRoomHandoffMessage } from '../../../../shared/group-mentions'
 import { renderMarkdown } from '../markdown'
 import type { ChatMessageBlock } from '../types'
 
@@ -9,9 +10,14 @@ const props = defineProps<{
 }>()
 
 const { t } = useI18n()
+const chatMentionNames = inject<Readonly<Ref<string[]>>>('chatMentionNames', ref([]))
 const msg = computed(() => props.block.peerMessage)
 const isHandoff = computed(() => msg.value.kind === 'handoff')
 const requestHtml = computed(() => renderMarkdown(msg.value.request))
+const handoffHtml = computed(() => renderMarkdown(
+  formatRoomHandoffMessage(msg.value.toAgentName, msg.value.request),
+  { mentionNames: [...chatMentionNames.value, msg.value.toAgentName] }
+))
 const responseHtml = computed(() => renderMarkdown(msg.value.response || (msg.value.status === 'pending' ? t('chatUi.groupPeerPending') : t('chatUi.groupPeerNoReply'))))
 const statusLabel = computed(() => {
   if (msg.value.status === 'completed') return t('chatUi.groupStatusCompleted')
@@ -23,29 +29,37 @@ const statusLabel = computed(() => {
 </script>
 
 <template>
-  <section class="peer-message-card" :class="msg.status">
+  <div v-if="isHandoff" class="peer-mention-message">
+    <div class="markdown-body peer-message-turn-body" v-html="handoffHtml" />
+    <p v-if="msg.error" class="peer-message-error">{{ msg.error }}</p>
+  </div>
+  <section v-else class="peer-message-card" :class="msg.status">
     <div class="peer-message-header">
-      <span class="peer-message-badge">{{ $t(isHandoff ? 'chatUi.groupHandoffLabel' : 'chatUi.groupPeerLabel') }}</span>
-      <span class="peer-message-route">
-        {{ msg.fromAgentName }} → <span v-if="isHandoff" class="peer-message-mention">@{{ msg.toAgentName }}</span><span v-else>{{ msg.toAgentName }}</span>
-      </span>
+      <span class="peer-message-badge">{{ $t('chatUi.groupPeerLabel') }}</span>
+      <span class="peer-message-route">{{ msg.fromAgentName }} → {{ msg.toAgentName }}</span>
       <span class="peer-message-status" :data-status="msg.status">{{ statusLabel }}</span>
     </div>
     <div class="peer-message-exchange">
       <div class="peer-message-turn">
-        <div v-if="!isHandoff" class="peer-message-turn-label">{{ msg.fromAgentName }}</div>
+        <div class="peer-message-turn-label">{{ msg.fromAgentName }}</div>
         <div class="markdown-body peer-message-turn-body" v-html="requestHtml" />
       </div>
-      <div v-if="!isHandoff && (msg.response || msg.status !== 'pending')" class="peer-message-turn response">
+      <div v-if="msg.response || msg.status !== 'pending'" class="peer-message-turn response">
         <div class="peer-message-turn-label">{{ msg.toAgentName }}</div>
         <div class="markdown-body peer-message-turn-body" v-html="responseHtml" />
       </div>
-      <p v-if="isHandoff && msg.error" class="peer-message-error">{{ msg.error }}</p>
     </div>
   </section>
 </template>
 
 <style scoped>
+.peer-mention-message {
+  width: 100%;
+}
+.peer-mention-message .peer-message-turn-body {
+  font-size: inherit;
+  line-height: inherit;
+}
 .peer-message-card {
   width: 100%;
   padding: 10px 12px;
@@ -78,7 +92,6 @@ const statusLabel = computed(() => {
   font-weight: 700;
   color: var(--app-text-strong);
 }
-.peer-message-mention { color: var(--app-accent-strong); }
 .peer-message-error { color: var(--app-danger); font-size: 0.8em; overflow-wrap: anywhere; }
 .peer-message-status {
   font-size: 0.68em;

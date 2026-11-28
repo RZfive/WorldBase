@@ -36,6 +36,8 @@ const emit = defineEmits<{
   (e: 'openAnnotationThread', payload: { annotationId: string; anchor: AnnotationAnchor }): void
 }>()
 
+const chatMentionNames = inject<Readonly<Ref<string[]>>>('chatMentionNames', ref([]))
+
 const { t } = useI18n()
 const exportCaptureRef = ref<HTMLElement | null>(null)
 const markdownExportState = ref<ExportState>('idle')
@@ -98,7 +100,7 @@ function withStreamCaret (html: string): string {
 }
 
 function renderSegmentHtml (text: string): string {
-  const html = renderMarkdown(text)
+  const html = renderMarkdown(text, { mentionNames: chatMentionNames.value })
   return props.isStreamingBlock ? withStreamCaret(html) : html
 }
 

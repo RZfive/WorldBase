@@ -11,6 +11,7 @@ import {
 } from '../../../../shared/coding-status-types.js'
 import ProviderModelDropdown from './ProviderModelDropdown.vue'
 import ProviderDropdown from './ProviderDropdown.vue'
+import SidebarIcon from './SidebarIcon.vue'
 
 interface ChannelBindingOption {
   id: string
@@ -47,6 +48,19 @@ const props = defineProps<{
   temperature?: number | null
   providerDefaultTemperature?: number
   isGroupConversation?: boolean
+  onlineGroupMode?: boolean
+  pendingApprovalCount?: number
+  /**
+   * Group member list (group conversations only). The list is a side panel
+   * under this row: `groupMembersCollapsed` says whether it is folded away,
+   * `groupMembersHovered` whether the pointer is over it, which is what
+   * reveals the fold toggle.
+   */
+  groupMemberCount?: number
+  groupMembersCollapsed?: boolean
+  groupMembersHovered?: boolean
+  /** Lit while the group settings drawer that the three-dot button opens is out. */
+  groupSettingsOpen?: boolean
   /** New-conversation agent switcher, pinned next to the agent name (design v1.7). */
   showAgentSelector?: boolean
   availableAgents?: AgentOption[]
@@ -66,6 +80,8 @@ const emit = defineEmits<{
   (e: 'openCodingDiff'): void
   (e: 'cancelCoding'): void
   (e: 'retryCoding'): void
+  (e: 'openGroupSettings'): void
+  (e: 'toggleGroupMembers'): void
 }>()
 
 function onChannelBindingChange (event: Event) {
@@ -290,6 +306,10 @@ onBeforeUnmount(() => {
       <div v-else class="header-agent-badge">
         <span class="header-agent-badge-label">{{ contextLabel }}</span>
       </div>
+      <span v-if="onlineGroupMode" class="header-online-group-tag">
+        <span aria-hidden="true" />
+        {{ $t('onlineGroups.onlineBadge') }}
+      </span>
 
       <!-- The model identity lives in the right-side provider pill; only show
            the detail line when it carries unique info (goal/group status). -->
@@ -466,7 +486,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div v-if="availableChannelBindings.length > 0" class="channel-binding-selector">
+      <div v-if="!onlineGroupMode && availableChannelBindings.length > 0" class="channel-binding-selector">
         <select :value="selectedChannelBindingId" class="select-input" @change="onChannelBindingChange">
           <option value="">{{ $t('chatUi.noImBinding') }}</option>
           <option v-for="binding in availableChannelBindings" :key="binding.id" :value="binding.id">
@@ -475,8 +495,7 @@ onBeforeUnmount(() => {
         </select>
       </div>
 
-      <!-- Provider switch capsule on the far side of the header (design v1.7). -->
-      <div v-if="showProviderSelector && providers && providers.length > 0" class="header-model-picker">
+      <div v-if="!onlineGroupMode && showProviderSelector && providers && providers.length > 0" class="header-model-picker">
         <ProviderModelDropdown
           :providers="providers"
           :active-provider-id="activeProviderId"
@@ -493,6 +512,45 @@ onBeforeUnmount(() => {
           @update:temperature="emit('update:temperature', $event)"
         />
       </div>
+
+      <!-- Group conversations, QQ-style: the last two controls own the side
+           panel under this row. The fold toggle hides until the member list is
+           hovered (it stays put once the list is folded, to bring it back);
+           the three-dot button toggles the group settings drawer. -->
+      <button
+        v-if="isGroupConversation"
+        class="header-group-action header-group-members"
+        :class="{ collapsed: groupMembersCollapsed, revealed: groupMembersHovered }"
+        type="button"
+        :title="groupMembersCollapsed ? $t('onlineGroups.expandMembers') : $t('onlineGroups.collapseMembers')"
+        :aria-label="groupMembersCollapsed ? $t('onlineGroups.expandMembers') : $t('onlineGroups.collapseMembers')"
+        :aria-expanded="!groupMembersCollapsed"
+        @click="emit('toggleGroupMembers')"
+      >
+        <SidebarIcon name="people" :size="14" />
+        <span v-if="groupMemberCount" class="header-group-members-count">{{ groupMemberCount }}</span>
+      </button>
+
+      <button
+        v-if="isGroupConversation"
+        class="header-group-action header-group-more"
+        :class="{ active: groupSettingsOpen }"
+        type="button"
+        :title="(pendingApprovalCount || 0) > 0
+          ? $t('onlineGroups.approvalPending', { count: pendingApprovalCount })
+          : (onlineGroupMode ? $t('onlineGroups.groupSettings') : $t('localGroupSettings.title'))"
+        :aria-label="onlineGroupMode ? $t('onlineGroups.groupSettings') : $t('localGroupSettings.title')"
+        :aria-expanded="Boolean(groupSettingsOpen)"
+        aria-haspopup="dialog"
+        @click="emit('openGroupSettings')"
+      >
+        <SidebarIcon name="more" :size="16" />
+        <span
+          v-if="(pendingApprovalCount || 0) > 0"
+          class="header-group-approval"
+          :aria-label="$t('onlineGroups.approvalPending', { count: pendingApprovalCount })"
+        >{{ pendingApprovalCount }}</span>
+      </button>
     </div>
   </div>
 </template>
@@ -565,6 +623,27 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   font-size: 0.72rem;
   font-weight: 500;
+}
+
+.header-online-group-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, #3bb273 32%, var(--app-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, #3bb273 10%, transparent);
+  color: color-mix(in srgb, #3bb273 82%, var(--app-text-strong));
+  font-size: 0.62rem;
+  font-weight: 650;
+}
+
+.header-online-group-tag > span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #3bb273;
 }
 
 .chat-header-copy {
@@ -651,6 +730,97 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+/* Shared chrome for the two group-only controls at the row's right end. */
+.header-group-action {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--app-panel) 72%, transparent);
+  color: var(--app-text-muted);
+  cursor: pointer;
+  font: inherit;
+  transition: opacity 0.16s ease, border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+
+.header-group-action:hover,
+.header-group-action.active {
+  border-color: color-mix(in srgb, var(--app-accent) 54%, var(--app-border));
+  background: var(--app-accent-soft);
+  color: var(--app-accent-strong);
+}
+
+.header-group-action:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
+}
+
+.header-group-more {
+  width: 30px;
+}
+
+/*
+ * Member-list fold toggle: a people glyph plus the headcount. While the list
+ * is out it stays out of sight — hovering the list (or this spot directly
+ * above it) reveals it. Once the list is folded it stays on screen, since it
+ * is the only way to bring the list back.
+ */
+.header-group-members {
+  gap: 4px;
+  min-width: 30px;
+  padding: 0 8px;
+  font-size: 0.68rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+}
+
+/* Invisible hit bridge down to the member list, so the pointer can travel
+   from the list up to the toggle without the toggle blinking away. */
+.header-group-members::after {
+  content: '';
+  position: absolute;
+  top: -11px;
+  right: -5px;
+  bottom: -11px;
+  left: -5px;
+}
+
+.header-group-members:hover,
+.header-group-members.revealed,
+.header-group-members.collapsed {
+  opacity: 1;
+}
+
+.header-group-members-count {
+  line-height: 1;
+}
+
+.header-group-approval {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--app-danger-strong, #d33d49);
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 750;
+  text-align: center;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--app-chat-canvas) 88%, transparent);
 }
 
 /* Compact coding-run pill: status at a glance, details in the popover. */

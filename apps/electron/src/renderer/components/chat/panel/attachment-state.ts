@@ -2,6 +2,7 @@ import type { Ref } from 'vue'
 import type { ComposerTranslation } from 'vue-i18n'
 import {
   MAX_IMAGE_ATTACHMENT_SIZE_BYTES,
+  MAX_DOCUMENT_ATTACHMENT_SIZE_BYTES,
   formatFileSize,
   getElectronFilePath,
   isImageAttachment,
@@ -58,6 +59,11 @@ export function createChatAttachmentState (options: ChatAttachmentStateOptions) 
               message: (error as Error).message
             })
           }
+          continue
+        }
+
+        if (file.size > MAX_DOCUMENT_ATTACHMENT_SIZE_BYTES) {
+          uploadFeedback.value = t('chatUi.uploadDocumentTooLarge', { name: file.name })
           continue
         }
 

@@ -33,6 +33,7 @@ AI 驱动的项目生成器与管理平台。用自然语言描述需求，World
 - 📊 **数据分析** — 直接查询子项目数据库，做统计与趋势分析
 - ⚙️ **进程管理** — 自动管理子项目启停与端口分配
 - 🌐 **局域网访问** — 内置 LAN Server，局域网内直接访问所有项目
+- 🤝 **在线群组** — 局域网内发现 WorldBase，真人群聊/文件传输，成员自带 Agent 并在所有者批准后跨用户委派
 - 📱 **三端同核** — Electron 桌面端（Windows/macOS/Linux）、Flutter 移动端（Android/iOS/macOS）、Rust CLI，共用同一个 Rust Agent 核心
 
 ## 架构
@@ -116,7 +117,7 @@ pnpm run test:e2e:macos   # macOS GUI 端到端测试
 ## 文档
 
 - [用户手册](docs/user-manual.md)
-- [Harness 架构](HARNESS.md) · [Rust Harness 架构](docs/rust-harness-architecture.md) · [开发指南](docs/rust-harness-development.md)
+- [Harness 架构](HARNESS.md) · [Rust Harness 架构](docs/rust-harness-architecture.md) · [在线群组](docs/lan-online-groups.md) · [开发指南](docs/rust-harness-development.md)
 - 更多设计文档见 [docs/](docs/)
 
 ## 贡献

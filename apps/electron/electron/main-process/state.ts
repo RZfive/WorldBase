@@ -33,6 +33,7 @@ import type { DailySuggestionService } from '../../src/main/suggestions/daily-su
 import type { PageAutomationRendererResult } from '../../src/shared/page-automation-types.js'
 import type { WorkspaceTabControlResult } from '../../src/shared/workspace-control-types.js'
 import type { LocalAgentRegistry } from '../../src/main/local-agents/registry.js'
+import type { OnlineGroupService } from '../../src/main/online-groups/online-group-service.js'
 import { t } from '../../src/main/i18n/main-i18n.js'
 
 export type WindowBounds = ReturnType<BrowserWindow['getBounds']>
@@ -62,7 +63,6 @@ export type ActiveWindowWidthAnimation = {
 export interface ActiveChatSession {
   abortController: AbortController
   authMode: { current: AIExecutionAuthMode }
-  fixedAuthMode?: boolean
 }
 
 export const projectWindows = new Map<string, BrowserWindow>()
@@ -116,6 +116,7 @@ export const mainState = {
   mcpService: null as MCPService | null,
   terminalManager: null as TerminalManager | null,
   localAgentRegistry: null as LocalAgentRegistry | null,
+  onlineGroupService: null as OnlineGroupService | null,
   isClosingMainWindow: false,
   isQuitCleanupRunning: false,
   hasFinishedQuitCleanup: false

@@ -1,4 +1,5 @@
 import type { AgentGroupDirectReply, AgentGroupProgressSnapshot, AgentGroupTranscript, AgentGroupUserInjection, AgentSidechatSession, AuthRequestPayload, RoomReplyStatus, SharedBoardSnapshot } from '../../../shared/agent-workspace-types.js'
+import type { OnlineGroupAttachment, OnlineGroupDelegation } from '../../../shared/online-group-types.js'
 
 export type MessageContent = string | ChatContentPart[]
 
@@ -81,6 +82,14 @@ export type ChatMessageBlock =
   | { id: string; kind: 'group_direct_reply'; directReply: AgentGroupDirectReply }
   | { id: string; kind: 'group_user_injection'; injection: AgentGroupUserInjection }
   | { id: string; kind: 'group_peer_message'; peerMessage: import('../../../shared/agent-workspace-types.js').AgentGroupMessage }
+  | { id: string; kind: 'online_group_attachment'; groupId: string; attachment: OnlineGroupAttachment }
+  | {
+    id: string
+    kind: 'online_group_delegation'
+    delegation: OnlineGroupDelegation
+    ownerName?: string
+    targetIcon?: string
+  }
   | { id: string; kind: 'web_search'; query: string; engine: string; results: WebSearchResultItem[] }
   | { id: string; kind: 'web_fetch'; query?: string; result: WebFetchResultEntry }
   | { id: string; kind: 'attachment'; fileName: string; fileType: string; fileSizeLabel: string; previewText: string }

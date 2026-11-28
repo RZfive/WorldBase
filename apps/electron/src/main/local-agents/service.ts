@@ -20,6 +20,31 @@ export async function discoverLocalAgentSessions (agentId: string, workspaceRoot
   return await registry.discoverSessions(agentId, root)
 }
 
+export async function setRoomLocalWorkspace (
+  groupId: string,
+  workspaceRoot: string,
+  workspaceRootName?: string
+): Promise<AgentGroupDefinition> {
+  const client = mainState.rustHarness
+  if (!client) throw new Error('Rust harness client is unavailable.')
+  const group = await client.getAgentGroup(groupId)
+  if (!group) throw new Error('Group not found.')
+  const root = await realpath(await assertFolderWorkspaceRoot(workspaceRoot))
+  if (group.workspaceRoot) {
+    const previousRoot = await realpath(await assertFolderWorkspaceRoot(group.workspaceRoot))
+    if (previousRoot !== root) {
+      mainState.localAgentRegistry?.releaseRoomSessions(localRoomSessionKey(group))
+    }
+  }
+  const saved = await client.saveAgentGroup({
+    ...group,
+    workspaceRoot: root,
+    workspaceRootName: workspaceRootName?.trim().slice(0, 120) || root.split(/[\\/]/).filter(Boolean).pop() || root
+  })
+  mainState.agentGroupStore?.save(saved)
+  return saved
+}
+
 export async function inviteRoomLocalWorker (
   agentId: string,
   groupId: string,
@@ -41,6 +66,9 @@ export async function inviteRoomLocalWorker (
   const { localAgentRegistry: registry, rustHarness: client } = mainState
   if (!registry || !client) throw new Error('Local Agent Registry is unavailable.')
   if (!(await registry.get(agentId))?.available) throw new Error(`Local agent is unavailable: ${agentId}`)
+  const group = await client.getAgentGroup(groupId)
+  if (!group?.workspaceRoot) throw new Error(t('mainDialog.roomWorkspaceRequiredForCli'))
+  await assertFolderWorkspaceRoot(group.workspaceRoot)
   signal?.throwIfAborted()
   const result = await client.addRoomLocalWorker(groupId, kind, { role, instructions, exitAfterTask: options.exitAfterTask }, nativeGroupId)
   mainState.agentGroupStore?.save(result.group)
@@ -74,6 +102,7 @@ export async function addLocalAgentToGroup (agentId: string, groupId: string, re
   if (!group) throw new Error('Group not found.')
   const sessionKey = localRoomSessionKey(group)
   let resumeRoot: string | undefined
+  let roomWorkspaceGroup = group
   if (resume) {
     if (!profile.supportsSessionDiscovery) throw new Error('This platform does not expose supported session discovery.')
     if (!resume.sessionId.trim() || !resume.workspaceRoot.trim()) throw new Error('A session and workspace are required.')
@@ -82,6 +111,19 @@ export async function addLocalAgentToGroup (agentId: string, groupId: string, re
     const sessions = bound?.sessionId === resume.sessionId ? [] : await registry.discoverSessions(agentId, resumeRoot)
     if (bound?.sessionId !== resume.sessionId && !sessions.some(item => item.sessionId === resume.sessionId)) {
       throw new Error('The selected local session is not available for this platform and workspace.')
+    }
+    if (group.workspaceRoot) {
+      const persistedRoot = await realpath(await assertFolderWorkspaceRoot(group.workspaceRoot))
+      if (persistedRoot !== resumeRoot) {
+        throw new Error('The selected CLI session belongs to a different room workspace.')
+      }
+    } else {
+      roomWorkspaceGroup = await client.saveAgentGroup({
+        ...group,
+        workspaceRoot: resumeRoot,
+        workspaceRootName: resumeRoot.split(/[\\/]/).filter(Boolean).pop() || resumeRoot
+      })
+      mainState.agentGroupStore?.save(roomWorkspaceGroup)
     }
   }
   signal?.throwIfAborted()

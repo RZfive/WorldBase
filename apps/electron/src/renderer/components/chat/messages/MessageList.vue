@@ -19,6 +19,8 @@ const props = defineProps<{
   assistantName?: string
   editingMessageId?: string | null
   groupMode?: boolean
+  mentionNames?: string[]
+  readonly?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -57,6 +59,7 @@ const writtenFilePaths = computed<string[]>(() => {
   return Array.from(paths)
 })
 provide('chatWrittenFilePaths', writtenFilePaths)
+provide('chatMentionNames', computed(() => props.mentionNames || []))
 const activeMermaidPreview = ref<{ code: string } | null>(null)
 const scrollTop = ref(0)
 const viewportVisible = ref(false)
@@ -384,6 +387,10 @@ function buildSelectionLocator (selectedText: string, selection: Selection, bloc
 }
 
 function showSelectionToolbar (event?: MouseEvent): void {
+  if (props.readonly) {
+    hideSelectionToolbar()
+    return
+  }
   // Right-button release belongs to the context menu, not this toolbar.
   if (event && event.button !== 0) return
   const text = getChatSelectionText()
@@ -711,6 +718,7 @@ onUnmounted(() => {
             :assistant-icon="props.assistantIcon"
             :assistant-name="props.assistantName"
             :editing-message-id="props.editingMessageId"
+            :readonly="props.readonly"
             @respond-auth="(requestId, approved) => emit('respondAuth', requestId, approved)"
             @respond-sudo-password="(requestId, password) => emit('respondSudoPassword', requestId, password)"
             @toggle-thinking="toggleThinking"

@@ -13,6 +13,7 @@ import type { UsageRecordInput } from '../../src/main/settings/usage-store.js'
 import type { AgentDefinition, AgentGroupDefinition, MemoryEmbeddingRuntimeConfig, MemoryIndexStatus, MemoryEntry, MemorySearchScope, MemoryType } from '../../src/shared/agent-workspace-types.js'
 import type { LocalAgentKind, RoomLocalWorker, RoomLocalWorkerOptions } from '../../src/shared/local-agent-types.js'
 import type { ImageStudioGenerateRequest, ImageStudioTask } from '../../src/shared/image-studio-types.js'
+import type { LanDiscoverySnapshot, OnlineGroupPublicSummary } from '../../src/shared/online-group-types.js'
 import type { ToolDefinition } from '../../src/main/ai-harness/contracts.js'
 
 const moduleRequire = createRequire(import.meta.url)
@@ -661,6 +662,56 @@ export class RustHarnessClient {
       : []
   }
 
+  /** Start the harness-owned UDP multicast announcer. */
+  async startLanDiscovery (identity: {
+    instanceId: string
+    displayName: string
+    role: string
+    avatar: string
+    background: string
+    tags: string[]
+    baseUrl: string
+    appVersion: string
+    hostname: string
+    capabilities: string[]
+    groups: OnlineGroupPublicSummary[]
+  }): Promise<LanDiscoverySnapshot> {
+    await this.start()
+    return await this.request('lan.discovery.start', { identity }) as unknown as LanDiscoverySnapshot
+  }
+
+  async updateLanDiscovery (identity: {
+    instanceId: string
+    displayName: string
+    role: string
+    avatar: string
+    background: string
+    tags: string[]
+    baseUrl: string
+    appVersion: string
+    hostname: string
+    capabilities: string[]
+    groups: OnlineGroupPublicSummary[]
+  }): Promise<LanDiscoverySnapshot> {
+    await this.start()
+    return await this.request('lan.discovery.update', { identity }) as unknown as LanDiscoverySnapshot
+  }
+
+  async stopLanDiscovery (): Promise<LanDiscoverySnapshot> {
+    await this.start()
+    return await this.request('lan.discovery.stop', {}) as unknown as LanDiscoverySnapshot
+  }
+
+  async getLanDiscoveryStatus (): Promise<LanDiscoverySnapshot> {
+    await this.start()
+    return await this.request('lan.discovery.status', {}) as unknown as LanDiscoverySnapshot
+  }
+
+  async refreshLanDiscovery (): Promise<LanDiscoverySnapshot> {
+    await this.start()
+    return await this.request('lan.discovery.refresh', {}) as unknown as LanDiscoverySnapshot
+  }
+
   async getAgentGroup (id: string): Promise<AgentGroupDefinition | null> {
     const normalizedId = id.trim()
     if (!normalizedId) throw new Error('An Agent Workspace group id is required.')
@@ -980,21 +1031,39 @@ export class RustHarnessClient {
     return this.sessionToStream.has(sessionId) || this.startingSessions.has(sessionId)
   }
 
-  /** Wait until a mapped Rust stream emits `done`/`error` or the process exits. */
-  async waitForSessionEnd (sessionId: string, timeoutMs = 300_000): Promise<void> {
+  /**
+   * Wait until a mapped Rust stream emits `done`/`error` or the process exits.
+   * Native rooms can chain multiple local CLI workers, so the old five-minute
+   * ceiling abandoned healthy runs while Rust was still executing. Keep only
+   * a very high safety ceiling here; abort and harness exit settle immediately.
+   */
+  async waitForSessionEnd (sessionId: string, timeoutMs = 8 * 60 * 60_000): Promise<void> {
     if (!this.sessionToStream.has(sessionId)) return
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       let settled = false
-      const finish = () => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
+      let timer: ReturnType<typeof setTimeout> | null = null
+      const clearWait = () => {
+        if (timer) clearTimeout(timer)
         const waiters = this.terminalWaiters.get(sessionId)
         waiters?.delete(finish)
         if (waiters && waiters.size === 0) this.terminalWaiters.delete(sessionId)
+      }
+      const finish = () => {
+        if (settled) return
+        settled = true
+        clearWait()
         resolve()
       }
-      const timer = setTimeout(finish, timeoutMs)
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (settled) return
+          settled = true
+          clearWait()
+          reject(new Error(
+            `Rust native room did not finish within ${Math.round(timeoutMs / 60_000)} minutes.`
+          ))
+        }, timeoutMs)
+      }
       const waiters = this.terminalWaiters.get(sessionId) || new Set<() => void>()
       waiters.add(finish)
       this.terminalWaiters.set(sessionId, waiters)

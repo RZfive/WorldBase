@@ -14,7 +14,12 @@ import type {
   RoomMemberMessage,
   RoomReplyStatus
 } from '../../../src/shared/agent-workspace-types.js'
-import { resolveRoomAddress } from '../../../src/shared/group-mentions.js'
+import {
+  formatRoomHandoffMessage,
+  isVerbatimRoomForward,
+  resolveRoomAddress,
+  stripRedundantHandoffInstructions
+} from '../../../src/shared/group-mentions.js'
 import { localRoomSessionKey, nativeRoomId } from '../../../src/shared/room-context.js'
 import type { RoomLocalWorker, RoomLocalWorkspace } from '../../../src/shared/local-agent-types.js'
 import { getMessageText, truncateSectionText } from '../chat-message-utils.js'
@@ -224,12 +229,13 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
   const progressById = new Map(address.agentIds.map(id => [id, createRoomProgressItem(group.id, agentsById.get(id)!, totalRounds)]))
   const handoffs: AgentGroupMessage[] = []
   const handoffKeys = new Set<string>()
+  const announcedHandoffs = new Set<string>()
   const completedWorkers = new Set<string>()
   const workspaceGrants = new Map<string, Promise<boolean>>()
   const localWorkspace = input.localWorkspace ?? (input.context?.workspaceRoot
     ? { path: input.context.workspaceRoot, source: 'task' as const }
     : undefined)
-  const allowInvites = Boolean(input.requestWorkspaceApproval && localWorkspace)
+  const allowInvites = Boolean(input.requestWorkspaceApproval && localWorkspace && group.workspaceRoot)
   let lastSingleStatus: RoomReplyStatus | undefined
   let nativeGroupId = ''
   let currentRound = 0
@@ -264,14 +270,29 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
     }
   }
 
-  const queueHandoff = async (key: string, from: AgentDefinition, task: string, recipient: () => Promise<AgentDefinition>) => {
+  const queueHandoff = async (
+    key: string,
+    from: AgentDefinition,
+    task: string,
+    recipient: () => Promise<AgentDefinition>,
+    options: { autoCallback?: boolean } = {}
+  ) => {
     if (handoffKeys.has(key)) return null
     if (handoffKeys.size >= 25) throw new Error(t('mainDialog.roomHandoffLimit'))
     if (currentRound >= totalRounds) throw new Error(t('mainDialog.roomNoRoundsForHandoff'))
     handoffKeys.add(key)
     try {
+      const deliveredTask = stripRedundantHandoffInstructions(task) || request
+      if (isVerbatimRoomForward(deliveredTask, request)) {
+        throw new Error('Handoff must assign a specific subtask. Do not forward the user request.')
+      }
       const to = await recipient()
-      await client.recordRoomHandoff(nativeGroupId, from.id, to.id, task)
+      const returningToRequester = handoffs.some(handoff => (
+        handoff.fromAgentId === to.id
+        && handoff.toAgentId === from.id
+        && handoff.round <= currentRound
+      ))
+      await client.recordRoomHandoff(nativeGroupId, from.id, to.id, deliveredTask)
       const handoff: AgentGroupMessage = {
         id: randomUUID(),
         kind: 'handoff',
@@ -280,14 +301,14 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
         fromAgentName: from.name,
         toAgentId: to.id,
         toAgentName: to.name,
-        request: task,
+        request: deliveredTask,
         response: '',
         status: 'pending',
         round: currentRound + 1,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        ...((options.autoCallback ?? returningToRequester) ? { autoCallback: true } : {})
       }
       handoffs.push(handoff)
-      onProgress?.({ type: 'group_peer_message', peerMessage: { ...handoff } })
       return to
     } catch (error) {
       handoffKeys.delete(key)
@@ -328,9 +349,11 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
       workspace: localWorkspace,
       registry: input.localAgentRegistry,
       allowInvites,
+      userRequest: request,
       authorizeWorkspace: async () => {
         signal.throwIfAborted()
         if (!localWorkspace || !input.requestWorkspaceApproval) throw new Error(t('mainDialog.roomApprovalRequired'))
+        if (currentAuthMode() === 'auto') return
         let approval = workspaceGrants.get(agent.id)
         if (!approval) {
           approval = input.requestWorkspaceApproval({
@@ -355,17 +378,24 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
       )
     })]
   }
-  const roomMemberRoster = agents.map(agent => `@${agent.name} (${agent.id})`).join(', ')
+  const roomMemberRoster = agents.map(agent => (
+    `- @${agent.name} (${agent.id}): ${agent.description?.trim() || 'No additional role description'}`
+  )).join('\n')
   const roomCollaborationSections = agents.length > 1
     ? [
         '- Work as an autonomous teammate. Complete your own part, then check whether the next step belongs to another member.',
-        '- Proactively call handoff_room_task when the next step needs another member’s execution, specialist input, discussion, review, verification, or decision. Include the concrete task, current context, evidence, and acceptance criteria.',
+        '- Treat the user message as the overall goal, not as text to forward. First decide and do your own contribution, then split concrete subtasks for collaborators.',
+        '- Never forward or lightly paraphrase the user’s original request as a handoff. Each handoff must state the recipient’s specific responsibility, relevant inputs/constraints, and the real deliverable or evidence you need.',
+        '- Proactively call handoff_room_task when the next step needs another member’s execution, specialist input, discussion, review, verification, or decision. Its task must contain the concrete request, current context, evidence, and acceptance criteria; the room displays it as your direct @member message.',
+        '- The runtime already injects every member’s name, role description and persona. In a handoff, write only the concrete task and useful context/evidence. Never write role-play, identity, greeting, tone, formatting, or “please act as X/introduce yourself” instructions for the recipient; include acceptance criteria only when they are real deliverables of the task.',
         '- For multi-step or cross-domain work, split it into concrete parts and hand off independent parts immediately. Do not wait for the user to name every participant.',
-        '- Keep the room moving through handoffs until the goal is complete or a real blocker requires a user decision.',
+        '- Queue every needed handoff in the current turn, then finish this turn immediately. Recipients start only after your turn ends.',
+        '- The runtime returns each recipient’s result to you as a visible @reply in a later round. Do not read the room, wait, or poll for that event; simply end your current turn after queueing the handoff.',
+        '- Do not call read_room_messages, wait, poll, or read the transcript to check for a recipient’s reply in the same turn. Never impersonate or invent their answer.',
         '- Before calling ask_user, check whether a safe, reversible default exists. If it does, choose it, state the assumption, and keep working; do not pause for confirmation or preference-only questions.',
         '- When an answer truly blocks the next step, bundle every current blocking decision into one ask_user call so the user can answer them together.',
         '- Do not hand coordination back to the user. Do not ask the user to @ someone, relay a request, or decide who should continue when you can hand off directly.',
-        '- After a handoff, briefly state what you handed off and to whom. Do not speak or claim completion for the recipient.',
+        '- The handoff itself is already visible as your @member message. Add only a brief result or next-step note if needed; do not repeat the task or emit a separate handoff report. Do not speak or claim completion for the recipient.',
         '- Reply to the user directly only when your part is complete and no follow-up is needed, or when you are genuinely blocked on missing user input, authorization, or a user-owned decision.'
       ]
     : [
@@ -383,7 +413,7 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
     systemPromptSections: [
       ...(input.context?.systemPromptSections || []),
       '## Shared room collaboration',
-      `Room members: ${roomMemberRoster}`,
+      `Room members:\n${roomMemberRoster}`,
       ...roomCollaborationSections,
       '- If one message names several members with different tasks, perform only the task addressed to you.',
       '- Stay within the current request and later user clarifications. Use read_room_messages when earlier messages are relevant.',
@@ -434,8 +464,19 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
       }
       publishProgress()
       const replies = new Map<string, string>()
+      const visibleAgentText = new Map<string, string>()
       let roundTerminal: 'complete' | 'error' | undefined
       let roundError: string | undefined
+
+      const takeHandoffMessages = (memberId: string, roundNumber: number): string => {
+        const pending = handoffs.filter(handoff => (
+          handoff.fromAgentId === memberId &&
+          handoff.round === roundNumber + 1 &&
+          !announcedHandoffs.has(handoff.id)
+        ))
+        for (const handoff of pending) announcedHandoffs.add(handoff.id)
+        return pending.map(handoff => formatRoomHandoffMessage(handoff.toAgentName, handoff.request)).join('\n\n')
+      }
 
       await client.startNativeGroupRound({
         sessionId,
@@ -471,13 +512,30 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
             const member = agentsById.get(id)
             if (!member || !content.trim()) return
             const item = progressById.get(id)
-            replies.set(id, content)
+            const primaryAssignment = assignments.find(handoff => (
+              handoff.toAgentId === id
+              && !handoff.autoCallback
+              && handoff.fromAgentId !== id
+            ))
+            const source = primaryAssignment ? agentsById.get(primaryAssignment.fromAgentId) : undefined
+            const alreadyMentionsSource = source
+              ? (() => {
+                  const address = resolveRoomAddress(content, [...agentsById.values()], group.coordinatorAgentId)
+                  return address.explicit && address.agentIds.includes(source.id)
+                })()
+              : false
+            const replyContent = source && !alreadyMentionsSource
+              ? formatRoomHandoffMessage(source.name, content)
+              : content
+            const visibleContent = [takeHandoffMessages(id, round), replyContent].filter(Boolean).join('\n\n')
+            replies.set(id, visibleContent)
+            visibleAgentText.set(id, content)
             if (item) {
               item.completedRounds = Math.max(item.completedRounds, round)
-              item.summary = truncateSectionText(content, 220)
+              item.summary = truncateSectionText(visibleContent, 220)
               updateRoomProgressItem(item, 'completed', t('mainDialog.groupProgressRoundDone'), item.summary)
             }
-            publishReply(member, content)
+            publishReply(member, visibleContent)
             publishProgress()
           } else if (frame.kind === 'group_member_failed') {
             const item = progressById.get(stringValue(frame.agentId))
@@ -490,6 +548,11 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
           } else if (frame.kind === 'error' && !childId) {
             roundError = stringValue(frame.message)
             roundTerminal = 'error'
+          } else if (frame.kind === 'notice') {
+            const notice = stringValue(frame.text)
+            if (notice.startsWith('Native group failed:') || notice.startsWith('Persist group message failed:')) {
+              roundError ||= notice
+            }
           } else if (frame.kind === 'done') {
             if (frame.stopReason === 'group_complete') roundTerminal = 'complete'
             if (frame.stopReason === 'group_error') roundTerminal = 'error'
@@ -501,9 +564,81 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
       if (roundTerminal !== 'complete') throw new Error(roundError || 'Rust native room ended without a successful round.')
 
       for (const id of roundMemberIds) {
+        const handoffMessage = takeHandoffMessages(id, round)
+        if (!handoffMessage) continue
+        const member = agentsById.get(id)
+        if (!member) continue
+        replies.set(id, handoffMessage)
+        const item = progressById.get(id)
+        if (item && item.status !== 'failed') {
+          item.completedRounds = Math.max(item.completedRounds, round)
+          item.summary = truncateSectionText(handoffMessage, 220)
+          updateRoomProgressItem(item, 'completed', t('mainDialog.groupProgressRoundDone'), item.summary)
+        }
+        publishReply(member, handoffMessage)
+      }
+      for (const id of roundMemberIds) {
         const item = progressById.get(id)!
         if (!replies.has(id) && item.status !== 'failed') {
           updateRoomProgressItem(item, 'failed', t('mainDialog.roomNoResult'))
+        }
+      }
+      // Models do not always call handoff_room_task even when told to. A
+      // direct @member sentence is still an actionable handoff, so route it
+      // through the same queue instead of silently ending the room without
+      // waking the addressed member.
+      for (const [sourceId, content] of visibleAgentText) {
+        const source = agentsById.get(sourceId)
+        if (!source) continue
+        const mentioned = resolveRoomAddress(content, [...agentsById.values()], group.coordinatorAgentId)
+        if (!mentioned.explicit) continue
+        const task = stripRedundantHandoffInstructions(mentioned.request.trim()) || mentioned.request.trim()
+        if (!task) continue
+        for (const targetId of mentioned.agentIds) {
+          if (targetId === sourceId) continue
+          const target = agentsById.get(targetId)
+          if (!target) continue
+          try {
+            await queueHandoff(
+              JSON.stringify([sourceId, targetId, task]),
+              source,
+              task,
+              async () => target
+            )
+          } catch (error) {
+            // The visible @ message is already in the transcript. A duplicate
+            // or an exhausted round budget must not fail the completed round.
+            console.warn('[room] Could not queue a visible @mention handoff:', error)
+          }
+        }
+      }
+      // A handoff is a request for work, not a fire-and-forget message. When
+      // the recipient returns without explicitly @mentioning the requester,
+      // create the same visible @reply as a real group chat and schedule the
+      // requester in the next round. No member needs to poll the transcript.
+      for (const assignment of assignments) {
+        if (assignment.autoCallback || currentRound >= totalRounds) continue
+        const source = agentsById.get(assignment.fromAgentId)
+        const target = agentsById.get(assignment.toAgentId)
+        const targetText = visibleAgentText.get(assignment.toAgentId)?.trim()
+        if (!source || !target || !targetText || source.id === target.id) continue
+        const explicitReturn = handoffs.some(handoff => (
+          handoff.fromAgentId === target.id
+          && handoff.toAgentId === source.id
+          && handoff.status === 'pending'
+          && handoff.round >= currentRound + 1
+        ))
+        if (explicitReturn) continue
+        try {
+          await queueHandoff(
+            JSON.stringify([target.id, source.id, 'callback', targetText]),
+            target,
+            targetText.slice(0, 5000),
+            async () => source,
+            { autoCallback: true }
+          )
+        } catch (error) {
+          console.warn('[room] Could not queue the handoff return callback:', error)
         }
       }
       publishProgress()
@@ -512,7 +647,6 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
         handoff.status = reply ? 'completed' : 'failed'
         handoff.response = reply || ''
         handoff.resolvedAt = new Date().toISOString()
-        onProgress?.({ type: 'group_peer_message', peerMessage: { ...handoff } })
       }
       for (const id of replies.keys()) {
         if (workers.get(id)?.exitAfterTask) completedWorkers.add(id)
@@ -549,7 +683,6 @@ async function runRoomTurn (input: NativeRoomInput): Promise<RoomMemberMessage[]
     for (const handoff of handoffs.filter(item => item.status === 'pending')) {
       handoff.status = 'failed'
       handoff.error = message
-      onProgress?.({ type: 'group_peer_message', peerMessage: { ...handoff } })
     }
     throw error
   } finally {

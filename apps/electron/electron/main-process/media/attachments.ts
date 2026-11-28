@@ -78,7 +78,7 @@ export async function readUploadedAttachmentFromBuffer (
   }
 
   if (buffer.byteLength > MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
-    throw new Error(t('mainDialog.fileTooLargeTenMb', { size: (buffer.byteLength / 1024 / 1024).toFixed(1) }))
+    throw new Error(t('mainDialog.fileTooLargeAttachment', { size: (buffer.byteLength / 1024 / 1024).toFixed(1) }))
   }
 
   if (isSupportedDocument(fileName)) {
@@ -114,6 +114,10 @@ export async function readUploadedAttachmentFromPath (filePath: string): Promise
 
   if (!stat.isFile()) {
     throw new Error(t('mainDialog.notAFile', { path: resolvedPath }))
+  }
+
+  if (stat.size > MAX_CHAT_UPLOADED_OFFICE_FILE_SIZE_BYTES) {
+    throw new Error(t('mainDialog.fileTooLargeAttachment', { size: (stat.size / 1024 / 1024).toFixed(1) }))
   }
 
   if (isSupportedDocument(resolvedPath)) {

@@ -33,6 +33,7 @@ Most agent products compete on cloud-side capability ceilings. WorldBase takes a
 - 📊 **Data analysis** — query child-project databases directly for stats and trends
 - ⚙️ **Process management** — automatic start/stop and port allocation for child projects
 - 🌐 **LAN access** — built-in LAN server exposes every project on your local network
+- 🤝 **Online groups** — discover WorldBase peers on the LAN, chat and transfer files, add your own agents, and delegate cross-user work only after the agent owner approves
 - 📱 **Three clients, one core** — Electron desktop (Windows/macOS/Linux), Flutter mobile (Android/iOS/macOS), and a Rust CLI, all driven by the same Rust agent harness
 
 ## Architecture
@@ -116,7 +117,7 @@ pnpm run test:e2e:macos   # end-to-end GUI test on macOS
 ## Documentation
 
 - [User manual](docs/user-manual.md)
-- [Harness architecture](HARNESS.md) · [Rust harness architecture](docs/rust-harness-architecture.md) · [Development guide](docs/rust-harness-development.md)
+- [Harness architecture](HARNESS.md) · [Rust harness architecture](docs/rust-harness-architecture.md) · [Online groups](docs/lan-online-groups.md) · [Development guide](docs/rust-harness-development.md)
 - More design docs in [docs/](docs/)
 
 ## Contributing

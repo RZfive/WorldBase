@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useI18n } from 'vue-i18n'
 import ConversationSidebar from '../layout/ConversationSidebar.vue'
 import ConversationOrganizeDialog from '../layout/ConversationOrganizeDialog.vue'
+import OnlineGroupsDialog from '../layout/OnlineGroupsDialog.vue'
 import { loadConversationGroupingMode, resolveTimeBucket, type SidebarProjectInfo } from '../layout/useConversationSidebarGrouping'
 import type { ConversationGroupingMode } from '../layout/ConversationSidebar.types'
 import SidebarIcon from '../layout/SidebarIcon.vue'
@@ -10,6 +11,10 @@ import MessageList from '../messages/MessageList.vue'
 import EmptyStateSuggestions from '../messages/EmptyStateSuggestions.vue'
 import ChatInput from '../layout/ChatInput.vue'
 import ChatHeader from '../layout/ChatHeader.vue'
+import GroupMembersPanel from '../layout/GroupMembersPanel.vue'
+import { countGroupMembers } from '../layout/group-members-state'
+import LocalGroupSettingsDialog from '../layout/LocalGroupSettingsDialog.vue'
+import OnlineGroupSettingsDialog from '../layout/OnlineGroupSettingsDialog.vue'
 import QuickAskPopover from '../layout/QuickAskPopover.vue'
 import { generateId } from './message-blocks'
 import WorkspacePanel from '../../workspace/WorkspacePanel.vue'
@@ -32,11 +37,14 @@ import {
   shuffleKnowledgeSuggestion
 } from './suggestion-state'
 import type { WorkSuggestion } from '../../../../shared/daily-suggestion-types.js'
+import type { AgentGroupDefinition } from '../../../../shared/agent-workspace-types.js'
 import { getRecommendedProviderTemplate } from '../../../../shared/provider-templates.js'
 import { resolveModelStrength } from '../../../../shared/reasoning-effort'
 import { IMAGE_MIME_BY_EXTENSION } from '../../../../shared/image-file-types.js'
+import { ROOM_ALL_MENTIONS, ROOM_DEFAULT_MENTIONS } from '../../../../shared/group-mentions.js'
 import type { ChatPanelEmit, ChatPanelProps, SidebarConversationItem } from './types'
 import type { AnnotationAnchor, MessageAnnotationLocator, QuickAskMode, QuickAskPopoverState } from '../types'
+import { roomLocalWorkerName } from '../../../../shared/local-agent-types.js'
 import {
   activateWorkspaceTab,
   applyWorkspaceControlToSnapshot,
@@ -60,6 +68,7 @@ import {
 } from '../../workspace/workspace-store'
 import { createWorkspaceTabId, getWorkspaceTabDefinition, type WorkspaceTabInstance } from '../../workspace/tab-registry'
 import { resolveWorkRunContext } from './work-run-context'
+import { onlineGroupCatalog, onlineGroupConversationId } from './online-group-catalog'
 import type {
   WorkspaceTabControlRequest,
   WorkspaceTabControlRequestEnvelope,
@@ -72,6 +81,13 @@ const emit = defineEmits<ChatPanelEmit>()
 const { t } = useI18n()
 
 const autoFocusedCodingDiffAt = new Map<string, number>()
+const onlineGroupsOpen = ref(false)
+const groupSettingsOpen = ref(false)
+const localGroupSettingsOpen = ref(false)
+const groupSettingsGroup = ref<AgentGroupDefinition | null>(null)
+const groupSettingsLoading = ref(false)
+const groupSettingsError = ref('')
+let groupSettingsRequest = 0
 
 const DEFAULT_APP_WINDOW_MIN_WIDTH = 800
 const CONVERSATION_SIDEBAR_WIDTH = 224
@@ -84,6 +100,8 @@ const WORKSPACE_OPEN_ANIMATION_DURATION_MS = 240
 
 const {
   activeGroupSessionId,
+  activeOnlineGroup,
+  activeOnlineGroupId,
   activeProviderId,
   activeSkillIds,
   activeTodoItems,
@@ -91,6 +109,7 @@ const {
   agentSelectorValue,
   agentSidebarItems,
   availableChannelBindings,
+  availableAgents,
   availableSkills,
   conversationsLoaded,
   conversationSidebarItems,
@@ -108,6 +127,7 @@ const {
   currentConversationId,
   targetProjectId,
   currentLongTermGoal,
+  currentGroupDefinition,
   currentPendingAuthCount,
   currentPendingAuthRequest,
   currentPendingSudoPasswordCount,
@@ -170,6 +190,19 @@ const {
   selectedModel,
   selectAllSkills,
   sendMessage,
+  availableAgentsForGroup,
+  decideOnlineGroupDelegation,
+  deleteOnlineGroup,
+  isOnlineGroupConversation,
+  leaveOnlineGroup,
+  onlineGroupIdentity,
+  onlineGroupBusy,
+  onlineGroupSending,
+  pendingOnlineGroupApprovals,
+  addOnlineGroupAgent,
+  removeOnlineGroupAgent,
+  sendOnlineGroupMessage,
+  refreshOnlineGroupCatalog,
   sendLongTermGoalMessage,
   startLongTermGoalCreation,
   longTermGoalWorkspaceActive,
@@ -217,6 +250,233 @@ const {
 // text. The first answer creates the annotation; the popover stays open as a
 // thread so the user can keep asking in 简略/详细 depth.
 const quickAskState = ref<QuickAskPopoverState | null>(null)
+const groupPendingApprovalCount = computed(() => (
+  pendingOnlineGroupApprovals.value.length + currentPendingAuthCount.value
+))
+const groupMentionNames = computed<string[]>(() => {
+  const names = new Set<string>()
+  const onlineGroup = activeOnlineGroup.value
+  if (onlineGroup) {
+    for (const member of onlineGroup.members) {
+      const name = member.kind === 'agent' ? (member.agentName || member.role) : member.peerName
+      if (name?.trim()) names.add(name.trim())
+    }
+  } else if (currentGroupDefinition.value) {
+    const group = currentGroupDefinition.value
+    for (const id of new Set([group.coordinatorAgentId, ...group.memberAgentIds].filter(Boolean))) {
+      const name = availableAgents.value.find(agent => agent.id === id)?.name
+      if (name?.trim()) names.add(name.trim())
+    }
+    for (const worker of group.localWorkers || []) names.add(roomLocalWorkerName(worker))
+  }
+  if (currentGroupDefinition.value) {
+    for (const alias of [...ROOM_ALL_MENTIONS, ...ROOM_DEFAULT_MENTIONS]) names.add(alias)
+  }
+  return [...names]
+})
+const onlineGroupUserIds = computed<string[]>(() => {
+  const state = onlineGroupCatalog.state.value
+  if (!state?.identity) return []
+  return [
+    state.identity.instanceId,
+    ...state.discovery.peers.filter(peer => peer.online).map(peer => peer.instanceId)
+  ]
+})
+const groupMembersPanelVisible = computed(() => (
+  isGroupConversation.value
+  && Boolean(currentGroupDefinition.value)
+  && !workspaceStore.visible.value
+))
+// Whether the member list is folded is a remembered preference, not a
+// per-conversation one: the title row's toggle flips it for every group.
+const GROUP_MEMBERS_COLLAPSED_STORAGE_KEY = 'chat-group-members-collapsed'
+
+function loadGroupMembersCollapsed (): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    return window.localStorage.getItem(GROUP_MEMBERS_COLLAPSED_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+const groupMembersCollapsed = ref(loadGroupMembersCollapsed())
+// Hovering the member list is what reveals its fold toggle in the title row.
+const groupMembersHovered = ref(false)
+// Headcount for that toggle; same reckoning as the member list's own heading.
+const groupMemberCount = computed(() => {
+  const group = currentGroupDefinition.value
+  if (!group) return 0
+  return countGroupMembers(group, availableAgents.value, roomLocalWorkers.value, activeOnlineGroup.value)
+})
+
+function toggleGroupMembers (): void {
+  groupMembersCollapsed.value = !groupMembersCollapsed.value
+  try {
+    window.localStorage.setItem(GROUP_MEMBERS_COLLAPSED_STORAGE_KEY, String(groupMembersCollapsed.value))
+  } catch {
+    // Ignore preference persistence failures.
+  }
+}
+const onlineGroupAvailableAgents = computed(() => (
+  isOnlineGroupConversation.value ? availableAgentsForGroup() : []
+))
+
+// The group settings drawer is out while either flavor of it is open. The
+// three-dot button in the title row toggles this, and stays lit while it is on.
+const groupSettingsDrawerOpen = computed(() => (
+  groupSettingsOpen.value || localGroupSettingsOpen.value
+))
+
+function closeGroupSettingsDrawer (): void {
+  // Cancels a load still in flight so it cannot reopen the drawer afterwards.
+  groupSettingsRequest += 1
+  groupSettingsOpen.value = false
+  localGroupSettingsOpen.value = false
+}
+
+async function openGroupSettings (): Promise<void> {
+  if (groupSettingsDrawerOpen.value) {
+    closeGroupSettingsDrawer()
+    return
+  }
+  const request = ++groupSettingsRequest
+  if (activeOnlineGroup.value) {
+    localGroupSettingsOpen.value = false
+    groupSettingsOpen.value = true
+    return
+  }
+  if (isOnlineGroupConversation.value) {
+    await refreshOnlineGroupCatalog()
+    if (request !== groupSettingsRequest) return
+    if (activeOnlineGroup.value) {
+      localGroupSettingsOpen.value = false
+      groupSettingsOpen.value = true
+      return
+    }
+  }
+
+  groupSettingsOpen.value = false
+  if (currentGroupDefinition.value) {
+    groupSettingsGroup.value = currentGroupDefinition.value
+    groupSettingsError.value = ''
+    groupSettingsLoading.value = false
+    localGroupSettingsOpen.value = true
+    return
+  }
+
+  const groupId = selectedGroupId.value
+  groupSettingsGroup.value = null
+  groupSettingsError.value = ''
+  localGroupSettingsOpen.value = true
+  if (!groupId) {
+    groupSettingsError.value = t('localGroupSettings.groupUnavailable')
+    return
+  }
+  groupSettingsLoading.value = true
+  try {
+    const group = await window.electronAPI?.getAgentGroup?.(groupId)
+    if (request !== groupSettingsRequest) return
+    if (!group) {
+      groupSettingsError.value = t('localGroupSettings.groupUnavailable')
+      return
+    }
+    groupSettingsGroup.value = group
+  } catch (error) {
+    if (request !== groupSettingsRequest) return
+    groupSettingsError.value = error instanceof Error ? error.message : String(error)
+    console.error('[group-settings] Failed to load group:', error)
+  } finally {
+    if (request === groupSettingsRequest) groupSettingsLoading.value = false
+  }
+}
+
+watch(selectedGroupId, (next) => {
+  if (!next) return
+  if (groupSettingsOpen.value) {
+    groupSettingsRequest += 1
+    groupSettingsOpen.value = false
+    return
+  }
+  if (!localGroupSettingsOpen.value || next === groupSettingsGroup.value?.id) return
+  groupSettingsRequest += 1
+  localGroupSettingsOpen.value = false
+  groupSettingsGroup.value = null
+  groupSettingsError.value = ''
+  groupSettingsLoading.value = false
+})
+
+watch(currentConversationId, (next, previous) => {
+  if (next === previous) return
+  groupSettingsRequest += 1
+  groupSettingsOpen.value = false
+  localGroupSettingsOpen.value = false
+  groupSettingsGroup.value = null
+  groupSettingsError.value = ''
+  groupSettingsLoading.value = false
+})
+
+watch(currentGroupDefinition, (group) => {
+  if (!group) return
+  if (!groupSettingsGroup.value || groupSettingsGroup.value.id === group.id) {
+    groupSettingsGroup.value = group
+  }
+})
+
+function handleLocalGroupSettingsChanged (group: AgentGroupDefinition): void {
+  groupSettingsGroup.value = group
+  groupSettingsError.value = ''
+  const localGroups = onlineGroupCatalog.localGroups.value
+  onlineGroupCatalog.localGroups.value = localGroups.some(item => item.id === group.id)
+    ? localGroups.map(item => item.id === group.id ? group : item)
+    : [...localGroups, group]
+}
+
+async function openOnlineGroupConversation (rawGroupId: string): Promise<void> {
+  const groupId = onlineGroupConversationId(rawGroupId)
+  onlineGroupsOpen.value = false
+  await refreshOnlineGroupCatalog()
+  await openGroupWorkspaceConversation(groupId)
+}
+
+async function decideOnlineDelegation (delegationId: string, approved: boolean): Promise<void> {
+  const groupId = activeOnlineGroupId.value
+  if (!groupId) return
+  await decideOnlineGroupDelegation(groupId, delegationId, approved)
+}
+
+async function addOnlineAgent (agentId: string): Promise<void> {
+  const groupId = activeOnlineGroupId.value
+  if (!groupId) return
+  await addOnlineGroupAgent(groupId, agentId)
+}
+
+async function removeOnlineAgent (memberId: string): Promise<void> {
+  const groupId = activeOnlineGroupId.value
+  if (!groupId) return
+  await removeOnlineGroupAgent(groupId, memberId)
+}
+
+async function leaveCurrentOnlineGroup (): Promise<void> {
+  const groupId = activeOnlineGroupId.value
+  const conversationId = currentConversationId.value
+  if (!groupId) return
+  groupSettingsOpen.value = false
+  await leaveOnlineGroup(groupId)
+  if (conversationId) await deleteConversation(conversationId)
+  newConversation()
+}
+
+async function deleteCurrentOnlineGroup (): Promise<void> {
+  const groupId = activeOnlineGroupId.value
+  const conversationId = currentConversationId.value
+  const name = activeOnlineGroup.value?.name || ''
+  if (!groupId || !window.confirm(t('onlineGroups.confirmDelete', { name }))) return
+  groupSettingsOpen.value = false
+  await deleteOnlineGroup(groupId)
+  if (conversationId) await deleteConversation(conversationId)
+  newConversation()
+}
 
 // The strength control renders the shared resolver's view of the active
 // model: gateway-declared levels narrowed by the user's allowed multi-pick,
@@ -1403,7 +1663,11 @@ const roomTaskDirectory = computed(() => isGroupConversation.value
   : null)
 
 function handleChatSend (): void {
-  if (isLoading.value || isUploadingFiles.value) return
+  if (isLoading.value || isUploadingFiles.value || onlineGroupSending.value) return
+  if (isOnlineGroupConversation.value) {
+    void sendOnlineGroupMessage()
+    return
+  }
 
   const runContext = resolveChatRunContext()
   const folderRoot = buildCurrentFolderWorkspaceState()?.rootPath
@@ -1794,12 +2058,14 @@ watch(
           :conversation-list-loaded="conversationsLoaded"
           :project-items="projectIndex"
           :grouping-mode="sidebarGroupingMode"
+          :show-online-groups="true"
           @new-conversation="newConversation"
           @new-long-term-goal="startLongTermGoalCreation"
           @toggle-collapse="toggleConversationSidebar"
           @select-conversation="loadConversation"
           @open-agent="openAgentWorkspaceConversation"
           @open-group="openGroupWorkspaceConversation"
+          @open-online-groups="onlineGroupsOpen = true"
           @open-long-term-goal="openLongTermGoal"
           @delete-long-term-goal="deleteLongTermGoalById"
           @delete-conversation="deleteConversation"
@@ -1887,6 +2153,53 @@ watch(
       :class="['chat-panel', { 'chat-panel-with-workspace': workspaceStore.visible.value }]"
       :style="{ '--chat-main-protected-min-width': `${MIN_CHAT_MAIN_WIDTH}px` }"
     >
+      <!--
+        Title row. It is the grid's first row, above both the conversation and
+        the group member list, so a group's title runs across the two (QQ
+        style). While the workspace is out, the row keeps to the conversation
+        column: the workspace has a tab strip of its own, and the two sit
+        side by side.
+      -->
+      <ChatHeader
+        v-if="!(currentLongTermGoal || longTermGoalWorkspaceActive)"
+        class="chat-panel-title"
+        :context-label="currentContextLabel"
+        :context-detail="currentContextDetail"
+        :available-channel-bindings="availableChannelBindings"
+        :selected-channel-binding-id="selectedChannelBindingId"
+        :providers="providers"
+        :active-provider-id="activeProviderId"
+        :selected-model="selectedModel"
+        :show-provider-selector="shouldUseConversationProviderOverride"
+        :reasoning-strength="reasoningStrength"
+        :reasoning-effort-options="activeModelReasoningEfforts"
+        :temperature="conversationTemperature"
+        :provider-default-temperature="providerDefaultTemperature"
+        :is-group-conversation="isGroupConversation"
+        :online-group-mode="isOnlineGroupConversation"
+        :pending-approval-count="groupPendingApprovalCount"
+        :group-member-count="groupMemberCount"
+        :group-members-collapsed="groupMembersCollapsed"
+        :group-members-hovered="groupMembersHovered"
+        :group-settings-open="groupSettingsDrawerOpen"
+        :show-agent-selector="!currentConversationId"
+        :available-agents="nonDefaultAgents"
+        :selected-agent-id="agentSelectorValue"
+        :coding-status="currentCodingStatus"
+        :coding-diff-file-count="currentCodingDiff?.files.length || 0"
+        :coding-loading="isLoading"
+        @update:selected-channel-binding-id="handleChannelBindingSelectionChange"
+        @select-provider-model="handleProviderModelSelectionChange"
+        @update:reasoning-strength="handleReasoningStrengthChange"
+        @update:temperature="handleTemperatureChange"
+        @update:selected-agent-id="handleAgentSelectionChange"
+        @open-coding-diff="openCodingDiff"
+        @cancel-coding="stopCurrentStream"
+        @retry-coding="retryLastUserMessage"
+        @open-group-settings="openGroupSettings"
+        @toggle-group-members="toggleGroupMembers"
+      />
+
       <div
         class="chat-main"
         :style="{ '--chat-input-card-inset': `${inputCardInset}px` }"
@@ -1930,36 +2243,6 @@ watch(
         />
 
         <template v-else>
-          <ChatHeader
-            :context-label="currentContextLabel"
-            :context-detail="currentContextDetail"
-            :available-channel-bindings="availableChannelBindings"
-            :selected-channel-binding-id="selectedChannelBindingId"
-            :providers="providers"
-            :active-provider-id="activeProviderId"
-            :selected-model="selectedModel"
-            :show-provider-selector="shouldUseConversationProviderOverride"
-            :reasoning-strength="reasoningStrength"
-            :reasoning-effort-options="activeModelReasoningEfforts"
-            :temperature="conversationTemperature"
-            :provider-default-temperature="providerDefaultTemperature"
-            :is-group-conversation="isGroupConversation"
-            :show-agent-selector="!currentConversationId"
-            :available-agents="nonDefaultAgents"
-            :selected-agent-id="agentSelectorValue"
-            :coding-status="currentCodingStatus"
-            :coding-diff-file-count="currentCodingDiff?.files.length || 0"
-            :coding-loading="isLoading"
-            @update:selected-channel-binding-id="handleChannelBindingSelectionChange"
-            @select-provider-model="handleProviderModelSelectionChange"
-            @update:reasoning-strength="handleReasoningStrengthChange"
-            @update:temperature="handleTemperatureChange"
-            @update:selected-agent-id="handleAgentSelectionChange"
-            @open-coding-diff="openCodingDiff"
-            @cancel-coding="stopCurrentStream"
-            @retry-coding="retryLastUserMessage"
-          />
-
           <div v-if="conversationDetailState === 'loading'" class="conversation-detail-state">
             <div class="conversation-detail-spinner" aria-hidden="true" />
             <span>{{ $t('chatUi.loadingConversation') }}</span>
@@ -1979,6 +2262,8 @@ watch(
             :assistant-name="currentAssistantName"
             :editing-message-id="editingMessageId"
             :group-mode="isGroupConversation"
+            :readonly="isOnlineGroupConversation"
+            :mention-names="groupMentionNames"
             @respond-auth="respondToAuthRequest"
             @respond-sudo-password="respondToSudoPasswordRequest"
             @open-link="(url) => emit('openWebLink', url)"
@@ -2054,6 +2339,7 @@ watch(
             ref="chatInputRef"
             v-model="inputText"
             :is-loading="isLoading"
+            :is-sending="onlineGroupSending"
             :pending-auth-count="currentPendingAuthCount"
             :pending-images="pendingImages"
             :pending-files="pendingFiles"
@@ -2072,6 +2358,7 @@ watch(
             :group-mention-hints="groupMentionHints"
             :room-local-workers="roomLocalWorkers"
             :is-group-conversation="isGroupConversation"
+            :online-group-mode="isOnlineGroupConversation"
             :room-task-directory="roomTaskDirectory"
             :target-project-id="targetProjectId"
             @send="handleChatSend"
@@ -2087,7 +2374,6 @@ watch(
             @select-all-skills="selectAllSkills"
             @clear-skills="clearSkills"
             @toggle-skill="toggleSkill"
-            @select-room-folder="folder => openWorkspaceTab('folder', folder)"
           />
           </div>
 
@@ -2128,7 +2414,64 @@ watch(
         </template>
       </div>
 
+      <GroupMembersPanel
+        v-if="groupMembersPanelVisible && currentGroupDefinition"
+        class="chat-panel-members"
+        :collapsed="groupMembersCollapsed"
+        :group="currentGroupDefinition"
+        :agents="availableAgents"
+        :local-workers="roomLocalWorkers"
+        :online-group="activeOnlineGroup"
+        :online-identity="onlineGroupIdentity"
+        :pending-approvals="pendingOnlineGroupApprovals"
+        :available-agents="onlineGroupAvailableAgents"
+        :busy="onlineGroupBusy || onlineGroupSending"
+        :pending-auth-count="currentPendingAuthCount"
+        :online-user-ids="onlineGroupUserIds"
+        @approve-delegation="delegationId => decideOnlineDelegation(delegationId, true)"
+        @reject-delegation="delegationId => decideOnlineDelegation(delegationId, false)"
+        @add-agent="addOnlineAgent"
+        @remove-agent="removeOnlineAgent"
+        @edit-identity="onlineGroupsOpen = true"
+        @mouseenter="groupMembersHovered = true"
+        @mouseleave="groupMembersHovered = false"
+      />
+
+      <!--
+        Group settings drawer. The slot is the grid row under the title, so
+        the drawer can slide over the conversation and the member list but
+        never over the title row. It is click-through: the chat beside the
+        drawer stays usable, and the drawer itself switches clicks back on.
+      -->
+      <div class="chat-panel-drawer-slot">
+      <OnlineGroupSettingsDialog
+        :open="groupSettingsOpen"
+        :group="activeOnlineGroup"
+        :identity="onlineGroupIdentity"
+        @close="groupSettingsOpen = false"
+        @saved="groupSettingsOpen = false"
+        @leave-group="leaveCurrentOnlineGroup"
+        @delete-group="deleteCurrentOnlineGroup"
+      />
+
+      <LocalGroupSettingsDialog
+        :open="localGroupSettingsOpen"
+        :group="groupSettingsGroup"
+        :auth-mode="currentAuthMode"
+        :workers="groupSettingsGroup?.localWorkers || roomLocalWorkers"
+        :task-directory="roomTaskDirectory"
+        :target-project-id="targetProjectId"
+        :running="isLoading"
+        :loading="groupSettingsLoading"
+        :load-error="groupSettingsError"
+        @close="localGroupSettingsOpen = false"
+        @auth-mode-change="handleAuthModeChange"
+        @changed="handleLocalGroupSettingsChanged"
+      />
+      </div>
+
       <WorkspacePanel
+        class="chat-panel-workspace"
         :visible="workspaceStore.visible.value"
         :tabs="workspaceStore.tabs.value"
         :active-tab-id="workspaceStore.activeTabId.value"
@@ -2140,6 +2483,11 @@ watch(
         @update-width="handleWorkspaceWidthUpdate"
         @insert-selection-tag="insertDocumentTag"
         @update-tab-state="handleWorkspaceTabStateUpdate"
+      />
+      <OnlineGroupsDialog
+        :open="onlineGroupsOpen"
+        @close="onlineGroupsOpen = false"
+        @open-group="openOnlineGroupConversation"
       />
     </div>
   </div>
@@ -2528,13 +2876,62 @@ watch(
   --chat-user-bubble-max: 540px;
   --chat-event-card-max: 100%;
   --chat-input-gutter: 16px;
-  display: flex;
-  flex-direction: row;
   flex: 1;
   min-width: 0;
   min-height: 0;
   position: relative;
   overflow: hidden;
+  /*
+   * Two rows over two columns, QQ-style. Row 1 is the title; row 2 holds the
+   * conversation (column 1) beside one optional side panel (column 2): the
+   * group member list, or the workspace. The side column is sized by whatever
+   * is in it and gives way first when space runs out, while the conversation
+   * keeps its protected minimum width.
+   */
+  display: grid;
+  grid-template-columns: minmax(var(--chat-main-protected-min-width, 640px), 1fr) minmax(0, auto);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+/* Title row. With no workspace in column 2 it spans the full width, over the
+   conversation *and* the member list; with one, it stays above the
+   conversation only, level with the workspace's own tab strip. */
+.chat-panel-title {
+  grid-row: 1;
+  grid-column: 1 / -1;
+}
+
+.chat-panel-with-workspace .chat-panel-title {
+  grid-column: 1;
+}
+
+.chat-panel-members {
+  grid-row: 2;
+  grid-column: 2;
+}
+
+.chat-panel-workspace {
+  grid-row: 1 / -1;
+  grid-column: 2;
+}
+
+/*
+ * Group settings drawer slot. It is the row under the title, so whatever it
+ * holds can cover the conversation and the member list but never the title
+ * row. Clicks fall through the slot to the chat (no backdrop); the drawer
+ * inside opts back in. It stays under the title row (z 12) so menus opening
+ * from the title still land above the drawer.
+ */
+.chat-panel-drawer-slot {
+  position: relative;
+  grid-row: 2;
+  grid-column: 1 / -1;
+  justify-self: end;
+  z-index: 10;
+  width: min(400px, 100%);
+  height: 100%;
+  min-height: 0;
+  pointer-events: none;
 }
 
 
@@ -2617,6 +3014,8 @@ watch(
 }
 
 .chat-main {
+  grid-row: 2;
+  grid-column: 1;
   display: flex;
   flex: 1;
   flex-direction: column;
